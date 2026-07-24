@@ -44,6 +44,15 @@
   max-height: calc(100vh - 72px);
   overflow-y: auto;
 }
+
+/* 名称/描述/类型横向排列（弹窗宽 1240px，纵向空间紧张），
+   常规视口下整个表单无需滚动；窄屏自动退回每行一个 */
+.rule-strategy-page .rule-strategy-dialog .rule-strategy-name-field {
+  display: inline-block;
+  width: min(400px, 100%);
+  margin: 0 12px 10px 0;
+  vertical-align: top;
+}
 .rule-strategy-page .sizer-param-field {
   display: grid;
   gap: 6px;
