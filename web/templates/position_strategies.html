@@ -38,13 +38,32 @@
   margin: 14px 0;
 }
 
-/* 经典居中弹窗：宽度适中（避免大屏下成一条扁带），内容超出视口时内部滚动。
-   此时弹窗自身成为滚动容器，全局的 sticky 按钮栏正好钉在弹窗可见底部，
-   保存/取消始终可见（不要覆盖回 static，否则会沉到滚动区底部）。 */
+/* 经典弹窗布局：头部 + 内容滚动区 + 固定底栏。底栏不参与滚动，
+   永远不会遮挡最后的输入框（不再依赖 sticky）。 */
 .sizer-dialog {
+  display: flex;
+  flex-direction: column;
   width: min(760px, 100%);
   max-height: calc(100vh - 72px);
+  overflow: hidden;
+}
+
+.sizer-dialog .sizer-dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+}
+
+.sizer-dialog .rule-strategy-dialog-actions {
+  position: static;  /* 覆盖全局 sticky：此处底栏是 flex 固定项 */
+  flex: 0 0 auto;
+}
+
+/* 头部关闭按钮：禁止压缩与换行 */
+.sizer-dialog .rule-strategy-dialog-head .ghost-btn {
+  flex: 0 0 auto;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .sizer-dialog .rule-strategy-name-field {
@@ -94,6 +113,7 @@
      样式因此用 sizer-dialog 类定向，不依赖 .rule-strategy-page 作用域。 -->
 <div id="strategyEditor" class="rule-strategy-modal" hidden>
   <div class="rule-strategy-dialog sizer-dialog" role="dialog" aria-modal="true" aria-labelledby="editorDialogTitle">
+    <div class="sizer-dialog-body">
       <div class="rule-strategy-dialog-head">
         <div>
           <h3 id="editorDialogTitle">新增仓位策略</h3>
@@ -113,11 +133,12 @@
       </label>
       <p id="editorTypeHint" class="context-hint"></p>
       <div id="editorParams" class="sizer-param-grid"></div>
-      <div class="rule-strategy-dialog-actions">
-        <p id="editorError" class="strategy-delete-text" hidden></p>
-        <button id="cancelEditorBtn" type="button" class="ghost-btn">取消</button>
-        <button id="saveEditorBtn" type="button">保存</button>
-      </div>
+    </div>
+    <div class="rule-strategy-dialog-actions">
+      <p id="editorError" class="strategy-delete-text" hidden></p>
+      <button id="cancelEditorBtn" type="button" class="ghost-btn">取消</button>
+      <button id="saveEditorBtn" type="button">保存</button>
+    </div>
   </div>
 </div>
 
