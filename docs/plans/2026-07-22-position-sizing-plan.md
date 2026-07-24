@@ -2,8 +2,9 @@
 
 > 日期：2026-07-22（v3 修订：2026-07-24，吸收外部 code review 意见）
 > 分支：feature/cangwei-strategy
-> 状态：方案已获用户认可（v2：统一降级机制；v3：Kelly 收益率口径、atr_at 签名、
-> 数据链路细节补全），待开发
+> 状态：方案已获用户认可并经两轮外部 code review（v2：统一降级机制；v3：
+> Kelly 净收益率口径、atr_at 签名与回溯上限、数据链路细节；v3.1：SELL trade
+> 新增 avg_cost 字段、skip reason 枚举补全），审核结论为批准开发
 
 ## 1. 背景与目标
 
@@ -41,8 +42,9 @@
     `max_pct`，不标记）
 - **降级必须用户可感知**：warn 日志 + 交易记录 `sizing.flags` + 前端交易行
   橙色徽标 + K 线买点异色标记。不能只打日志。
-- **skip（不买入）仅保留机械性失败**：连兜底仓位都买不起一手（现金不足），
-  记录 `skipped_buys`（reason `insufficient_cash`），不视为策略降级。
+- **skip（不买入）仅保留机械性失败**，reason 枚举两种：`insufficient_cash`
+  （连一手都买不起）与 `sizer_target_below_lot`（现金够买一手但仓位策略
+  target 不足一手），记录 `skipped_buys`，不视为策略降级。
 - **凯利历史口径**：同一回测 run 内、该 交易策略 × 标的 × 仓位策略 组合下
   的先前已平仓交易（回测结果不持久化，跨 run 统计不可行也无意义）。
 - **凯利首次买入全仓是刻意的**（需求 1.1 第 3 条原文确认）：虽然「信息最少时
@@ -94,8 +96,11 @@ class SizingContext:        # 引擎在买入点喂给 sizer 的全部上下文
                             # 在 all_bars 中的原始位置 idx（过滤后未 reset index，
                             # 与 ValueResolver.atr_value_at(idx, period) 对齐），
                             # lookback>0 表示向前回溯 N 根；越界/预热期返回 None
-                            # （_value_at 对 idx<0 返回 None，天然安全）
-    closed_trades: list[dict]  # 本 run 内已平仓 SELL 交易（含 pnl/qty/avg_cost）
+                            # （_value_at 对 idx<0 返回 None，天然安全）。
+                            # 注：Callable 标注表达不了 lookback=0 的默认值，
+                            # 实现时用 Protocol 精确声明（含默认参）
+    closed_trades: list[dict]  # 本 run 内已平仓 SELL 交易（含 pnl/qty/avg_cost；
+                            # avg_cost 为本次配套新增的 SELL trade 字段，见 3.3）
     execution: BacktestExecutionConfig
 
 @dataclass
@@ -178,11 +183,20 @@ class PositionSizer(ABC):
 
 - `RuleBacktestRequest` 新增可选字段 `sizer: PositionSizer | None = None`；
   **为 None 时走现有全仓路径，逐字节保护 P1.3 golden 测试**。
+- **SELL trade dict 新增 `avg_cost` 字段**（卖出时的持仓成本价，现有 trade
+  dict 只有 qty/pnl/net_proceeds 等，无此字段——Kelly 的
+  `ret_i = pnl_i / (qty_i × avg_cost_i)` 依赖它）：`_execute_sell` 已接收
+  `avg_cost` 参数，仅需透传出队。纯增量改动，golden 测试比较的是 memoized
+  vs legacy 两条路径、两边同时变，bit-identical 不受影响；前端交易明细还可
+  顺带展示成本价。
 - 买入点流程：`affordable_qty = _max_buy_qty(...)`（现有逻辑不变）→
   `decision = sizer.decide(ctx)` → `qty = min(affordable, lot 对齐后的
   target)`：
   - `action="skip"` 或 qty = 0 → 记入结果新字段 `skipped_buys:
-    [{date, reason, note, close}]`，不成交；
+    [{date, reason, note, close}]`，不成交。**skip 的 reason 枚举**：
+    `insufficient_cash`（连一手都买不起）与 `sizer_target_below_lot`
+    （现金够买一手，但仓位策略算出的 target 不足一手，如风险预算只够
+    50 股 < lot 100）——两种成因分开标注，前端灰色行的原因列才能准确；
   - 成交 → trade dict 新增 `sizing: {sizer_id, sizer_type, position_pct
     （实际投入/权益）, flags, note}`。
 - 凯利上下文：`ctx.closed_trades` 传引擎内 trades 中的 SELL 记录（天然满足
