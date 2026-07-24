@@ -38,23 +38,21 @@
   margin: 14px 0;
 }
 
-/* 弹窗整体限制在视口内（modal padding 36px×2），内容超出时内部滚动。
+/* 经典居中弹窗：宽度适中（避免大屏下成一条扁带），内容超出视口时内部滚动。
    此时弹窗自身成为滚动容器，全局的 sticky 按钮栏正好钉在弹窗可见底部，
-   保存/取消始终可见（不要覆盖回 static，否则会沉到滚动区底部）。
-   大屏下加宽弹窗，与页面比例协调（策略管理页弹窗维持 1240px 不变）。 */
+   保存/取消始终可见（不要覆盖回 static，否则会沉到滚动区底部）。 */
 .sizer-dialog {
-  width: min(1500px, 100%);
+  width: min(760px, 100%);
   max-height: calc(100vh - 72px);
   overflow-y: auto;
 }
 
-/* 名称/描述/类型横向排列（弹窗宽 1240px，纵向空间紧张），
-   常规视口下整个表单无需滚动；窄屏自动退回每行一个 */
 .sizer-dialog .rule-strategy-name-field {
-  display: inline-block;
-  width: min(400px, 100%);
-  margin: 0 12px 10px 0;
-  vertical-align: top;
+  width: 100%;
+}
+
+.sizer-dialog .sizer-param-grid {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
 }
 .sizer-dialog .sizer-param-field {
   display: grid;
