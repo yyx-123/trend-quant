@@ -7,7 +7,7 @@ set -e
 # 运行方式：sudo bash scripts/deploy.sh
 # =============================================================================
 
-REPO_URL="https://github.com/yaoyx0518/trend-quant.git"
+REPO_URL="https://github.com/yyx-123/trend-quant.git"
 INSTALL_DIR="/opt/trend-quant"
 # 如果有域名，请修改下一行，例如：DOMAIN="quant.yourdomain.com"
 DOMAIN=""

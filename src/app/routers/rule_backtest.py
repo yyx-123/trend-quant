@@ -31,7 +31,7 @@ class RuleBacktestRunRequest(BaseModel):
     symbol: str
     start_date: str = Field(default="")
     end_date: str = Field(default="")
-    initial_capital: float = Field(default=1_000_000)
+    initial_capital: float = Field(default=100_000)
     slippage: float = Field(default=0.002)
     fee_rate: float = Field(default=DEFAULT_FEE_RATE)
     fee_min: float = Field(default=5.0)
@@ -87,7 +87,13 @@ async def get_rule_backtest_meta() -> dict:
         "position_strategies": service.list_position_strategies(),
         "sizer_types": service.list_sizer_types(),
         # Frontend form defaults (single source — JS must not hardcode these).
-        "state_values": ["entry_price", "hard_stop", "highest_high_since_entry", "chandelier_stop"],
+        "state_values": [
+            "entry_price",
+            "hard_stop",
+            "highest_high_since_entry",
+            "chandelier_stop",
+            "days_since_last_exit",
+        ],
         "stop_defaults": {
             "hard_stop": {"atr_period": 20, "atr_mul": 1.5},
             "chandelier_stop": {"atr_period": 20, "atr_mul": 2.5},

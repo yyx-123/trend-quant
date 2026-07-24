@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.instrument_display import format_symbol_display, load_instrument_name_map, strip_etf_suffix
-from core.calendar import is_realtime_available, previous_trading_day
+from core.calendar import is_past_market_open, previous_trading_day
 from core.symbols import normalize_symbol
 from data.intraday_service import compute_intraday_trend_score
 from data.service import DataService
@@ -300,27 +300,40 @@ async def get_market_daily(
     payload["meta"]["is_intraday"] = False
 
     # --- Intraday overlay -------------------------------------------------
-    # Gate on is_realtime_available (not is_trading_time) so the midday
-    # lunch break still serves an intraday snapshot from live quotes.
-    if intraday and is_realtime_available():
+    # Gate on is_past_market_open: on a trading day at/past the 9:30 open,
+    # today's bar must be present. If the daily write job (default 16:30)
+    # has already persisted it, the DB data is used as-is; otherwise a
+    # synthetic bar is built from live quotes — this also covers the
+    # post-close window before the write job runs.
+    if intraday and is_past_market_open() and (not end_date.strip() or end_ts.date() >= datetime.now().date()):
         try:
-            data_service = DataService()
-            quote = data_service.fetch_latest_quote(normalized_symbol)
-            if quote and quote.get("price") is not None:
-                hist = db.load_market_data(normalized_symbol, price_mode="qfq")
-                if not hist.empty:
-                    hist["time"] = pd.to_datetime(hist["time"], errors="coerce")
-                    hist = hist.dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time").reset_index(drop=True)
-                    for col in ("open", "high", "low", "close", "volume", "amount"):
-                        if col in hist.columns:
-                            hist[col] = pd.to_numeric(hist[col], errors="coerce")
+            hist = db.load_market_data(normalized_symbol, price_mode="qfq")
+            if not hist.empty:
+                hist["time"] = pd.to_datetime(hist["time"], errors="coerce")
+                hist = hist.dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time").reset_index(drop=True)
+                for col in ("open", "high", "low", "close", "volume", "amount"):
+                    if col in hist.columns:
+                        hist[col] = pd.to_numeric(hist[col], errors="coerce")
 
+            if not hist.empty and hist["time"].iloc[-1].date() >= datetime.now().date():
+                # Today's bar is already persisted — nothing to overlay.
+                pass
+            elif not hist.empty:
+                data_service = DataService()
+                quote = data_service.fetch_latest_quote(normalized_symbol)
+                if quote and quote.get("price") is not None:
                     intraday_result = compute_intraday_trend_score(hist, quote, trend_cfg)
                     if intraday_result.get("ok"):
                         # Append the intraday synthetic candle to the chart data.
                         from data.intraday_service import build_synthetic_bar
                         prev_vol = safe_float(hist["volume"].iloc[-1], 0.0) if len(hist) > 0 else 0.0
                         synth = build_synthetic_bar(quote, prev_vol)
+                        # Prefer the quote's own volume (post-close it is the
+                        # full-day actual); fall back to the previous-day
+                        # approximation while the session is still running.
+                        quote_vol = safe_float(quote.get("volume"), 0.0)
+                        if quote_vol > 0:
+                            synth["volume"] = quote_vol
                         synth_time = datetime.now()
                         payload["dates"].append(_date_only(synth_time))
                         payload["candles"].append([

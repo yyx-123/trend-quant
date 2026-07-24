@@ -11,6 +11,10 @@ venv/
 .vscode/
 .idea/
 
+# Secrets
+.env
+.env.*
+
 # Runtime data
 logs/
 logs/*.log

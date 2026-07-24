@@ -49,7 +49,9 @@ class ValueResolver:
             return value, {"type": "literal", "value": value} if debug else {}
 
         if spec_type == "state_value":
-            return self._resolve_state_value(spec=spec, position=position, debug=debug)
+            return self._resolve_state_value(
+                spec=spec, position=position, bar_idx=len(bars) - 1, debug=debug
+            )
 
         if spec_type == "indicator":
             return self._resolve_indicator(spec=spec, bars=bars, debug=debug)
@@ -60,6 +62,7 @@ class ValueResolver:
         self,
         spec: dict,
         position: PositionState,
+        bar_idx: int,
         debug: bool,
     ) -> tuple[float | None, dict]:
         name = str(spec.get("name", "")).strip()
@@ -72,6 +75,13 @@ class ValueResolver:
             value = position.highest_high_since_entry if position.is_open else None
         elif name == "chandelier_stop":
             value = position.chandelier_stop if position.is_open else None
+        elif name == "days_since_last_exit":
+            # 离场冷却期：空仓也可解析（区别于上面四个持仓期状态值）。
+            # 从未卖出 → None；condition_engine 对 `>=` 特判为通过
+            # （首次入场不受冷却限制）。bar_idx 与 last_exit_bar_idx 同
+            # 为 all_bars 坐标系，卖出当天差值为 0。
+            if position.last_exit_bar_idx is not None:
+                value = float(bar_idx - position.last_exit_bar_idx)
         trace = {"type": "state_value", "name": name, "value": value}
         return value, trace if debug else {}
 

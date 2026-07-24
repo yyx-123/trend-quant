@@ -17,6 +17,7 @@ dependencies = [
   "httpx>=0.28.0",
   "tickflow[all]==0.1.24",
   "chinese_calendar>=1.10.0",
+  "python-dotenv>=1.0.0",
   "mcp>=1.0.0"
 ]
 

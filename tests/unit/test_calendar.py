@@ -95,6 +95,37 @@ class TestIsRealtimeAvailable:
         assert is_realtime_available(dt) is False
 
 
+class TestIsPastMarketOpen:
+    @pytest.mark.parametrize("hour,minute,expected", [
+        (9, 29, False),    # before market open
+        (9, 30, True),     # morning start
+        (10, 0, True),     # morning middle
+        (11, 30, True),    # morning end
+        (12, 0, True),     # lunch break
+        (13, 0, True),     # afternoon start
+        (15, 0, True),     # close
+        (15, 1, True),     # after close — still True (key difference from is_realtime_available)
+        (16, 30, True),    # daily write job time
+        (23, 59, True),    # late night, still the same trading day
+    ])
+    def test_past_open_hours(
+        self, monkeypatch: pytest.MonkeyPatch, hour: int, minute: int, expected: bool
+    ) -> None:
+        monkeypatch.setattr("core.calendar.is_workday", lambda d: True)
+        from core.calendar import is_past_market_open
+
+        dt = datetime(2025, 8, 11, hour, minute, 0)  # Monday
+        assert is_past_market_open(dt) == expected, f"Failed at {hour:02d}:{minute:02d}"
+
+    def test_non_trading_day_not_past_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Weekend / holiday → False even after 9:30."""
+        monkeypatch.setattr("core.calendar.is_workday", lambda d: False)
+        from core.calendar import is_past_market_open
+
+        assert is_past_market_open(datetime(2025, 8, 9, 10, 0, 0)) is False  # Saturday
+        assert is_past_market_open(datetime(2025, 8, 9, 16, 0, 0)) is False
+
+
 class TestPreviousTradingDay:
     def test_saturday_returns_friday(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """previous_trading_day(Saturday) → Friday."""

@@ -183,6 +183,35 @@ def _annual_sharpe_map(daily_nav: list[dict]) -> dict[int, float]:
     return out
 
 
+def _annual_max_drawdown_map(daily_nav: list[dict]) -> dict[int, float]:
+    """每个自然年内的最大回撤（含上一年末净值作为回撤基准起点）。"""
+    if not daily_nav:
+        return {}
+    df = pd.DataFrame(daily_nav)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["equity"] = pd.to_numeric(df["equity"], errors="coerce")
+    df = df.dropna(subset=["date", "equity"]).sort_values("date")
+    if df.empty:
+        return {}
+    df["year"] = df["date"].dt.year
+
+    out: dict[int, float] = {}
+    prev = float(df["equity"].iloc[0])
+    for year, group in df.groupby("year"):
+        series = pd.concat([pd.Series([prev]), group["equity"]], ignore_index=True)
+        rolling_max = series.cummax().replace(0, np.nan)
+        dd = (series / rolling_max - 1.0).fillna(0.0)
+        out[int(year)] = float(dd.min())
+        prev = float(group["equity"].iloc[-1])
+    return out
+
+
+def _annual_calmar(return_value: float | None, max_drawdown: float | None) -> float | None:
+    if return_value is None or max_drawdown is None:
+        return None
+    return float(return_value / abs(max_drawdown)) if max_drawdown < 0 else 0.0
+
+
 def _parse_trade_year(value: object) -> int | None:
     text = str(value or "").strip()
     if len(text) >= 4 and text[:4].isdigit():
@@ -232,33 +261,45 @@ def compute_annual_returns(
 ) -> list[dict]:
     """年度收益表数据，字段与组合回测页一致。
 
-    每行包含: year / return / sharpe / trade_count / win_rate / profit_factor，
-    若提供基准净值则附带 benchmark_return / benchmark_sharpe。
+    每行包含: year / return / sharpe / max_drawdown / calmar /
+    trade_count / win_rate / profit_factor，
+    若提供基准净值则附带 benchmark_return / benchmark_sharpe /
+    benchmark_max_drawdown / benchmark_calmar。
     """
     strategy_rows = annual_returns(daily_nav)
     if not strategy_rows:
         return []
 
     strategy_sharpe = _annual_sharpe_map(daily_nav)
+    strategy_mdd = _annual_max_drawdown_map(daily_nav)
     trade_stats = _annual_trade_stats_map(trades or [])
     benchmark_rows = annual_returns(benchmark_daily_nav or [])
     benchmark_return_map = {int(r["year"]): float(r["return"]) for r in benchmark_rows}
     benchmark_sharpe_map = _annual_sharpe_map(benchmark_daily_nav or [])
+    benchmark_mdd_map = _annual_max_drawdown_map(benchmark_daily_nav or [])
 
     out: list[dict] = []
     for row in strategy_rows:
         year = int(row["year"])
+        year_return = float(row["return"])
+        year_mdd = float(strategy_mdd.get(year, 0.0))
+        bench_return = benchmark_return_map.get(year)
+        bench_mdd = benchmark_mdd_map.get(year)
         tstats = trade_stats.get(year, {})
         out.append(
             {
                 "year": year,
-                "return": float(row["return"]),
+                "return": year_return,
                 "sharpe": float(strategy_sharpe.get(year, 0.0)),
+                "max_drawdown": year_mdd,
+                "calmar": _annual_calmar(year_return, year_mdd),
                 "trade_count": int(tstats.get("trade_count", 0)),
                 "win_rate": float(tstats.get("win_rate", 0.0)),
                 "profit_factor": float(tstats.get("profit_factor", 0.0)),
-                "benchmark_return": benchmark_return_map.get(year),
+                "benchmark_return": bench_return,
                 "benchmark_sharpe": benchmark_sharpe_map.get(year),
+                "benchmark_max_drawdown": bench_mdd,
+                "benchmark_calmar": _annual_calmar(bench_return, bench_mdd),
             }
         )
     return out

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -164,7 +164,7 @@ class FakeMarketViewDb:
         self.symbols = symbols or ["518850.SS"]
         self.metadata_map = metadata_map or {}
 
-    def load_market_data(self, symbol: str) -> pd.DataFrame:
+    def load_market_data(self, symbol: str, price_mode: str = "qfq") -> pd.DataFrame:
         return self.df.copy()
 
     def get_instrument_metadata(self, symbol: str) -> dict | None:
@@ -225,6 +225,142 @@ class MarketViewApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["meta"]["rsi_config"]["period"], 7)
         self.assertEqual(payload["indicators"]["rsi"]["period"], 7)
         self.assertEqual(len(payload["indicators"]["rsi"]["series"]), len(df))
+
+
+def _daily_bars_ending(end_day: date, rows: int = 80) -> pd.DataFrame:
+    """Sample bars whose last row falls on *end_day*."""
+    start = end_day - timedelta(days=rows - 1)
+    items = []
+    price = 1.0
+    for idx in range(rows):
+        day = start + timedelta(days=idx)
+        price += 0.01
+        open_price = price
+        close_price = price + (0.01 if idx % 2 == 0 else -0.004)
+        items.append(
+            {
+                "time": day.isoformat(),
+                "open": open_price,
+                "high": max(open_price, close_price) + 0.02,
+                "low": min(open_price, close_price) - 0.02,
+                "close": close_price,
+                "volume": 100000 + idx * 1000,
+                "amount": 200000 + idx * 1200,
+            }
+        )
+    return pd.DataFrame(items)
+
+
+FAKE_QUOTE = {
+    "symbol": "518850.SS",
+    "name": "Gold",
+    "price": 2.0,
+    "open": 1.9,
+    "high": 2.1,
+    "low": 1.8,
+    "volume": 500000,
+    "amount": 1000000,
+    "ts": "2026-07-22T15:00:00",
+}
+
+FAKE_INTRADAY_RESULT = {
+    "ok": True,
+    "trend_score": 1.23,
+    "price_direction": 1,
+    "confidence": 0.5,
+    "atr": 0.1,
+    "price": 2.0,
+    "ma_mid": 1.9,
+    "calc_details": {},
+}
+
+
+class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
+    """Overlay gating for GET /market-view/api/daily?intraday=true.
+
+    Rules under test:
+      1. Not a trading day / before 9:30 -> no overlay.
+      2. Trading day past 9:30 and DB lacks today's bar -> synthesize one
+         from live quotes (covers the post-close window before the 16:30
+         write job persists today's bar).
+      3. Trading day past 9:30 but DB already has today's bar -> use the
+         DB data as-is; no quote fetch at all.
+    """
+
+    async def _call_daily(self, df: pd.DataFrame, *, past_open: bool, quote=FAKE_QUOTE):
+        fake_db = FakeMarketViewDb(df)
+        with (
+            patch.object(market_view, "get_db", return_value=fake_db),
+            patch.object(market_view, "is_past_market_open", return_value=past_open),
+            patch.object(market_view, "DataService") as mock_ds_cls,
+            patch.object(
+                market_view, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT
+            ),
+        ):
+            if isinstance(quote, Exception):
+                mock_ds_cls.return_value.fetch_latest_quote.side_effect = quote
+            else:
+                mock_ds_cls.return_value.fetch_latest_quote.return_value = quote
+            payload = await market_view.get_market_daily(
+                symbol="518850.SS",
+                start_date="",
+                end_date="",
+                limit=market_view.DEFAULT_LIMIT,
+                trend_n_short=None,
+                trend_n_mid=None,
+                trend_n_long=None,
+                trend_atr_period=None,
+                rsi_period=14,
+                intraday=True,
+            )
+        return payload, mock_ds_cls
+
+    async def test_before_open_no_overlay(self) -> None:
+        """Rule 1: not past market open -> plain EOD data, no quote fetch."""
+        df = _daily_bars_ending(date.today() - timedelta(days=1))
+
+        payload, mock_ds_cls = await self._call_daily(df, past_open=False)
+
+        self.assertFalse(payload["meta"]["is_intraday"])
+        self.assertEqual(len(payload["dates"]), len(df))
+        mock_ds_cls.assert_not_called()
+
+    async def test_past_open_missing_today_appends_synthetic_bar(self) -> None:
+        """Rule 2 (intraday or post-close pre-write): DB lacks today's bar
+        -> append a synthetic one from the live quote."""
+        df = _daily_bars_ending(date.today() - timedelta(days=1))
+
+        payload, mock_ds_cls = await self._call_daily(df, past_open=True)
+
+        self.assertTrue(payload["meta"]["is_intraday"])
+        self.assertEqual(len(payload["dates"]), len(df) + 1)
+        self.assertEqual(payload["dates"][-1], date.today().isoformat())
+        self.assertEqual(len(payload["candles"]), len(df) + 1)
+        # The quote's own volume is preferred over the prev-day approximation.
+        self.assertEqual(payload["volumes"][-1], FAKE_QUOTE["volume"])
+        self.assertIn("trend_intraday", payload["indicators"])
+        mock_ds_cls.return_value.fetch_latest_quote.assert_called_once()
+
+    async def test_past_open_db_already_has_today_no_overlay(self) -> None:
+        """Rule 3: DB already contains today's bar (write job done) -> no
+        overlay, no quote fetch."""
+        df = _daily_bars_ending(date.today())
+
+        payload, mock_ds_cls = await self._call_daily(df, past_open=True)
+
+        self.assertFalse(payload["meta"]["is_intraday"])
+        self.assertEqual(len(payload["dates"]), len(df))
+        self.assertEqual(payload["dates"][-1], date.today().isoformat())
+        mock_ds_cls.assert_not_called()
+
+    async def test_quote_failure_falls_back_to_eod(self) -> None:
+        """Quote fetch error -> silent fallback to plain EOD data."""
+        df = _daily_bars_ending(date.today() - timedelta(days=1))
+
+        payload, mock_ds_cls = await self._call_daily(df, past_open=True, quote=RuntimeError("boom"))
+
+        self.assertFalse(payload["meta"]["is_intraday"])
+        self.assertEqual(len(payload["dates"]), len(df))
 
 
 if __name__ == "__main__":

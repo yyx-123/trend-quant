@@ -104,8 +104,9 @@ class TestComputeAnnualReturns:
         result = compute_annual_returns(nav, trades=trades)
         assert len(result) >= 1
         row = result[0]
-        for key in ("year", "return", "sharpe", "trade_count",
-                    "win_rate", "profit_factor", "benchmark_return", "benchmark_sharpe"):
+        for key in ("year", "return", "sharpe", "max_drawdown", "calmar", "trade_count",
+                    "win_rate", "profit_factor", "benchmark_return", "benchmark_sharpe",
+                    "benchmark_max_drawdown", "benchmark_calmar"):
             assert key in row
         # 只有 SELL 计入交易统计
         assert row["trade_count"] == 2
@@ -114,6 +115,8 @@ class TestComputeAnnualReturns:
         # 未传基准时基准字段为 None
         assert row["benchmark_return"] is None
         assert row["benchmark_sharpe"] is None
+        assert row["benchmark_max_drawdown"] is None
+        assert row["benchmark_calmar"] is None
 
     def test_benchmark_fields_when_provided(self) -> None:
         nav = _make_nav([100_000 + i * 400 for i in range(90)])
@@ -123,5 +126,22 @@ class TestComputeAnnualReturns:
         row = result[0]
         assert row["benchmark_return"] is not None
         assert row["benchmark_sharpe"] is not None
+        assert row["benchmark_max_drawdown"] is not None
+        assert row["benchmark_calmar"] is not None
         # 策略净值增长快于基准，收益应高于基准
         assert row["return"] > row["benchmark_return"]
+
+    def test_max_drawdown_and_calmar(self) -> None:
+        # 先涨后跌：100 -> 120 -> 90，年内最大回撤 (90/120 - 1) = -25%
+        nav = _make_nav([100_000, 120_000, 90_000])
+        result = compute_annual_returns(nav)
+        assert len(result) == 1
+        row = result[0]
+        assert row["max_drawdown"] == pytest.approx(-0.25)
+        # 全年收益 -10%，卡玛比 = -0.10 / 0.25 = -0.4
+        assert row["return"] == pytest.approx(-0.10)
+        assert row["calmar"] == pytest.approx(-0.4)
+        # 无回撤时卡玛比为 0
+        up_only = compute_annual_returns(_make_nav([100_000, 110_000, 120_000]))
+        assert up_only[0]["max_drawdown"] == pytest.approx(0.0)
+        assert up_only[0]["calmar"] == pytest.approx(0.0)

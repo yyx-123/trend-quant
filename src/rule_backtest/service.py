@@ -122,7 +122,7 @@ class RuleBacktestService:
             instrument_type = self._resolve_instrument_type(symbol)
 
         execution = BacktestExecutionConfig(
-            initial_capital=float(payload.get("initial_capital", 1_000_000.0) or 1_000_000.0),
+            initial_capital=float(payload.get("initial_capital", 100_000.0) or 100_000.0),
             fee_rate=float(payload.get("fee_rate", DEFAULT_FEE_RATE) or DEFAULT_FEE_RATE),
             fee_min=float(payload.get("fee_min", 5.0) or 5.0),
             slippage=float(payload.get("slippage", 0.002) or 0.002),

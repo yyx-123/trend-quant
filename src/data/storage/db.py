@@ -205,6 +205,30 @@ class Database:
                     PRIMARY KEY (symbol, time, param_set)
                 );
 
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS manual_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    symbol TEXT NOT NULL,
+                    buy_date TEXT NOT NULL,
+                    buy_price REAL NOT NULL,
+                    shares REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    sell_date TEXT,
+                    sell_price REAL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_trades_user_status
+                    ON manual_trades(user_id, status, id);
+
                 """
             )
 
@@ -701,6 +725,103 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute(f"DELETE FROM {table}")
             return int(cur.rowcount or 0)
+
+    # ------------------------------------------------------------------
+    # users（手工交易记录的用户体系，密码明文存储 — 内部小工具口径）
+    # ------------------------------------------------------------------
+    def create_user(self, username: str, password: str, is_admin: bool = False) -> dict:
+        username = str(username).strip()
+        if not username:
+            raise ValueError("username is required")
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO users (username, password, is_admin) VALUES (?, ?, ?)",
+                (username, str(password), 1 if is_admin else 0),
+            )
+            user_id = int(cur.lastrowid or 0)
+        user = self.get_user(user_id)
+        if user is None:
+            raise RuntimeError(f"failed to create user: {username}")
+        return user
+
+    def get_user(self, user_id: int) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE id = ?", (int(user_id),)
+            ).fetchone()
+        return self._user_row(row) if row else None
+
+    def get_user_by_username(self, username: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE username = ?", (str(username).strip(),)
+            ).fetchone()
+        return self._user_row(row) if row else None
+
+    def list_users(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
+        return [self._user_row(row) for row in rows]
+
+    @staticmethod
+    def _user_row(row: sqlite3.Row) -> dict:
+        d = dict(row)
+        d["is_admin"] = bool(d.get("is_admin"))
+        return d
+
+    # ------------------------------------------------------------------
+    # manual_trades（手工交易记录：同一标的多次买入 = 多条独立记录）
+    # ------------------------------------------------------------------
+    def create_manual_trade(
+        self,
+        user_id: int,
+        symbol: str,
+        buy_date: str,
+        buy_price: float,
+        shares: float,
+    ) -> dict:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO manual_trades (user_id, symbol, buy_date, buy_price, shares)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (int(user_id), str(symbol), str(buy_date), float(buy_price), float(shares)),
+            )
+            trade_id = int(cur.lastrowid or 0)
+        trade = self.get_manual_trade(trade_id)
+        if trade is None:
+            raise RuntimeError("failed to create manual trade")
+        return trade
+
+    def get_manual_trade(self, trade_id: int) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM manual_trades WHERE id = ?", (int(trade_id),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_manual_trades(self, user_id: int) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM manual_trades WHERE user_id = ? ORDER BY id",
+                (int(user_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def close_manual_trade(
+        self, trade_id: int, sell_date: str, sell_price: float
+    ) -> dict | None:
+        """open → closed；已清仓或不存在时返回 None（幂等防重）。"""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE manual_trades
+                   SET status = 'closed', sell_date = ?, sell_price = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND status = 'open'""",
+                (str(sell_date), float(sell_price), int(trade_id)),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_manual_trade(trade_id)
 
     # ------------------------------------------------------------------
     # job_runs

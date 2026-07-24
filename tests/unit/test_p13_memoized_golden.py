@@ -56,6 +56,8 @@ INDICATOR_STRATEGIES = {
     "trend_sma": _condition("trend_score_sma", {"period": 5}, ">=", {"type": "literal", "value": 5}),
     "trend_ema": _condition("trend_score_ema", {"period": 5}, ">=", {"type": "literal", "value": 5}),
     "bias_atr": _condition("bias_atr_normed", {}, ">=", {"type": "literal", "value": 1.0}),
+    "macd_cross": _condition("macd_line", {}, "cross_above", {"type": "indicator", "name": "macd_signal", "params": {}}),
+    "price_cross_sma": _price_condition("cross_above", {"type": "indicator", "name": "sma", "params": {"period": 20}}),
 }
 
 

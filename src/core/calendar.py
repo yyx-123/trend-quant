@@ -88,6 +88,23 @@ def is_realtime_available(dt: datetime | None = None) -> bool:
     return _MORNING_START <= t <= _AFTERNOON_END
 
 
+def is_past_market_open(dt: datetime | None = None) -> bool:
+    """Return True if *dt* is a trading day at or past the 9:30 open.
+
+    Unlike ``is_realtime_available`` this has no 15:00 upper bound — it
+    stays True after the close, which is exactly the window where the
+    daily-bar write job may not have persisted today's bar yet and an
+    intraday snapshot must be synthesized from live quotes.
+
+    Use this to gate "today's bar must be present" overlays; keep using
+    ``is_realtime_available`` where only live-session quotes matter.
+    """
+    now = dt or datetime.now()
+    if not is_trading_day(now.date()):
+        return False
+    return now.time() >= _MORNING_START
+
+
 def previous_trading_day(day: date | None = None) -> date:
     """Return the most recent trading day on or before *day*.
 

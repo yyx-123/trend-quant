@@ -27,10 +27,8 @@ from core.display import format_symbol_display
 from core.display import load_instrument_name_map as _config_name_map
 from services.market_indicators import compute_market_indicators, trend_config as _trend_config
 from services.dashboard import RevisionCache, build_subject_dashboard_payload
-from core.calendar import is_realtime_available, is_trading_day
+from core.calendar import is_past_market_open, is_realtime_available, is_trading_day
 from core.symbols import normalize_symbol as _normalize_symbol
-from core.strategy_config import get_strategy_config
-from data.indicator_store import get_series
 from data.intraday_service import (
     build_intraday_dashboard,
     build_synthetic_bar,
@@ -38,8 +36,8 @@ from data.intraday_service import (
 )
 from data.service import DataService
 from data.storage.db import get_db
-from core.indicators import atr
 from core.trend import safe_float
+from services.stop_loss import StopLossError, compute_stop_loss
 
 # ---------------------------------------------------------------------------
 # Server instance
@@ -56,10 +54,6 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _load_strategy_config() -> dict:
-    return get_strategy_config()
-
 
 def _load_instruments_raw() -> list[dict]:
     import sqlite3
@@ -205,9 +199,10 @@ def symbol_detail(symbol: str, days: int = 60, rsi_period: int = 14, intraday: b
         days: 返回最近多少天的数据，默认 60
         rsi_period: RSI 计算周期，默认 14
         intraday: 是否叠加当天实时数据，默认 False。
-            仅交易日 9:30-15:00（含午间休盘）生效：追加一根由实时报价
-            合成的当日K线，并在 indicators.trend_intraday 中返回盘中
-            趋势值快照；非交易时段或实时行情获取失败时静默回退为日K数据。
+            交易日 9:30 之后生效（含午间休盘及收盘后）：若当日K线尚未
+            写入本地库，则追加一根由实时报价合成的当日K线，并在
+            indicators.trend_intraday 中返回盘中趋势值快照；当日K线已
+            入库、非交易时段或实时行情获取失败时静默回退为日K数据。
 
     Returns:
         包含 dates、candles(OHLC)、volumes、indicators 的完整数据。
@@ -277,42 +272,49 @@ def symbol_detail(symbol: str, days: int = 60, rsi_period: int = 14, intraday: b
     payload["meta"]["is_intraday"] = False
 
     # --- Intraday overlay (synthetic bar from live quotes) ----------------
-    # Gate on is_realtime_available (not is_trading_time) so the midday
-    # lunch break still serves an intraday snapshot from live quotes.
-    if intraday and is_realtime_available():
+    # Gate on is_past_market_open: on a trading day at/past the 9:30 open,
+    # today's bar must be present. If the daily write job has already
+    # persisted it, the DB data is used as-is; otherwise synthesize one
+    # from live quotes — this also covers the post-close window before
+    # the write job runs.
+    if intraday and is_past_market_open():
         try:
-            quote = DataService().fetch_latest_quote(symbol)
-            if quote and quote.get("price") is not None:
-                # Intraday trend uses FULL history (same ruler as EOD), not
-                # the display-truncated window (kimi review §3.3).
-                hist = full_df.copy()
-                hist["time"] = pd.to_datetime(hist["time"], errors="coerce")
-                hist = (
-                    hist.dropna(subset=["time", "open", "high", "low", "close"])
-                    .sort_values("time")
-                    .reset_index(drop=True)
-                )
-                intraday_result = compute_intraday_trend_score(hist, quote, trend_cfg)
-                if intraday_result.get("ok"):
-                    prev_vol = safe_float(hist["volume"].iloc[-1], 0.0) if len(hist) > 0 else 0.0
-                    synth = build_synthetic_bar(quote, prev_vol)
-                    payload["dates"].append(str(datetime.now().date()))
-                    payload["candles"]["open"].append(round(float(synth["open"]), 4))
-                    payload["candles"]["high"].append(round(float(synth["high"]), 4))
-                    payload["candles"]["low"].append(round(float(synth["low"]), 4))
-                    payload["candles"]["close"].append(round(float(synth["close"]), 4))
-                    payload["volumes"].append(int(synth["volume"]))
-                    payload["indicators"]["trend_intraday"] = {
-                        "score": intraday_result["trend_score"],
-                        "price_direction": intraday_result["price_direction"],
-                        "confidence": intraday_result["confidence"],
-                        "atr": intraday_result["atr"],
-                        "price": intraday_result["price"],
-                        "ma_mid": intraday_result["ma_mid"],
-                        "calc_details": intraday_result.get("calc_details", {}),
-                    }
-                    payload["meta"]["is_intraday"] = True
-                    payload["meta"]["intraday_ts"] = datetime.now().isoformat()
+            # Intraday trend uses FULL history (same ruler as EOD), not
+            # the display-truncated window (kimi review §3.3).
+            hist = full_df.copy()
+            hist["time"] = pd.to_datetime(hist["time"], errors="coerce")
+            hist = (
+                hist.dropna(subset=["time", "open", "high", "low", "close"])
+                .sort_values("time")
+                .reset_index(drop=True)
+            )
+            if not hist.empty and hist["time"].iloc[-1].date() >= datetime.now().date():
+                # Today's bar is already persisted — nothing to overlay.
+                pass
+            elif not hist.empty:
+                quote = DataService().fetch_latest_quote(symbol)
+                if quote and quote.get("price") is not None:
+                    intraday_result = compute_intraday_trend_score(hist, quote, trend_cfg)
+                    if intraday_result.get("ok"):
+                        prev_vol = safe_float(hist["volume"].iloc[-1], 0.0) if len(hist) > 0 else 0.0
+                        synth = build_synthetic_bar(quote, prev_vol)
+                        payload["dates"].append(str(datetime.now().date()))
+                        payload["candles"]["open"].append(round(float(synth["open"]), 4))
+                        payload["candles"]["high"].append(round(float(synth["high"]), 4))
+                        payload["candles"]["low"].append(round(float(synth["low"]), 4))
+                        payload["candles"]["close"].append(round(float(synth["close"]), 4))
+                        payload["volumes"].append(int(synth["volume"]))
+                        payload["indicators"]["trend_intraday"] = {
+                            "score": intraday_result["trend_score"],
+                            "price_direction": intraday_result["price_direction"],
+                            "confidence": intraday_result["confidence"],
+                            "atr": intraday_result["atr"],
+                            "price": intraday_result["price"],
+                            "ma_mid": intraday_result["ma_mid"],
+                            "calc_details": intraday_result.get("calc_details", {}),
+                        }
+                        payload["meta"]["is_intraday"] = True
+                        payload["meta"]["intraday_ts"] = datetime.now().isoformat()
         except Exception as exc:
             # Fall back to EOD data if intraday fetch fails.
             logger.warning("Intraday overlay failed for %s; falling back to EOD: %s", symbol, exc)
@@ -331,6 +333,10 @@ def calc_stop_loss(symbol: str, buy_date: str, buy_price: float) -> dict:
     硬止损公式: 买入价 − 买入当日 ATR(20) × hard_stop_atr_mul (默认 1.5)
     吊灯止损公式: 买入以来最高价 − 最新 ATR(20) × chandelier_stop_atr_mul (默认 2.5)
 
+    交易时段（9:30-15:00，含午间休盘）内自动叠加实时报价合成的当日K线：
+    最高价 / 最新价 / 止损触发判断均含今日盘中数据（is_intraday=True 标记）；
+    非交易时段或报价失败时回退为纯日K结果。
+
     Args:
         symbol: 标的代码，如 510300.SS
         buy_date: 买入日期，格式 YYYY-MM-DD
@@ -339,84 +345,11 @@ def calc_stop_loss(symbol: str, buy_date: str, buy_price: float) -> dict:
     Returns:
         硬止损价、吊灯止损价、ATR 参数、距买入价的百分比等。
     """
-    symbol = _normalize_symbol(symbol)
-    if not symbol:
-        return {"ok": False, "error": "无效的标的代码"}
-
-    db = get_db()
-    df = db.load_market_data(symbol)
-    if df.empty:
-        return {"ok": False, "error": f"未找到 {symbol} 的数据"}
-
-    strategy_cfg = _load_strategy_config()
-    hard_stop_mul = float(strategy_cfg.get("hard_stop_atr_mul_default", 1.5))
-    chandelier_mul = float(strategy_cfg.get("chandelier_stop_atr_mul", 2.5))
-
-    # Per-instrument stop_atr_mul override (DB rows may carry NULL)
-    instruments = _load_instruments_raw()
-    for item in instruments:
-        if item.get("symbol", "").strip().upper() == symbol:
-            if item.get("stop_atr_mul") is not None:
-                hard_stop_mul = float(item["stop_atr_mul"])
-            break
-
-    # ATR from the precomputed cache (single source, D11); the store falls
-    # back to a live full-history compute when the cache is stale/missing.
-    atr_series = get_series(symbol, "atr", db=db)
-    if atr_series.empty:
-        return {"ok": False, "error": "数据不足，无法计算 ATR"}
-
-    current_atr = safe_float(atr_series.iloc[-1], 0.0)
-    if current_atr <= 0:
-        return {"ok": False, "error": "ATR 值为 0，数据异常"}
-
-    df = df.copy()
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
-    buy_ts = pd.Timestamp(buy_date)
-
-    # ATR at buy date (look back up to and including buy_date)
-    atr_at_buy = current_atr
-    subset = atr_series[atr_series.index <= buy_ts]
-    if not subset.empty and pd.notna(subset.iloc[-1]):
-        atr_at_buy = safe_float(subset.iloc[-1], current_atr)
-
-    # Highest price since buy date (inclusive)
-    highs = pd.to_numeric(df["high"], errors="coerce")
-    latest_price = safe_float(pd.to_numeric(df["close"], errors="coerce").iloc[-1], 0.0)
-    highest_since_buy = latest_price
-    mask_since = df["time"] >= buy_ts
-    if mask_since.any():
-        since_highs = highs[mask_since]
-        if not since_highs.empty and since_highs.notna().any():
-            highest_since_buy = safe_float(since_highs.max(), latest_price)
-
-    # Calculate stop prices
-    hard_stop_price = round(buy_price - hard_stop_mul * atr_at_buy, 4)
-    chandelier_stop_price = round(highest_since_buy - chandelier_mul * current_atr, 4)
-
-    hard_stop_pct = round((hard_stop_price / buy_price - 1) * 100, 2)
-    chandelier_pct = (
-        round((chandelier_stop_price / highest_since_buy - 1) * 100, 2)
-        if highest_since_buy > 0
-        else 0.0
-    )
-
-    return {
-        "ok": True,
-        "symbol": symbol,
-        "buy_price": buy_price,
-        "buy_date": buy_date,
-        "hard_stop_price": hard_stop_price,
-        "hard_stop_pct": hard_stop_pct,
-        "hard_stop_atr_mul": hard_stop_mul,
-        "chandelier_stop_price": chandelier_stop_price,
-        "chandelier_stop_pct_from_high": chandelier_pct,
-        "chandelier_stop_atr_mul": chandelier_mul,
-        "atr_at_buy": round(atr_at_buy, 4),
-        "current_atr": round(current_atr, 4),
-        "highest_since_buy": round(highest_since_buy, 4),
-        "latest_price": round(latest_price, 4),
-    }
+    try:
+        payload = compute_stop_loss(symbol, buy_date, buy_price)
+    except StopLossError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, **payload}
 
 
 # ---------------------------------------------------------------------------

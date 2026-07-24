@@ -278,6 +278,36 @@ def _ma5(values: list[float | None]) -> list[float | None]:
     return [_number(v) for v in series]
 
 
+# 走势图/日期窗口，与 EOD 看板 services/dashboard.DISPLAY_DAYS 保持一致。
+_DISPLAY_DAYS = 61
+
+
+def _weighted_daily_trend_series(rows_df: pd.DataFrame) -> tuple[list[str], list[float]]:
+    """按日期对齐成员的趋势序列，成交额加权平均出级别每日序列。
+
+    与 EOD 看板 ``_aggregate_daily`` 同口径：
+    score(d) = Σ(score_i(d) × amount_i(d)) / Σ(amount_i(d))；
+    成交额缺失（≤0 或 None）的成员按等权 1.0 兜底。
+    """
+    numerator: dict[str, float] = defaultdict(float)
+    denominator: dict[str, float] = defaultdict(float)
+    for _, row in rows_df.iterrows():
+        scores = row.get("trend_score_series") or []
+        dates = row.get("trend_series_dates") or []
+        amounts = row.get("trend_series_amounts") or []
+        for day, raw_score, raw_amount in zip(dates, scores, amounts):
+            score = _number(raw_score)
+            if score is None:
+                continue
+            weight = _number(raw_amount)
+            if weight is None or weight <= 0:
+                weight = 1.0
+            numerator[str(day)] += score * weight
+            denominator[str(day)] += weight
+    days = sorted(day for day in numerator if denominator.get(day, 0.0) > 0)
+    return days, [numerator[d] / denominator[d] for d in days]
+
+
 def _strength(values: list[float], value: float | None) -> int | None:
     if value is None or not values:
         return None
@@ -450,6 +480,17 @@ def build_intraday_dashboard(
         extended_closes = list(hist_closes) + [intraday_price]
         extended_dates = list(hist_dates) + [datetime.now().date().isoformat()]
 
+        # 级别聚合（L2/L3）的成交额权重：历史日按当日成交额（优先全量 hist，
+        # 缓存路径用 1y tail），今日盘中用实时成交额；缺失日聚合时等权兜底。
+        amount_src = hist if (hist is not None and not hist.empty) else tail
+        amount_by_date: dict[str, float | None] = {}
+        if amount_src is not None and not amount_src.empty:
+            for _t, _a in zip(amount_src["time"], amount_src["amount"]):
+                amount_by_date[pd.Timestamp(_t).date().isoformat()] = _number(_a)
+        extended_amounts = [amount_by_date.get(d) for d in hist_dates] + [
+            _number(quote.get("amount"))
+        ]
+
         phase_info = _detect_trend_phase(
             extended_scores, extended_ma5,
             extended_closes, extended_dates,
@@ -503,6 +544,11 @@ def build_intraday_dashboard(
                 "trend_phase_days": phase_info["days"],
                 "trend_phase_change_pct": phase_info["change_pct"],
                 "trend_phase_signal_date": phase_info["signal_date"],
+                # 聚合层（L2/L3/标的）MA5 历史的原料：含今日盘中快照的
+                # 趋势序列 + 对齐日期 + 成交额权重（见 _weighted_daily_trend_series）。
+                "trend_score_series": extended_scores,
+                "trend_series_dates": extended_dates,
+                "trend_series_amounts": extended_amounts,
             }
         )
 
@@ -579,17 +625,24 @@ def build_intraday_dashboard(
         avg_60d = float(rows_df["return_60d"].mean()) if "return_60d" in rows_df else 0.0
         total_amount = float(rows_df["amount"].sum()) if "amount" in rows_df else 0.0
 
+        # MA5 历史与 EOD 看板同口径：级别每日趋势序列（成交额加权）→ 5日平滑；
+        # trend_history 取 MA5 序列尾部（走势图/sparkline 数据源），
+        # trend_ma5 取最后一个平滑值。标的级就是单成员序列，天然一致。
+        series_dates, series_scores = _weighted_daily_trend_series(rows_df)
+        ma5_series = _ma5(series_scores)
+        latest_ma5 = ma5_series[-1] if ma5_series else None
+
         result = {
             "member_count": int(meta.get("member_count", len(rows_df))),
             "trend_score": avg_trend,
-            "trend_ma5": avg_trend,  # simplified: single snapshot, no MA5 history
+            "trend_ma5": latest_ma5 if latest_ma5 is not None else avg_trend,
             "daily_change_pct": avg_1d,
             "change_5d": avg_5d,
             "change_20d": avg_20d,
             "change_60d": avg_60d,
             "amount": total_amount,
-            "trend_history": [],
-            "trend_dates": [],
+            "trend_history": ma5_series[-_DISPLAY_DAYS:],
+            "trend_dates": series_dates[-_DISPLAY_DAYS:],
             "as_of": datetime.now().date().isoformat(),
             "priority_l1": _priority(meta.get("priority_l1", 9999)),
             "priority_l2": _priority(meta.get("priority_l2", 9999)),

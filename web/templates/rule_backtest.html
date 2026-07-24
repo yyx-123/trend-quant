@@ -402,13 +402,29 @@ function valueText(value) {
   return value.type || "-";
 }
 
+function operatorText(op) {
+  const labels = {
+    ">=": "≥",
+    "<=": "≤",
+    cross_above: "上穿 · 金叉",
+    cross_below: "下穿 · 死叉",
+  };
+  return labels[op] || op || "-";
+}
+
+function operatorClass(op) {
+  if (op === "cross_above") return "op-cross-above";
+  if (op === "cross_below") return "op-cross-below";
+  return "";
+}
+
 function conditionLines(group) {
   const children = Array.isArray(group?.children) ? group.children : [];
   if (!children.length) return '<li class="rule-empty-condition">暂无条件</li>';
   return children.map((item) => `
     <li>
       <span>${esc(valueText(item.left))}</span>
-      <strong>${esc(item.operator || "")}</strong>
+      <strong class="${operatorClass(item.operator)}">${esc(operatorText(item.operator))}</strong>
       <span>${esc(valueText(item.right))}</span>
     </li>
   `).join("");
@@ -425,7 +441,7 @@ function conditionItems(group) {
     <li class="strategy-condition-item">
       <span class="strategy-condition-index">${String(idx + 1).padStart(2, "0")}</span>
       <span class="strategy-condition-left">${esc(valueText(item.left))}</span>
-      <strong>${esc(item.operator || "")}</strong>
+      <strong class="${operatorClass(item.operator)}">${esc(operatorText(item.operator))}</strong>
       <span class="strategy-condition-right">${esc(valueText(item.right))}</span>
     </li>
   `).join("");
@@ -506,6 +522,8 @@ function addCondition(side, condition = null) {
     <select class="rule-operator">
       <option value=">=">&gt;=</option>
       <option value="<=">&lt;=</option>
+      <option value="cross_above">上穿(金叉)</option>
+      <option value="cross_below">下穿(死叉)</option>
     </select>
     <div class="rule-value-editor" data-side="right">
       ${valueEditorHtml("right")}
@@ -602,7 +620,8 @@ function setValueEditor(editor, value = {}) {
 
 function setConditionRowValue(row, condition = {}) {
   const operatorEl = row.querySelector(".rule-operator");
-  operatorEl.value = condition.operator === "<=" ? "<=" : ">=";
+  const OPERATORS = [">=", "<=", "cross_above", "cross_below"];
+  operatorEl.value = OPERATORS.includes(condition.operator) ? condition.operator : ">=";
   setValueEditor(row.querySelector('.rule-value-editor[data-side="left"]'), condition.left || {});
   setValueEditor(row.querySelector('.rule-value-editor[data-side="right"]'), condition.right || {});
 }

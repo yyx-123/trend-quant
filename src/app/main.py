@@ -5,6 +5,12 @@ import os
 from pathlib import Path
 import threading
 
+from dotenv import load_dotenv
+
+# 加载项目根目录 .env（如 TICKFLOW_API_KEY 实时报价密钥）。
+# 必须在任何读取环境变量的模块初始化之前执行；已存在的环境变量优先（不覆盖）。
+load_dotenv()
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.routers import (
     instruments,
+    manual_trade,
     market_view,
     position_strategy,
     rule_backtest,
@@ -167,6 +174,7 @@ app.include_router(position_strategy.router)
 app.include_router(instruments.router)
 app.include_router(market_view.router)
 app.include_router(subject_market.router)
+app.include_router(manual_trade.router)
 
 
 @app.get("/", include_in_schema=False)
