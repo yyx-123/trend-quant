@@ -6,15 +6,16 @@
   gap: 8px;
   align-items: center;
 }
-.rule-strategy-page .strategy-danger-btn {
+/* 弹窗在 section 之外（见 HTML 注释），弹窗内样式一律用 .sizer-dialog 定向 */
+.sizer-dialog .strategy-danger-btn {
   border-color: var(--danger);
   background: linear-gradient(135deg, #c15b58 0%, #a54441 100%);
   box-shadow: 0 14px 26px rgba(193, 91, 88, 0.24);
 }
-.rule-strategy-page .strategy-danger-btn:hover:not(:disabled) {
+.sizer-dialog .strategy-danger-btn:hover:not(:disabled) {
   box-shadow: 0 20px 32px rgba(193, 91, 88, 0.28);
 }
-.rule-strategy-page .strategy-delete-text {
+.sizer-dialog .strategy-delete-text {
   margin: 4px 0 18px;
   color: var(--text-soft);
   line-height: 1.6;
@@ -30,7 +31,7 @@
   font-weight: 900;
   vertical-align: middle;
 }
-.rule-strategy-page .sizer-param-grid {
+.sizer-dialog .sizer-param-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 12px;
@@ -41,7 +42,7 @@
    此时弹窗自身成为滚动容器，全局的 sticky 按钮栏正好钉在弹窗可见底部，
    保存/取消始终可见（不要覆盖回 static，否则会沉到滚动区底部）。
    大屏下加宽弹窗，与页面比例协调（策略管理页弹窗维持 1240px 不变）。 */
-.rule-strategy-page .rule-strategy-dialog {
+.sizer-dialog {
   width: min(1500px, 100%);
   max-height: calc(100vh - 72px);
   overflow-y: auto;
@@ -49,21 +50,21 @@
 
 /* 名称/描述/类型横向排列（弹窗宽 1240px，纵向空间紧张），
    常规视口下整个表单无需滚动；窄屏自动退回每行一个 */
-.rule-strategy-page .rule-strategy-dialog .rule-strategy-name-field {
+.sizer-dialog .rule-strategy-name-field {
   display: inline-block;
   width: min(400px, 100%);
   margin: 0 12px 10px 0;
   vertical-align: top;
 }
-.rule-strategy-page .sizer-param-field {
+.sizer-dialog .sizer-param-field {
   display: grid;
   gap: 6px;
   color: var(--text-soft);
   font-size: 13px;
   font-weight: 600;
 }
-.rule-strategy-page .sizer-param-field input,
-.rule-strategy-page .sizer-param-field select {
+.sizer-dialog .sizer-param-field input,
+.sizer-dialog .sizer-param-field select {
   min-height: 40px;
   padding: 0 12px;
   border: 1px solid rgba(20, 41, 51, 0.16);
@@ -88,9 +89,13 @@
   </div>
   <p id="status" class="status-banner">加载中...</p>
   <div id="strategyGrid" class="strategy-list"></div>
+</section>
 
-  <div id="strategyEditor" class="rule-strategy-modal" hidden>
-    <div class="rule-strategy-dialog" role="dialog" aria-modal="true" aria-labelledby="editorDialogTitle">
+<!-- 弹窗必须在 section 之外：section 的 backdrop-filter/动画会让 position:fixed
+     退化为相对 section 定位（遮罩无法全屏、底部出现大片空白）。
+     样式因此用 sizer-dialog 类定向，不依赖 .rule-strategy-page 作用域。 -->
+<div id="strategyEditor" class="rule-strategy-modal" hidden>
+  <div class="rule-strategy-dialog sizer-dialog" role="dialog" aria-modal="true" aria-labelledby="editorDialogTitle">
       <div class="rule-strategy-dialog-head">
         <div>
           <h3 id="editorDialogTitle">新增仓位策略</h3>
@@ -115,11 +120,11 @@
         <button id="cancelEditorBtn" type="button" class="ghost-btn">取消</button>
         <button id="saveEditorBtn" type="button">保存</button>
       </div>
-    </div>
   </div>
+</div>
 
-  <div id="deleteConfirm" class="rule-strategy-modal" hidden>
-    <div class="rule-strategy-dialog strategy-delete-dialog" role="alertdialog" aria-modal="true">
+<div id="deleteConfirm" class="rule-strategy-modal" hidden>
+  <div class="rule-strategy-dialog sizer-dialog strategy-delete-dialog" role="alertdialog" aria-modal="true">
       <div class="rule-strategy-dialog-head">
         <div>
           <h3>删除仓位策略</h3>
@@ -132,9 +137,8 @@
         <button id="cancelDeleteBtn" type="button" class="ghost-btn">取消</button>
         <button id="confirmDeleteBtn" type="button" class="strategy-danger-btn">确认删除</button>
       </div>
-    </div>
   </div>
-</section>
+</div>
 
 <script>
 (function() {
