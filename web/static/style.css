@@ -603,9 +603,9 @@ button:disabled {
 
 .market-backtest-bar {
   display: grid;
-  grid-template-columns: 220px minmax(360px, 1fr) auto auto auto;
+  grid-template-columns: 170px minmax(240px, 1.2fr) minmax(200px, 1fr) auto auto auto;
   gap: 12px;
-  align-items: start;
+  align-items: center;
   margin: 12px 0 16px;
   padding: 12px;
   border: 1px solid rgba(20, 41, 51, 0.08);
@@ -617,8 +617,8 @@ button:disabled {
   display: grid;
   align-content: center;
   padding: 0 8px 0 2px;
-  width: 220px;
-  min-width: 220px;
+  width: 170px;
+  min-width: 170px;
 }
 
 .market-backtest-bar__title span {
@@ -641,12 +641,15 @@ button:disabled {
   min-height: 44px;
   min-width: 0;
   white-space: nowrap;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .market-backtest-bar label:has(.multi-select-dropdown) {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
+  align-items: center;
   width: 100%;
 }
 
@@ -2250,7 +2253,7 @@ button:disabled {
 
 @media (max-width: 1500px) {
   .market-backtest-bar {
-    grid-template-columns: 220px minmax(300px, 1fr) auto auto;
+    grid-template-columns: 170px minmax(240px, 1fr) minmax(200px, 1fr) auto auto;
   }
 
   .market-backtest-action {
@@ -3873,6 +3876,17 @@ details > summary::marker {
   display: flex;
   gap: 8px;
   margin-left: auto;
+}
+
+.mt-trade-badges {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mt-trade-badges:empty {
+  display: none;
 }
 
 .mt-trade-detail {

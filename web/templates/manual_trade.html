@@ -13,11 +13,7 @@
     <label>买入价格
       <input id="mtBuyPrice" type="number" min="0" step="0.0001" placeholder="如 4.025">
     </label>
-    <label id="mtSharesWrap" hidden>买入份数
-      <input id="mtShares" type="number" min="0" step="1" placeholder="如 1000">
-    </label>
     <button id="mtEvaluateBtn" type="button">试算</button>
-    <button id="mtEnterBtn" type="button" hidden>录入</button>
   </div>
   <div id="mtPriceHint" class="mt-price-hint" hidden></div>
   <div id="mtMessage" class="instrument-form-message" hidden></div>
@@ -34,7 +30,7 @@
     </div>
   </div>
 
-  <!-- ② 登录区：输入用户名 + 密码后展示下方交易记录 -->
+  <!-- ② 登录区：输入用户名 + 密码后展示下方交易记录（仅用于区分可见记录，无登出概念） -->
   <div class="viz-panel" id="mtAuthPanel">
     <h3>我的交易记录</h3>
     <div id="mtLoginForm" class="bt-form-row">
@@ -45,11 +41,6 @@
         <input id="mtPassword" type="password" autocomplete="current-password">
       </label>
       <button id="mtLoginBtn" type="button">登录</button>
-    </div>
-    <div id="mtLoginState" class="mt-login-state" hidden>
-      <span>当前用户：<b id="mtLoginUser"></b></span>
-      <span id="mtAdminBadge" class="mt-badge mt-badge-accent" hidden>admin</span>
-      <button id="mtLogoutBtn" type="button" class="mt-btn-ghost">退出</button>
     </div>
     <div id="mtLoginMessage" class="instrument-form-message" hidden></div>
   </div>
@@ -62,11 +53,37 @@
         <label id="mtUserSwitchWrap" hidden>查看用户
           <select id="mtUserSwitch"></select>
         </label>
+        <button id="mtOpenEnterBtn" type="button" class="mt-btn-sm">+ 录入</button>
         <button id="mtRefreshBtn" type="button" class="mt-btn-sm">刷新</button>
       </div>
     </div>
     <div class="mt-trade-list" id="mtTradeList"></div>
-    <div id="mtTradeEmpty" class="manual-trade-note" hidden>暂无交易记录，在上方表单录入第一笔吧。</div>
+    <div id="mtTradeEmpty" class="manual-trade-note" hidden>暂无交易记录，点击右上角「录入」添加第一笔。</div>
+  </div>
+
+  <!-- 录入弹窗 -->
+  <div id="mtEnterModal" class="mt-modal" hidden>
+    <div class="mt-modal-box">
+      <h3>录入交易</h3>
+      <div class="bt-form-row">
+        <label>标的代码
+          <input id="mtEnterSymbol" type="text" list="mtSymbolOptions" placeholder="如 510300 或 510300.SS" autocomplete="off">
+        </label>
+        <label>买入日期
+          <input id="mtEnterDate" type="date">
+        </label>
+        <label>买入价格
+          <input id="mtEnterPrice" type="number" min="0" step="0.0001" placeholder="如 4.025">
+        </label>
+        <label>买入份数
+          <input id="mtEnterShares" type="number" min="0" step="1" placeholder="如 1000">
+        </label>
+        <button id="mtEnterConfirmBtn" type="button">确认录入</button>
+        <button id="mtEnterCancelBtn" type="button" class="mt-btn-ghost">取消</button>
+      </div>
+      <div id="mtEnterHint" class="mt-price-hint" hidden></div>
+      <div id="mtEnterMessage" class="instrument-form-message" hidden></div>
+    </div>
   </div>
 
   <!-- 清仓弹窗 -->
@@ -96,10 +113,7 @@
   const symbolOptionsEl = document.getElementById('mtSymbolOptions');
   const buyDateEl = document.getElementById('mtBuyDate');
   const buyPriceEl = document.getElementById('mtBuyPrice');
-  const sharesWrapEl = document.getElementById('mtSharesWrap');
-  const sharesEl = document.getElementById('mtShares');
   const evaluateBtn = document.getElementById('mtEvaluateBtn');
-  const enterBtn = document.getElementById('mtEnterBtn');
   const priceHintEl = document.getElementById('mtPriceHint');
   const messageEl = document.getElementById('mtMessage');
   const resultEl = document.getElementById('mtResult');
@@ -111,19 +125,26 @@
   const usernameEl = document.getElementById('mtUsername');
   const passwordEl = document.getElementById('mtPassword');
   const loginBtn = document.getElementById('mtLoginBtn');
-  const loginStateEl = document.getElementById('mtLoginState');
-  const loginUserEl = document.getElementById('mtLoginUser');
-  const adminBadgeEl = document.getElementById('mtAdminBadge');
-  const logoutBtn = document.getElementById('mtLogoutBtn');
   const loginMessageEl = document.getElementById('mtLoginMessage');
 
   const recordsPanelEl = document.getElementById('mtRecordsPanel');
   const recordsSubEl = document.getElementById('mtRecordsSub');
   const userSwitchWrapEl = document.getElementById('mtUserSwitchWrap');
   const userSwitchEl = document.getElementById('mtUserSwitch');
+  const openEnterBtn = document.getElementById('mtOpenEnterBtn');
   const refreshBtn = document.getElementById('mtRefreshBtn');
   const tradeListEl = document.getElementById('mtTradeList');
   const tradeEmptyEl = document.getElementById('mtTradeEmpty');
+
+  const enterModalEl = document.getElementById('mtEnterModal');
+  const enterSymbolEl = document.getElementById('mtEnterSymbol');
+  const enterDateEl = document.getElementById('mtEnterDate');
+  const enterPriceEl = document.getElementById('mtEnterPrice');
+  const enterSharesEl = document.getElementById('mtEnterShares');
+  const enterConfirmBtn = document.getElementById('mtEnterConfirmBtn');
+  const enterCancelBtn = document.getElementById('mtEnterCancelBtn');
+  const enterHintEl = document.getElementById('mtEnterHint');
+  const enterMessageEl = document.getElementById('mtEnterMessage');
 
   const closeModalEl = document.getElementById('mtCloseModal');
   const closeTitleEl = document.getElementById('mtCloseTitle');
@@ -143,6 +164,8 @@
   let closeCtx = null;         // 清仓弹窗当前交易
   let closeRange = null;       // 清仓弹窗：当日价格区间缓存
   let closeRangeSeq = 0;
+  let enterRange = null;       // 录入弹窗：当日价格区间缓存
+  let enterRangeSeq = 0;
 
   // ── 工具 ────────────────────────────────────────────────
   function esc(text) {
@@ -167,6 +190,12 @@
     closeMessageEl.textContent = text;
     closeMessageEl.classList.toggle('is-error', !!isError);
     closeMessageEl.hidden = !text;
+  }
+
+  function showEnterMessage(text, isError) {
+    enterMessageEl.textContent = text;
+    enterMessageEl.classList.toggle('is-error', !!isError);
+    enterMessageEl.hidden = !text;
   }
 
   function fmtPrice(v) {
@@ -362,7 +391,7 @@
     rangeDebounce = setTimeout(refreshDayRange, 350);
   }
 
-  function readBuyForm(requireShares) {
+  function readBuyForm() {
     const symbol = symbolEl.value.trim();
     const buyDate = buyDateEl.value;
     const buyPrice = parseFloat(buyPriceEl.value);
@@ -375,17 +404,11 @@
         fmtPrice(dayRange.low) + ', ' + fmtPrice(dayRange.high) + ']', true);
       return null;
     }
-    const form = {symbol: symbol, buy_date: buyDate, buy_price: buyPrice};
-    if (requireShares) {
-      const shares = parseFloat(sharesEl.value);
-      if (!(shares > 0)) { showMessage('请输入大于 0 的买入份数', true); return null; }
-      form.shares = shares;
-    }
-    return form;
+    return {symbol: symbol, buy_date: buyDate, buy_price: buyPrice};
   }
 
   async function evaluate() {
-    const form = readBuyForm(false);
+    const form = readBuyForm();
     if (!form) return;
 
     evaluateBtn.disabled = true;
@@ -422,13 +445,8 @@
   // ── ② 登录 ─────────────────────────────────────────────
   function onLogin() {
     loginFormEl.hidden = true;
-    loginStateEl.hidden = false;
-    loginUserEl.textContent = auth.username;
-    adminBadgeEl.hidden = !auth.is_admin;
-    sharesWrapEl.hidden = false;
-    enterBtn.hidden = false;
     recordsPanelEl.hidden = false;
-    showLoginMessage('', false);
+    showLoginMessage('已登录：' + auth.username + (auth.is_admin ? '（admin）' : ''), false);
     if (auth.is_admin) loadUserSwitch();
     loadTrades();
   }
@@ -438,14 +456,12 @@
     currentTrades = [];
     passwordEl.value = '';
     loginFormEl.hidden = false;
-    loginStateEl.hidden = true;
-    sharesWrapEl.hidden = true;
-    enterBtn.hidden = true;
     recordsPanelEl.hidden = true;
     userSwitchWrapEl.hidden = true;
     userSwitchEl.innerHTML = '';
     tradeListEl.innerHTML = '';
     closeModalEl.hidden = true;
+    enterModalEl.hidden = true;
   }
 
   async function login() {
@@ -512,6 +528,7 @@
 
   function renderTradeRow(t) {
     const closed = t.status === 'closed';
+    const holding = t.holding || {};
     const badges = [];
     if (closed) badges.push('<span class="mt-badge">已清仓</span>');
     if (t.is_intraday) badges.push('<span class="mt-badge mt-badge-live">实时</span>');
@@ -528,13 +545,20 @@
       cols += tradeCol('清仓', esc(t.sell_date) + ' @ ' + esc(fmtPrice(t.sell_price)));
       cols += tradeCol('实际盈亏', '<span class="' + pctClass(t.realized_pnl) + '">' +
         esc(fmtPct(t.realized_pnl_pct)) + '（' + esc(fmtMoney(t.realized_pnl)) + '）</span>');
+      cols += tradeCol('最大浮盈', '<span class="' + pctClass(holding.max_gain_pct) + '">' +
+        esc(fmtPct(holding.max_gain_pct)) + '</span>');
+      cols += tradeCol('最大回撤', '<span class="' + pctClass(holding.max_drawdown) + '">' +
+        esc(fmtPct(holding.max_drawdown)) + '</span>');
     } else {
-      const holding = t.holding || {};
       const stops = t.stops || {};
       cols += tradeCol('持仓金额', esc(fmtMoney(t.position_value).replace(/^\+/, '')));
       cols += tradeCol('现价', esc(fmtPrice(t.latest_price)));
       cols += tradeCol('盈亏', '<span class="' + pctClass(holding.pnl_pct) + '">' +
         esc(fmtPct(holding.pnl_pct)) + '（' + esc(fmtMoney(t.pnl_amount)) + '）</span>');
+      cols += tradeCol('最大浮盈', '<span class="' + pctClass(holding.max_gain_pct) + '">' +
+        esc(fmtPct(holding.max_gain_pct)) + '</span>');
+      cols += tradeCol('最大回撤', '<span class="' + pctClass(holding.max_drawdown) + '">' +
+        esc(fmtPct(holding.max_drawdown)) + '</span>');
       cols += tradeCol('距硬止损', '<span class="' + pctClass(stops.hard_stop_distance_pct) + '">' +
         esc(fmtPct(stops.hard_stop_distance_pct)) + '</span>');
       cols += tradeCol('距吊灯止损', '<span class="' + pctClass(stops.chandelier_stop_distance_pct) + '">' +
@@ -551,10 +575,10 @@
         '<div class="mt-trade-main">' +
           '<span class="mt-trade-name">' + esc(t.name || t.symbol) + '</span>' +
           '<span class="mt-trade-symbol">' + esc(t.symbol) + '</span>' +
-          badges.join('') +
         '</div>' +
         '<div class="mt-trade-cols">' + cols + '</div>' +
         actions +
+        '<div class="mt-trade-badges">' + badges.join('') + '</div>' +
       '</div>' +
       '<div class="mt-trade-detail" hidden></div>' +
       '</div>';
@@ -596,25 +620,76 @@
     btn.textContent = '收起';
   }
 
-  // ── 录入 ───────────────────────────────────────────────
-  async function enterTrade() {
-    if (!auth) { showMessage('请先在下方登录后再录入交易', true); return; }
-    const form = readBuyForm(true);
-    if (!form) return;
+  // ── 录入弹窗 ───────────────────────────────────────────
+  function openEnterModal() {
+    if (!auth) { showLoginMessage('请先登录后再录入交易', true); return; }
+    // 预填试算区的输入，减少重复录入
+    enterSymbolEl.value = symbolEl.value.trim();
+    enterDateEl.value = buyDateEl.value || todayStr();
+    enterPriceEl.value = buyPriceEl.value;
+    enterSharesEl.value = '';
+    showEnterMessage('', false);
+    enterModalEl.hidden = false;
+    refreshEnterRange();
+  }
 
-    enterBtn.disabled = true;
-    showMessage('录入中…', false);
+  async function refreshEnterRange() {
+    const symbol = enterSymbolEl.value.trim();
+    const buyDate = enterDateEl.value;
+    enterRange = null;
+    enterHintEl.hidden = true;
+    if (!symbol || !buyDate) return;
+    const seq = ++enterRangeSeq;
     try {
-      await postJson('/manual-trade/api/trades/create', Object.assign({
+      const candle = await fetchDayCandle(symbol, buyDate);
+      if (seq !== enterRangeSeq) return;
+      if (!candle) {
+        enterHintEl.textContent = buyDate + ' 无K线数据（非交易日或未入库），买入价将按下一交易日口径计算';
+        enterHintEl.hidden = false;
+        return;
+      }
+      enterRange = {date: buyDate, low: candle.low, high: candle.high, close: candle.close};
+      enterHintEl.innerHTML = rangeHintText(buyDate, enterRange);
+      enterHintEl.hidden = false;
+    } catch (err) {
+      if (seq !== enterRangeSeq) return;
+      enterHintEl.textContent = err.message || '无法获取当日行情';
+      enterHintEl.hidden = false;
+    }
+  }
+
+  async function confirmEnter() {
+    if (!auth) { showEnterMessage('请先登录后再录入交易', true); return; }
+    const symbol = enterSymbolEl.value.trim();
+    const buyDate = enterDateEl.value;
+    const buyPrice = parseFloat(enterPriceEl.value);
+    const shares = parseFloat(enterSharesEl.value);
+    if (!symbol) { showEnterMessage('请输入标的代码', true); return; }
+    if (!buyDate) { showEnterMessage('请选择买入日期', true); return; }
+    if (!(buyPrice > 0)) { showEnterMessage('请输入大于 0 的买入价格', true); return; }
+    if (!(shares > 0)) { showEnterMessage('请输入大于 0 的买入份数', true); return; }
+    if (enterRange && enterRange.date === buyDate &&
+        (buyPrice < enterRange.low || buyPrice > enterRange.high)) {
+      showEnterMessage('买入价格 ' + fmtPrice(buyPrice) + ' 超出 ' + buyDate + ' 当日价格区间 [' +
+        fmtPrice(enterRange.low) + ', ' + fmtPrice(enterRange.high) + ']', true);
+      return;
+    }
+
+    enterConfirmBtn.disabled = true;
+    showEnterMessage('录入中…', false);
+    try {
+      await postJson('/manual-trade/api/trades/create', {
         username: auth.username, password: auth.password,
-      }, form));
-      showMessage('已录入：' + form.symbol + ' ' + form.buy_date + ' @ ' +
-        fmtPrice(form.buy_price) + ' × ' + fmtShares(form.shares), false);
+        symbol: symbol, buy_date: buyDate, buy_price: buyPrice, shares: shares,
+      });
+      enterModalEl.hidden = true;
+      showMessage('已录入：' + symbol + ' ' + buyDate + ' @ ' +
+        fmtPrice(buyPrice) + ' × ' + fmtShares(shares), false);
       loadTrades();
     } catch (err) {
-      showMessage(err.message || '录入失败', true);
+      showEnterMessage(err.message || '录入失败', true);
     } finally {
-      enterBtn.disabled = false;
+      enterConfirmBtn.disabled = false;
     }
   }
 
@@ -690,14 +765,10 @@
 
   // ── 事件绑定 ───────────────────────────────────────────
   evaluateBtn.addEventListener('click', evaluate);
-  enterBtn.addEventListener('click', enterTrade);
   [symbolEl, buyDateEl, buyPriceEl].forEach(function(el) {
     el.addEventListener('keydown', function(ev) {
       if (ev.key === 'Enter') evaluate();
     });
-  });
-  sharesEl.addEventListener('keydown', function(ev) {
-    if (ev.key === 'Enter') enterTrade();
   });
   symbolEl.addEventListener('change', scheduleRangeRefresh);
   buyDateEl.addEventListener('change', scheduleRangeRefresh);
@@ -708,9 +779,25 @@
       if (ev.key === 'Enter') login();
     });
   });
-  logoutBtn.addEventListener('click', onLogout);
+  openEnterBtn.addEventListener('click', openEnterModal);
   refreshBtn.addEventListener('click', loadTrades);
   userSwitchEl.addEventListener('change', loadTrades);
+
+  enterConfirmBtn.addEventListener('click', confirmEnter);
+  enterCancelBtn.addEventListener('click', function() {
+    enterModalEl.hidden = true;
+  });
+  [enterSymbolEl, enterDateEl].forEach(function(el) {
+    el.addEventListener('change', refreshEnterRange);
+  });
+  [enterPriceEl, enterSharesEl].forEach(function(el) {
+    el.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Enter') confirmEnter();
+    });
+  });
+  enterModalEl.addEventListener('click', function(ev) {
+    if (ev.target === enterModalEl) enterModalEl.hidden = true;
+  });
 
   tradeListEl.addEventListener('click', function(ev) {
     const btn = ev.target.closest('button');

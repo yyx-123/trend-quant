@@ -69,53 +69,53 @@
   </div>
   <p id="status" class="status-banner">加载中...</p>
   <div id="strategyGrid" class="strategy-list"></div>
+
+  <div id="strategyEditor" class="rule-strategy-modal" hidden>
+    <div class="rule-strategy-dialog" role="dialog" aria-modal="true" aria-labelledby="editorDialogTitle">
+      <div class="rule-strategy-dialog-head">
+        <div>
+          <h3 id="editorDialogTitle">新增仓位策略</h3>
+          <p class="context-hint">选择仓位策略类型后填写参数。所有类型的「降级仓位比例」含义一致：当策略无法计算理论仓位时（如凯利比≤0、无可用ATR），按该比例买入并标记。</p>
+          <p id="editorMeta" class="rule-strategy-editor-meta" hidden></p>
+        </div>
+        <button id="closeEditorBtn" type="button" class="ghost-btn">关闭</button>
+      </div>
+      <label class="rule-strategy-name-field">策略名称
+        <input id="editorName" type="text" maxlength="60" placeholder="例如：半仓买入 / 风险预算1万 / 凯利10">
+      </label>
+      <label class="rule-strategy-name-field">策略描述（可选）
+        <input id="editorDesc" type="text" maxlength="200" placeholder="备注该仓位策略的用途">
+      </label>
+      <label class="rule-strategy-name-field">策略类型
+        <select id="editorType"></select>
+      </label>
+      <p id="editorTypeHint" class="context-hint"></p>
+      <div id="editorParams" class="sizer-param-grid"></div>
+      <div class="rule-strategy-dialog-actions">
+        <p id="editorError" class="strategy-delete-text" hidden></p>
+        <button id="cancelEditorBtn" type="button" class="ghost-btn">取消</button>
+        <button id="saveEditorBtn" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="deleteConfirm" class="rule-strategy-modal" hidden>
+    <div class="rule-strategy-dialog strategy-delete-dialog" role="alertdialog" aria-modal="true">
+      <div class="rule-strategy-dialog-head">
+        <div>
+          <h3>删除仓位策略</h3>
+          <p class="context-hint">删除后不可恢复，请再次确认。</p>
+        </div>
+        <button id="closeDeleteBtn" type="button" class="ghost-btn">关闭</button>
+      </div>
+      <p id="deleteText" class="strategy-delete-text"></p>
+      <div class="rule-strategy-dialog-actions">
+        <button id="cancelDeleteBtn" type="button" class="ghost-btn">取消</button>
+        <button id="confirmDeleteBtn" type="button" class="strategy-danger-btn">确认删除</button>
+      </div>
+    </div>
+  </div>
 </section>
-
-<div id="strategyEditor" class="rule-strategy-modal" hidden>
-  <div class="rule-strategy-dialog" role="dialog" aria-modal="true" aria-labelledby="editorDialogTitle">
-    <div class="rule-strategy-dialog-head">
-      <div>
-        <h3 id="editorDialogTitle">新增仓位策略</h3>
-        <p class="context-hint">选择仓位策略类型后填写参数。所有类型的「降级仓位比例」含义一致：当策略无法计算理论仓位时（如凯利比≤0、无可用ATR），按该比例买入并标记。</p>
-        <p id="editorMeta" class="rule-strategy-editor-meta" hidden></p>
-      </div>
-      <button id="closeEditorBtn" type="button" class="ghost-btn">关闭</button>
-    </div>
-    <label class="rule-strategy-name-field">策略名称
-      <input id="editorName" type="text" maxlength="60" placeholder="例如：半仓买入 / 风险预算1万 / 凯利10">
-    </label>
-    <label class="rule-strategy-name-field">策略描述（可选）
-      <input id="editorDesc" type="text" maxlength="200" placeholder="备注该仓位策略的用途">
-    </label>
-    <label class="rule-strategy-name-field">策略类型
-      <select id="editorType"></select>
-    </label>
-    <p id="editorTypeHint" class="context-hint"></p>
-    <div id="editorParams" class="sizer-param-grid"></div>
-    <div class="rule-strategy-dialog-actions">
-      <p id="editorError" class="strategy-delete-text" hidden></p>
-      <button id="cancelEditorBtn" type="button" class="ghost-btn">取消</button>
-      <button id="saveEditorBtn" type="button">保存</button>
-    </div>
-  </div>
-</div>
-
-<div id="deleteConfirm" class="rule-strategy-modal" hidden>
-  <div class="rule-strategy-dialog strategy-delete-dialog" role="alertdialog" aria-modal="true">
-    <div class="rule-strategy-dialog-head">
-      <div>
-        <h3>删除仓位策略</h3>
-        <p class="context-hint">删除后不可恢复，请再次确认。</p>
-      </div>
-      <button id="closeDeleteBtn" type="button" class="ghost-btn">关闭</button>
-    </div>
-    <p id="deleteText" class="strategy-delete-text"></p>
-    <div class="rule-strategy-dialog-actions">
-      <button id="cancelDeleteBtn" type="button" class="ghost-btn">取消</button>
-      <button id="confirmDeleteBtn" type="button" class="strategy-danger-btn">确认删除</button>
-    </div>
-  </div>
-</div>
 
 <script>
 (function() {
@@ -127,7 +127,6 @@
     pct: "买入比例（0~1）",
     fallback_pct: "降级仓位比例（0~1）",
     mode: "风险预算模式",
-    value: "风险预算值",
     atr_period: "ATR 周期",
     atr_mul: "ATR 倍数",
     lookback: "历史交易笔数 N",
@@ -264,21 +263,41 @@
     const spec = typeSpec(typeEl.value);
     typeHintEl.textContent = TYPE_HINTS[typeEl.value] || "";
     if (!spec) { paramsEl.innerHTML = ""; return; }
+    const currentMode = () => paramsEl.querySelector('[data-param="mode"]')?.value || values.mode || "absolute";
+    const labelFor = (name) => {
+      if (name === "value") {
+        return currentMode() === "equity_pct" ? "风险预算比例（0~1）" : "风险预算金额（元）";
+      }
+      return PARAM_LABELS[name] || name;
+    };
     paramsEl.innerHTML = Object.entries(spec.params).map(([name, p]) => {
       const val = values[name] !== undefined ? values[name] : p.default;
-      const label = PARAM_LABELS[name] || name;
       if (name === "mode") {
-        return `<label class="sizer-param-field">${esc(label)}
+        return `<label class="sizer-param-field"><span class="sizer-param-label">${esc(labelFor(name))}</span>
           <select data-param="${esc(name)}">
             ${MODE_OPTIONS.map(o => `<option value="${o.value}" ${o.value === val ? "selected" : ""}>${o.label}</option>`).join("")}
           </select>
         </label>`;
       }
       const step = p.type === "int" ? "1" : "any";
-      return `<label class="sizer-param-field">${esc(label)}
+      return `<label class="sizer-param-field"><span class="sizer-param-label">${esc(labelFor(name))}</span>
         <input type="number" step="${step}" data-param="${esc(name)}" value="${esc(val)}">
       </label>`;
     }).join("");
+
+    // 风险预算值标签随模式联动；仍停留在另一模式默认值时自动换成新模式默认
+    const modeSelect = paramsEl.querySelector('[data-param="mode"]');
+    const valueInput = paramsEl.querySelector('[data-param="value"]');
+    const valueLabel = valueInput?.closest(".sizer-param-field")?.querySelector(".sizer-param-label");
+    if (modeSelect && valueInput && valueLabel) {
+      modeSelect.addEventListener("change", () => {
+        const isPct = modeSelect.value === "equity_pct";
+        valueLabel.textContent = isPct ? "风险预算比例（0~1）" : "风险预算金额（元）";
+        const cur = parseFloat(valueInput.value);
+        if (isPct && cur === 10000) valueInput.value = "0.01";
+        if (!isPct && cur === 0.01) valueInput.value = "10000";
+      });
+    }
   }
 
   function collectParams() {
