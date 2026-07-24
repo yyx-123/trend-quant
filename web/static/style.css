@@ -3831,7 +3831,7 @@ details > summary::marker {
 
 .mt-trade-cols {
   display: flex;
-  gap: 20px;
+  gap: 8px 20px;
   align-items: center;
   flex: 1;
   flex-wrap: wrap;
@@ -3839,9 +3839,14 @@ details > summary::marker {
 
 .mt-trade-col {
   display: flex;
+  flex: 0 0 108px;  /* 固定列宽：跨行对齐各信息列 */
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+
+.mt-trade-col-wide {
+  flex-basis: 196px;  /* 买入 / 盈亏（含金额）等长内容列 */
 }
 
 .mt-trade-col-label {
@@ -3882,11 +3887,9 @@ details > summary::marker {
   display: flex;
   gap: 6px;
   align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
-}
-
-.mt-trade-badges:empty {
-  display: none;
+  min-width: 150px;  /* 预留徽标位，保证各行的列与按钮位置一致 */
 }
 
 .mt-trade-detail {

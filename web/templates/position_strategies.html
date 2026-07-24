@@ -36,6 +36,12 @@
   gap: 12px;
   margin: 14px 0;
 }
+
+/* 本页弹窗内容不高，按钮栏不需要 sticky（sticky 是策略管理页超长弹窗的设计，
+   在这里会悬浮到视口底部遮挡参数区） */
+.rule-strategy-page .rule-strategy-dialog-actions {
+  position: static;
+}
 .rule-strategy-page .sizer-param-field {
   display: grid;
   gap: 6px;

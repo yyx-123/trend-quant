@@ -521,8 +521,8 @@
     }
   }
 
-  function tradeCol(label, valueHtml) {
-    return '<div class="mt-trade-col"><span class="mt-trade-col-label">' + esc(label) +
+  function tradeCol(label, valueHtml, wide) {
+    return '<div class="mt-trade-col' + (wide ? ' mt-trade-col-wide' : '') + '"><span class="mt-trade-col-label">' + esc(label) +
       '</span><span class="mt-trade-col-value">' + valueHtml + '</span></div>';
   }
 
@@ -538,13 +538,13 @@
     }
 
     let cols = tradeCol('买入', esc(t.buy_date) + ' @ ' + esc(fmtPrice(t.buy_price)) +
-      ' × ' + esc(fmtShares(t.shares)));
+      ' × ' + esc(fmtShares(t.shares)), true);
     if (t.error) {
       cols += '<div class="mt-trade-col mt-trade-error">指标计算失败：' + esc(t.error) + '</div>';
     } else if (closed) {
-      cols += tradeCol('清仓', esc(t.sell_date) + ' @ ' + esc(fmtPrice(t.sell_price)));
+      cols += tradeCol('清仓', esc(t.sell_date) + ' @ ' + esc(fmtPrice(t.sell_price)), true);
       cols += tradeCol('实际盈亏', '<span class="' + pctClass(t.realized_pnl) + '">' +
-        esc(fmtPct(t.realized_pnl_pct)) + '（' + esc(fmtMoney(t.realized_pnl)) + '）</span>');
+        esc(fmtPct(t.realized_pnl_pct)) + '（' + esc(fmtMoney(t.realized_pnl)) + '）</span>', true);
       cols += tradeCol('最大浮盈', '<span class="' + pctClass(holding.max_gain_pct) + '">' +
         esc(fmtPct(holding.max_gain_pct)) + '</span>');
       cols += tradeCol('最大回撤', '<span class="' + pctClass(holding.max_drawdown) + '">' +
@@ -554,7 +554,7 @@
       cols += tradeCol('持仓金额', esc(fmtMoney(t.position_value).replace(/^\+/, '')));
       cols += tradeCol('现价', esc(fmtPrice(t.latest_price)));
       cols += tradeCol('盈亏', '<span class="' + pctClass(holding.pnl_pct) + '">' +
-        esc(fmtPct(holding.pnl_pct)) + '（' + esc(fmtMoney(t.pnl_amount)) + '）</span>');
+        esc(fmtPct(holding.pnl_pct)) + '（' + esc(fmtMoney(t.pnl_amount)) + '）</span>', true);
       cols += tradeCol('最大浮盈', '<span class="' + pctClass(holding.max_gain_pct) + '">' +
         esc(fmtPct(holding.max_gain_pct)) + '</span>');
       cols += tradeCol('最大回撤', '<span class="' + pctClass(holding.max_drawdown) + '">' +
@@ -577,8 +577,8 @@
           '<span class="mt-trade-symbol">' + esc(t.symbol) + '</span>' +
         '</div>' +
         '<div class="mt-trade-cols">' + cols + '</div>' +
-        actions +
         '<div class="mt-trade-badges">' + badges.join('') + '</div>' +
+        actions +
       '</div>' +
       '<div class="mt-trade-detail" hidden></div>' +
       '</div>';
