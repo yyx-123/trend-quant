@@ -2,9 +2,30 @@
 
 > 日期：2026-07-22（v3 修订：2026-07-24，吸收外部 code review 意见）
 > 分支：feature/cangwei-strategy
-> 状态：方案已获用户认可并经两轮外部 code review（v2：统一降级机制；v3：
-> Kelly 净收益率口径、atr_at 签名与回溯上限、数据链路细节；v3.1：SELL trade
-> 新增 avg_cost 字段、skip reason 枚举补全），审核结论为批准开发
+> 状态：**已实施完成**（2026-07-24）。方案经两轮外部 code review（v2：统一降级
+> 机制；v3：Kelly 净收益率口径、atr_at 签名与回溯上限、数据链路细节；v3.1：
+> SELL trade 新增 avg_cost 字段、skip reason 枚举补全），审核结论为批准开发。
+>
+> **实施清单**（与第 4 节顺序一致，全部完成）：
+> 1. `src/rule_backtest/sizing/`：base（统一 fallback_pct 降级 + DEGRADED_FLAGS +
+>    skip reason 枚举）、fixed_pct / risk_budget / kelly、registry（参数校验 +
+>    sizer_types payload）、loader（DB-only）
+> 2. `db.py`：`position_strategies` 表 + CRUD（软删除后 load 报错）
+> 3. 引擎：`RuleBacktestRequest.sizer`（None 走旧全仓路径）、买入点
+>    affordable→sizer→min+lot 对齐、SELL trade 新增 avg_cost、skipped_buys、
+>    trade.sizing 注解、降级 warn 日志、两套 buy_points 透传 flags +
+>    skipped_buy_points
+> 4. service 笛卡尔积（strategy × sizer，缺省单倍全仓）+ API：
+>    `/rule-backtest/api/run` 加 position_strategy_ids、`/api/meta` 加
+>    position_strategies/sizer_types、position-strategies CRUD 端点、
+>    新页面路由 `/position-strategies`
+> 5. 前端：仓位策略管理页（类型下拉 + 参数表单按 sizer_types 动态渲染）；
+>    market_view 回测区：仓位策略多选、汇总表「策略 × 仓位」标签、交易表
+>    仓位% 列 / 降级橙色徽标与行高亮 / 跳过灰色行、K 线降级买点异色 +
+>    跳过空心标记
+> 6. 测试：sizer 单测 31、loader 6、引擎 sizing 10、service 笛卡尔积 3、
+>    API 4；全量 374 通过（2 个 intraday 集成测试失败为预存问题，与本次无关）；
+>    golden 测试（P1.3 memoized vs legacy）逐字节不变
 
 ## 1. 背景与目标
 

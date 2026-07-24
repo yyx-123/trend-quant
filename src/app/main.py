@@ -13,6 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.routers import (
     instruments,
     market_view,
+    position_strategy,
     rule_backtest,
     subject_market,
 )
@@ -162,6 +163,7 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 app.include_router(rule_backtest.router)
+app.include_router(position_strategy.router)
 app.include_router(instruments.router)
 app.include_router(market_view.router)
 app.include_router(subject_market.router)

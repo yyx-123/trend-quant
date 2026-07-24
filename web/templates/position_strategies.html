@@ -1,0 +1,377 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.rule-strategy-page .strategy-row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.rule-strategy-page .strategy-danger-btn {
+  border-color: var(--danger);
+  background: linear-gradient(135deg, #c15b58 0%, #a54441 100%);
+  box-shadow: 0 14px 26px rgba(193, 91, 88, 0.24);
+}
+.rule-strategy-page .strategy-danger-btn:hover:not(:disabled) {
+  box-shadow: 0 20px 32px rgba(193, 91, 88, 0.28);
+}
+.rule-strategy-page .strategy-delete-text {
+  margin: 4px 0 18px;
+  color: var(--text-soft);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.rule-strategy-page .sizer-type-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 900;
+  vertical-align: middle;
+}
+.rule-strategy-page .sizer-param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+.rule-strategy-page .sizer-param-field {
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+.rule-strategy-page .sizer-param-field input,
+.rule-strategy-page .sizer-param-field select {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid rgba(20, 41, 51, 0.16);
+  border-radius: 10px;
+  font: inherit;
+}
+</style>
+
+<section class="page-panel rule-strategy-page">
+  <h2>仓位策略</h2>
+  <p class="context-hint">
+    管理买入时的仓位控制策略（固定比例 / 风险预算 / 凯利比）。仓位策略在标的查看页回测时与交易策略组合（笛卡尔积）使用；
+    不选择仓位策略时回测保持全仓买入。
+  </p>
+
+  <div class="strategy-toolbar">
+    <div>
+      <span class="strategy-toolbar-kicker">Position Sizing</span>
+      <h3>仓位策略列表</h3>
+    </div>
+    <button id="addStrategyBtn" type="button">+ 新增仓位策略</button>
+  </div>
+  <p id="status" class="status-banner">加载中...</p>
+  <div id="strategyGrid" class="strategy-list"></div>
+</section>
+
+<div id="strategyEditor" class="rule-strategy-modal" hidden>
+  <div class="rule-strategy-dialog" role="dialog" aria-modal="true" aria-labelledby="editorDialogTitle">
+    <div class="rule-strategy-dialog-head">
+      <div>
+        <h3 id="editorDialogTitle">新增仓位策略</h3>
+        <p class="context-hint">选择仓位策略类型后填写参数。所有类型的「降级仓位比例」含义一致：当策略无法计算理论仓位时（如凯利比≤0、无可用ATR），按该比例买入并标记。</p>
+        <p id="editorMeta" class="rule-strategy-editor-meta" hidden></p>
+      </div>
+      <button id="closeEditorBtn" type="button" class="ghost-btn">关闭</button>
+    </div>
+    <label class="rule-strategy-name-field">策略名称
+      <input id="editorName" type="text" maxlength="60" placeholder="例如：半仓买入 / 风险预算1万 / 凯利10">
+    </label>
+    <label class="rule-strategy-name-field">策略描述（可选）
+      <input id="editorDesc" type="text" maxlength="200" placeholder="备注该仓位策略的用途">
+    </label>
+    <label class="rule-strategy-name-field">策略类型
+      <select id="editorType"></select>
+    </label>
+    <p id="editorTypeHint" class="context-hint"></p>
+    <div id="editorParams" class="sizer-param-grid"></div>
+    <div class="rule-strategy-dialog-actions">
+      <p id="editorError" class="strategy-delete-text" hidden></p>
+      <button id="cancelEditorBtn" type="button" class="ghost-btn">取消</button>
+      <button id="saveEditorBtn" type="button">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="deleteConfirm" class="rule-strategy-modal" hidden>
+  <div class="rule-strategy-dialog strategy-delete-dialog" role="alertdialog" aria-modal="true">
+    <div class="rule-strategy-dialog-head">
+      <div>
+        <h3>删除仓位策略</h3>
+        <p class="context-hint">删除后不可恢复，请再次确认。</p>
+      </div>
+      <button id="closeDeleteBtn" type="button" class="ghost-btn">关闭</button>
+    </div>
+    <p id="deleteText" class="strategy-delete-text"></p>
+    <div class="rule-strategy-dialog-actions">
+      <button id="cancelDeleteBtn" type="button" class="ghost-btn">取消</button>
+      <button id="confirmDeleteBtn" type="button" class="strategy-danger-btn">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const API_META = "/rule-backtest/api/meta";
+  const API_SAVE = "/rule-backtest/api/position-strategies";
+  const API_DELETE = "/rule-backtest/api/position-strategies/";
+
+  const PARAM_LABELS = {
+    pct: "买入比例（0~1）",
+    fallback_pct: "降级仓位比例（0~1）",
+    mode: "风险预算模式",
+    value: "风险预算值",
+    atr_period: "ATR 周期",
+    atr_mul: "ATR 倍数",
+    lookback: "历史交易笔数 N",
+    fraction: "凯利乘数（1=全凯利，0.5=半凯利）",
+    max_pct: "最大仓位比例（0~1）",
+  };
+  const TYPE_HINTS = {
+    fixed_pct: "每次买入信号按可用现金的固定比例投入。比例 1.0 即全仓（现状）。",
+    risk_budget: "按风险预算买入：理论硬止损 = 买入价 − ATR×倍数（仅用于仓位计算），目标数量 = 风险预算 ÷ 每股风险；全买不超预算时全买。预算值按模式解释为固定金额（元）或总权益比例（0~1）。",
+    kelly: "按近 N 笔已平仓交易的胜率/盈亏比（净收益率口径）计算凯利比例 f* = p − (1−p)/b，乘以凯利乘数并封顶。首次买入无历史时全仓；f*≤0 时按降级仓位买入。",
+  };
+  const MODE_OPTIONS = [
+    { value: "absolute", label: "固定金额（元）" },
+    { value: "equity_pct", label: "总权益比例（0~1）" },
+  ];
+
+  let sizerTypes = [];
+  let strategies = [];
+  let editingId = null;   // null => create (server generates id)
+  let deletingId = null;
+
+  const statusEl = document.getElementById("status");
+  const gridEl = document.getElementById("strategyGrid");
+
+  function esc(text) {
+    return String(text ?? "").replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  function typeSpec(type) {
+    return sizerTypes.find(t => t.type === type) || null;
+  }
+
+  function fmtPct(v) {
+    const n = Number(v);
+    return isFinite(n) ? (n * 100).toFixed(n * 100 % 1 ? 1 : 0) + "%" : String(v);
+  }
+
+  function paramSummary(item) {
+    const s = item.strategy || {};
+    const params = s.params || {};
+    const parts = [];
+    if (s.sizer_type === "fixed_pct") {
+      parts.push("买入比例 " + fmtPct(params.pct));
+    } else if (s.sizer_type === "risk_budget") {
+      parts.push(params.mode === "equity_pct" ? "预算 权益的" + fmtPct(params.value) : "预算 " + Number(params.value).toLocaleString() + " 元");
+      parts.push("ATR(" + params.atr_period + ")×" + params.atr_mul);
+    } else if (s.sizer_type === "kelly") {
+      parts.push("近 " + params.lookback + " 笔");
+      parts.push("乘数 " + params.fraction);
+      parts.push("上限 " + fmtPct(params.max_pct));
+    }
+    parts.push("降级 " + fmtPct(params.fallback_pct));
+    return parts.join(" · ");
+  }
+
+  function render() {
+    if (!strategies.length) {
+      gridEl.innerHTML = '<div class="content-panel">暂无仓位策略。点击“新增仓位策略”创建第一个；不选择仓位策略时回测保持全仓买入。</div>';
+      return;
+    }
+    gridEl.innerHTML = strategies.map(item => {
+      const spec = typeSpec(item.sizer_type);
+      const typeLabel = spec ? spec.label : esc(item.sizer_type);
+      return `
+      <article class="strategy-row ${item.valid ? "" : "is-invalid"}">
+        <header class="strategy-row-head">
+          <div>
+            <h4>${esc(item.name)} <span class="sizer-type-badge">${esc(typeLabel)}</span></h4>
+            <p class="context-hint">${esc(item.description || paramSummary(item))}</p>
+            <p class="context-hint">${esc(paramSummary(item))}</p>
+            ${item.valid ? "" : `<p class="strategy-delete-text">配置无效：${esc((item.errors || []).join("；"))}</p>`}
+          </div>
+          <div class="strategy-row-actions">
+            <button type="button" class="ghost-btn" data-action="edit" data-id="${esc(item.id)}">编辑</button>
+            <button type="button" class="ghost-btn" data-action="copy" data-id="${esc(item.id)}">复制</button>
+            <button type="button" class="strategy-danger-btn" data-action="delete" data-id="${esc(item.id)}">删除</button>
+          </div>
+        </header>
+      </article>`;
+    }).join("");
+  }
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text || "";
+    statusEl.style.color = isError ? "#c0392b" : "";
+    statusEl.hidden = !text;
+  }
+
+  async function loadAll() {
+    setStatus("加载中...");
+    try {
+      const resp = await fetch(API_META);
+      const data = await resp.json();
+      sizerTypes = data.sizer_types || [];
+      strategies = (data.position_strategies || []);
+      setStatus(strategies.length ? "" : "");
+      render();
+    } catch (err) {
+      setStatus("加载失败：" + err.message, true);
+    }
+  }
+
+  // ---------------- editor ----------------
+  const editorEl = document.getElementById("strategyEditor");
+  const nameEl = document.getElementById("editorName");
+  const descEl = document.getElementById("editorDesc");
+  const typeEl = document.getElementById("editorType");
+  const typeHintEl = document.getElementById("editorTypeHint");
+  const paramsEl = document.getElementById("editorParams");
+  const errorEl = document.getElementById("editorError");
+  const metaEl = document.getElementById("editorMeta");
+
+  function openEditor(item) {
+    editingId = item ? item.id : null;
+    document.getElementById("editorDialogTitle").textContent = item ? "编辑仓位策略" : "新增仓位策略";
+    nameEl.value = item ? item.name : "";
+    descEl.value = item ? (item.description || "") : "";
+    const s = item ? (item.strategy || {}) : {};
+    typeEl.innerHTML = sizerTypes.map(t =>
+      `<option value="${esc(t.type)}" ${t.type === s.sizer_type ? "selected" : ""}>${esc(t.label)}（${esc(t.type)}）</option>`
+    ).join("");
+    if (!item && sizerTypes.length) typeEl.value = sizerTypes[0].type;
+    typeEl.disabled = !!item;  // type is immutable once created
+    metaEl.hidden = !item;
+    if (item) metaEl.textContent = "ID: " + item.id + "（类型不可修改，如需换类型请新建）";
+    errorEl.hidden = true;
+    renderParamForm(s.params || {});
+    editorEl.hidden = false;
+  }
+
+  function renderParamForm(values) {
+    const spec = typeSpec(typeEl.value);
+    typeHintEl.textContent = TYPE_HINTS[typeEl.value] || "";
+    if (!spec) { paramsEl.innerHTML = ""; return; }
+    paramsEl.innerHTML = Object.entries(spec.params).map(([name, p]) => {
+      const val = values[name] !== undefined ? values[name] : p.default;
+      const label = PARAM_LABELS[name] || name;
+      if (name === "mode") {
+        return `<label class="sizer-param-field">${esc(label)}
+          <select data-param="${esc(name)}">
+            ${MODE_OPTIONS.map(o => `<option value="${o.value}" ${o.value === val ? "selected" : ""}>${o.label}</option>`).join("")}
+          </select>
+        </label>`;
+      }
+      const step = p.type === "int" ? "1" : "any";
+      return `<label class="sizer-param-field">${esc(label)}
+        <input type="number" step="${step}" data-param="${esc(name)}" value="${esc(val)}">
+      </label>`;
+    }).join("");
+  }
+
+  function collectParams() {
+    const spec = typeSpec(typeEl.value);
+    const params = {};
+    paramsEl.querySelectorAll("[data-param]").forEach(el => {
+      const name = el.getAttribute("data-param");
+      const p = spec.params[name];
+      if (p.type === "int") params[name] = parseInt(el.value, 10);
+      else if (p.type === "float") params[name] = parseFloat(el.value);
+      else params[name] = el.value;
+    });
+    return params;
+  }
+
+  async function saveEditor() {
+    const name = nameEl.value.trim();
+    if (!name) {
+      errorEl.textContent = "请填写策略名称";
+      errorEl.hidden = false;
+      return;
+    }
+    const strategy = {
+      id: editingId || "",
+      name,
+      description: descEl.value.trim(),
+      sizer_type: typeEl.value,
+      params: collectParams(),
+    };
+    try {
+      const resp = await fetch(API_SAVE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy, overwrite: !!editingId }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || ("HTTP " + resp.status));
+      editorEl.hidden = true;
+      await loadAll();
+    } catch (err) {
+      errorEl.textContent = "保存失败：" + err.message;
+      errorEl.hidden = false;
+    }
+  }
+
+  // ---------------- delete ----------------
+  const deleteEl = document.getElementById("deleteConfirm");
+
+  function openDelete(item) {
+    deletingId = item.id;
+    document.getElementById("deleteText").textContent = "确定删除仓位策略「" + item.name + "」（" + item.id + "）吗？";
+    deleteEl.hidden = false;
+  }
+
+  async function confirmDelete() {
+    try {
+      const resp = await fetch(API_DELETE + encodeURIComponent(deletingId), { method: "DELETE" });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || ("HTTP " + resp.status));
+      deleteEl.hidden = true;
+      await loadAll();
+    } catch (err) {
+      document.getElementById("deleteText").textContent = "删除失败：" + err.message;
+    }
+  }
+
+  // ---------------- wiring ----------------
+  document.getElementById("addStrategyBtn").addEventListener("click", () => openEditor(null));
+  document.getElementById("closeEditorBtn").addEventListener("click", () => { editorEl.hidden = true; });
+  document.getElementById("cancelEditorBtn").addEventListener("click", () => { editorEl.hidden = true; });
+  document.getElementById("saveEditorBtn").addEventListener("click", saveEditor);
+  document.getElementById("closeDeleteBtn").addEventListener("click", () => { deleteEl.hidden = true; });
+  document.getElementById("cancelDeleteBtn").addEventListener("click", () => { deleteEl.hidden = true; });
+  document.getElementById("confirmDeleteBtn").addEventListener("click", confirmDelete);
+  typeEl.addEventListener("change", () => renderParamForm({}));
+  gridEl.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-action]");
+    if (!btn) return;
+    const item = strategies.find(s => s.id === btn.getAttribute("data-id"));
+    if (!item) return;
+    const action = btn.getAttribute("data-action");
+    if (action === "edit") openEditor(item);
+    else if (action === "delete") openDelete(item);
+    else if (action === "copy") {
+      const copy = { ...item, id: null, name: item.name + " 副本", strategy: JSON.parse(JSON.stringify(item.strategy || {})) };
+      openEditor({ ...copy, id: null, strategy: copy.strategy });
+      editingId = null;
+      document.getElementById("editorDialogTitle").textContent = "新增仓位策略";
+      typeEl.disabled = false;
+    }
+  });
+
+  loadAll();
+})();
+</script>
+{% endblock %}

@@ -27,6 +27,7 @@ RULE_JOB_TTL_SECONDS = 1800
 
 class RuleBacktestRunRequest(BaseModel):
     strategy_ids: list[str] = Field(default_factory=list)
+    position_strategy_ids: list[str] = Field(default_factory=list)
     symbol: str
     start_date: str = Field(default="")
     end_date: str = Field(default="")
@@ -41,6 +42,11 @@ class RuleBacktestRunRequest(BaseModel):
 
 
 class RuleStrategySaveRequest(BaseModel):
+    strategy: dict
+    overwrite: bool = Field(default=False)
+
+
+class PositionStrategySaveRequest(BaseModel):
     strategy: dict
     overwrite: bool = Field(default=False)
 
@@ -78,6 +84,8 @@ async def get_rule_backtest_meta() -> dict:
         "strategies": service.list_strategies(),
         "instruments": service.list_instruments(),
         "indicators": service.list_indicators(),
+        "position_strategies": service.list_position_strategies(),
+        "sizer_types": service.list_sizer_types(),
         # Frontend form defaults (single source — JS must not hardcode these).
         "state_values": ["entry_price", "hard_stop", "highest_high_since_entry", "chandelier_stop"],
         "stop_defaults": {
@@ -119,10 +127,11 @@ async def run_rule_backtest(payload: RuleBacktestRunRequest) -> dict:
 
     body = payload.model_dump()
     logger.info(
-        "Rule backtest started run_id=%s symbol=%s strategies=%s range=%s~%s",
+        "Rule backtest started run_id=%s symbol=%s strategies=%s sizers=%s range=%s~%s",
         run_id,
         payload.symbol,
         payload.strategy_ids,
+        payload.position_strategy_ids,
         payload.start_date or "-",
         payload.end_date or "-",
     )
@@ -204,6 +213,26 @@ async def save_rule_strategy(payload: RuleStrategySaveRequest) -> dict:
 async def delete_rule_strategy(strategy_id: str) -> dict:
     try:
         return service.delete_strategy(strategy_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/position-strategies")
+async def save_position_strategy(payload: PositionStrategySaveRequest) -> dict:
+    try:
+        return service.save_position_strategy(payload.strategy, overwrite=payload.overwrite)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/api/position-strategies/{strategy_id}")
+async def delete_position_strategy(strategy_id: str) -> dict:
+    try:
+        return service.delete_position_strategy(strategy_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

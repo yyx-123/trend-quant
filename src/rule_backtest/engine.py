@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import logging
 
 import pandas as pd
 
@@ -14,8 +15,16 @@ from rule_backtest.metrics import (
     monthly_returns,
 )
 from rule_backtest.models import BacktestExecutionConfig, PositionState, RuleBacktestRequest
+from rule_backtest.sizing.base import (
+    DEGRADED_FLAGS,
+    SKIP_INSUFFICIENT_CASH,
+    SKIP_TARGET_BELOW_LOT,
+    SizingContext,
+)
 from rule_backtest.state_values import initialize_stop_state, update_position_state_for_day
 from rule_backtest.value_resolver import ValueResolver
+
+logger = logging.getLogger(__name__)
 
 
 class SingleSymbolAllInBacktestEngine:
@@ -45,6 +54,7 @@ class SingleSymbolAllInBacktestEngine:
         cash = float(execution.initial_capital)
         position = PositionState()
         trades: list[dict] = []
+        skipped_buys: list[dict] = []
         daily_nav: list[dict] = []
         condition_trace: list[dict] = []
         debug_log: list[dict] = []
@@ -131,11 +141,26 @@ class SingleSymbolAllInBacktestEngine:
 
             if (not position.is_open) and entry_passed:
                 reference_price = close_price
-                qty = self._max_buy_qty(
+                qty, sizing_info, skip_info = self._resolve_buy_qty(
+                    sizer=request.sizer,
+                    resolver=resolver,
+                    idx=idx,
+                    day_bars=day_bars,
+                    day_str=day_str,
                     cash=cash,
                     reference_price=reference_price,
+                    trades=trades,
                     execution=execution,
                 )
+                if qty <= 0:
+                    if skip_info is not None:
+                        skipped_buys.append(skip_info)
+                    if debug_enabled:
+                        debug_day["decision"] = {
+                            "side": "BUY_SKIPPED",
+                            "reason": (skip_info or {}).get("reason", ""),
+                        }
+                        debug_day["sizing_decision"] = sizing_info
                 if qty > 0:
                     trade, cash_delta = self._execute_buy(
                         symbol=request.symbol,
@@ -148,6 +173,12 @@ class SingleSymbolAllInBacktestEngine:
                     )
                     cash += cash_delta
                     turnover_total += float(trade["gross_amount"])
+                    if sizing_info is not None:
+                        cash_before = float(trade["cash_before"])
+                        sizing_info["position_pct"] = (
+                            float(trade["total_cost"]) / cash_before if cash_before > 0 else 0.0
+                        )
+                        trade["sizing"] = sizing_info
                     trades.append(trade)
                     position.qty = qty
                     position.avg_cost = float(trade["total_cost"]) / qty
@@ -162,6 +193,7 @@ class SingleSymbolAllInBacktestEngine:
                     if debug_enabled:
                         debug_day["decision"] = {"side": "BUY", "reason": "entry_conditions_passed"}
                         debug_day["execution_trace"] = trade
+                        debug_day["sizing_decision"] = sizing_info
                         debug_day["state_initialization"] = initialize_trace
 
             market_value = position.qty * close_price if position.is_open else 0.0
@@ -191,12 +223,14 @@ class SingleSymbolAllInBacktestEngine:
         )
         benchmark_nav = benchmark.get("series", [])
         benchmark_summary = compute_summary(daily_nav=benchmark_nav, trades=[], turnover_total=0.0)
-        kline_payload = self._build_kline_payload(bars=bars, trades=trades)
+        kline_payload = self._build_kline_payload(bars=bars, trades=trades, skipped_buys=skipped_buys)
 
         return {
             "run_id": run_id,
             "status": "ok",
             "strategy_id": strategy.get("id", ""),
+            "sizer_id": getattr(request.sizer, "strategy_id", "") if request.sizer is not None else "",
+            "sizer_name": getattr(request.sizer, "strategy_name", "") if request.sizer is not None else "",
             "symbol": request.symbol,
             "start_date": bars["date"].iloc[0].isoformat() if not bars.empty else None,
             "end_date": bars["date"].iloc[-1].isoformat() if not bars.empty else None,
@@ -204,6 +238,7 @@ class SingleSymbolAllInBacktestEngine:
             "final_equity": float(daily_nav[-1]["equity"]) if daily_nav else float(execution.initial_capital),
             "summary": summary,
             "trades": trades,
+            "skipped_buys": skipped_buys,
             "daily_nav": daily_nav,
             "condition_trace": condition_trace,
             "debug_log": debug_log if debug_enabled else [],
@@ -223,6 +258,15 @@ class SingleSymbolAllInBacktestEngine:
                 "drawdown": [row["drawdown"] for row in drawdown],
                 "buy_points": [self._trade_point(trade) for trade in trades if trade["side"] == "BUY"],
                 "sell_points": [self._trade_point(trade) for trade in trades if trade["side"] == "SELL"],
+                "skipped_buy_points": [
+                    {
+                        "date": skip["date"],
+                        "price": skip["close"],
+                        "reason": skip["reason"],
+                        "note": skip.get("note", ""),
+                    }
+                    for skip in skipped_buys
+                ],
                 "kline": kline_payload,
             },
         }
@@ -250,6 +294,85 @@ class SingleSymbolAllInBacktestEngine:
             return False
         days = (bars["date"].iloc[-1] - bars["date"].iloc[0]).days
         return days < int(execution.debug_auto_enable_max_days)
+
+    def _resolve_buy_qty(
+        self,
+        *,
+        sizer: object | None,
+        resolver: ValueResolver,
+        idx: int,
+        day_bars: pd.DataFrame,
+        day_str: str,
+        cash: float,
+        reference_price: float,
+        trades: list[dict],
+        execution: BacktestExecutionConfig,
+    ) -> tuple[int, dict | None, dict | None]:
+        """Decide the buy quantity: affordability first (legacy logic), then
+        the position sizer's target, clamped and lot-aligned.
+
+        Returns (qty, sizing_annotation, skip_record). qty=0 with a
+        skip_record means the entry signal produced no trade.
+        """
+        affordable_qty = self._max_buy_qty(cash=cash, reference_price=reference_price, execution=execution)
+        if affordable_qty <= 0:
+            return 0, None, {
+                "date": day_str,
+                "reason": SKIP_INSUFFICIENT_CASH,
+                "note": "现金不足，买不起一手",
+                "close": float(reference_price),
+            }
+        if sizer is None:
+            return affordable_qty, None, None
+
+        ctx = SizingContext(
+            cash=float(cash),
+            equity=float(cash),  # no open position at a buy point
+            reference_price=float(reference_price),
+            exec_price=float(reference_price) * (1.0 + execution.slippage),
+            atr_at=self._make_atr_source(resolver=resolver, idx=idx),
+            closed_trades=[t for t in trades if t.get("side") == "SELL"],
+            execution=execution,
+            history_bars=int(len(day_bars)),
+        )
+        decision = sizer.decide(ctx)
+        annotation = {
+            "sizer_id": getattr(sizer, "strategy_id", ""),
+            "sizer_type": getattr(sizer, "sizer_type", ""),
+            "target_pct": float(decision.position_pct),
+            "flags": list(decision.flags),
+            "note": decision.note,
+        }
+        degraded = sorted(set(decision.flags) & DEGRADED_FLAGS)
+        if degraded:
+            logger.warning(
+                "Degraded position sizing on %s (sizer=%s, flags=%s): %s",
+                day_str, annotation["sizer_id"], ",".join(degraded), decision.note,
+            )
+
+        lot_size = max(int(execution.lot_size), 1)
+        target_qty = (max(int(decision.target_qty), 0) // lot_size) * lot_size
+        if decision.action == "skip" or target_qty <= 0:
+            return 0, annotation, {
+                "date": day_str,
+                "reason": SKIP_TARGET_BELOW_LOT,
+                "note": decision.note or "仓位策略目标数量不足一手",
+                "close": float(reference_price),
+            }
+        # No re-validation of fees needed after clamping: commission is
+        # max(gross * rate, fee_min), so a smaller qty never costs more
+        # than the affordable quantity the engine already validated.
+        return min(affordable_qty, target_qty), annotation, None
+
+    @staticmethod
+    def _make_atr_source(resolver: ValueResolver, idx: int):
+        """Bind the resolver's memoized ATR lookup to the current day index
+        (position within all_bars; identical to the idx state_values uses)."""
+
+        def atr_at(period: int, lookback: int = 0) -> float | None:
+            return resolver.atr_value_at(idx - int(lookback), int(period))
+
+        return atr_at
 
     @staticmethod
     def _max_buy_qty(cash: float, reference_price: float, execution: BacktestExecutionConfig) -> int:
@@ -339,6 +462,7 @@ class SingleSymbolAllInBacktestEngine:
             "exec_price": float(exec_price),
             "price": float(exec_price),
             "gross_amount": float(gross),
+            "avg_cost": float(avg_cost),
             "commission_rate": float(execution.fee_rate),
             "commission_min": float(execution.fee_min),
             "commission": float(commission),
@@ -429,6 +553,7 @@ class SingleSymbolAllInBacktestEngine:
             "price": trade.get("exec_price"),
             "amount": trade.get("total_cost") if trade.get("side") == "BUY" else trade.get("net_proceeds"),
             "reason": trade.get("reason"),
+            "flags": list(trade.get("sizing", {}).get("flags", [])),
         }
 
     @staticmethod
@@ -445,9 +570,9 @@ class SingleSymbolAllInBacktestEngine:
         return {"name": "buy_and_hold", "qty": int(qty), "series": series}
 
     @staticmethod
-    def _build_kline_payload(bars: pd.DataFrame, trades: list[dict]) -> dict:
+    def _build_kline_payload(bars: pd.DataFrame, trades: list[dict], skipped_buys: list[dict] | None = None) -> dict:
         if bars.empty:
-            return {"dates": [], "candles": [], "ma": {}, "buy_points": [], "sell_points": []}
+            return {"dates": [], "candles": [], "ma": {}, "buy_points": [], "sell_points": [], "skipped_buy_points": []}
 
         data = bars.copy()
         dates = [row["date"].isoformat() for _, row in data.iterrows()]
@@ -476,11 +601,22 @@ class SingleSymbolAllInBacktestEngine:
                 "qty": int(trade.get("qty", 0) or 0),
                 "amount": trade.get("total_cost") if str(trade.get("side", "")).upper() == "BUY" else trade.get("net_proceeds"),
                 "reason": trade.get("reason", ""),
+                "flags": list(trade.get("sizing", {}).get("flags", [])),
             }
             if str(trade.get("side", "")).upper() == "BUY":
                 buy_points.append(point)
             elif str(trade.get("side", "")).upper() == "SELL":
                 sell_points.append(point)
+
+        skipped_buy_points = [
+            {
+                "date": str(skip.get("date", "")),
+                "price": float(skip.get("close", 0.0) or 0.0),
+                "reason": str(skip.get("reason", "")),
+                "note": str(skip.get("note", "")),
+            }
+            for skip in (skipped_buys or [])
+        ]
 
         return {
             "dates": dates,
@@ -488,4 +624,5 @@ class SingleSymbolAllInBacktestEngine:
             "ma": ma,
             "buy_points": buy_points,
             "sell_points": sell_points,
+            "skipped_buy_points": skipped_buy_points,
         }

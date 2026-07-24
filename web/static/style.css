@@ -1043,7 +1043,11 @@ button:disabled {
 }
 
 .market-trades-table .trade-col-qty {
-  width: 10%;
+  width: 8%;
+}
+
+.market-trades-table .trade-col-pos {
+  width: 8%;
 }
 
 .market-trades-table .trade-col-price {
@@ -1065,6 +1069,44 @@ button:disabled {
 .market-trades-table .trade-col-fee,
 .market-trades-table .trade-col-tax {
   width: 8%;
+}
+
+/* Position sizing annotations in the trades table */
+.market-trades-table .trade-row-degraded {
+  background: rgba(234, 88, 12, 0.07);
+}
+
+.market-trades-table .trade-row-degraded:hover {
+  background: rgba(234, 88, 12, 0.12);
+}
+
+.market-trades-table .trade-row-skipped {
+  color: var(--muted, #6b7280);
+  background: rgba(107, 114, 128, 0.05);
+  font-style: italic;
+}
+
+.market-trades-table .sizing-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(107, 114, 128, 0.14);
+  color: #4b5563;
+  font-size: 10px;
+  font-weight: 800;
+  font-style: normal;
+  cursor: help;
+  vertical-align: middle;
+}
+
+.market-trades-table .sizing-badge--degraded {
+  background: rgba(234, 88, 12, 0.16);
+  color: #c2410c;
+}
+
+.market-trades-table .text-muted {
+  color: var(--muted, #9ca3af);
 }
 
 .text-center {
