@@ -22,7 +22,7 @@
   --shadow-lg: 0 28px 60px rgba(17, 35, 42, 0.1);
   --shadow-md: 0 18px 34px rgba(17, 35, 42, 0.08);
   --shadow-sm: 0 10px 20px rgba(17, 35, 42, 0.06);
-  --max-width: 1760px;
+  --max-width: 2160px;
 }
 
 * {

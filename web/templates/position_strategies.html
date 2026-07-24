@@ -39,8 +39,10 @@
 
 /* 弹窗整体限制在视口内（modal padding 36px×2），内容超出时内部滚动。
    此时弹窗自身成为滚动容器，全局的 sticky 按钮栏正好钉在弹窗可见底部，
-   保存/取消始终可见（不要覆盖回 static，否则会沉到滚动区底部）。 */
+   保存/取消始终可见（不要覆盖回 static，否则会沉到滚动区底部）。
+   大屏下加宽弹窗，与页面比例协调（策略管理页弹窗维持 1240px 不变）。 */
 .rule-strategy-page .rule-strategy-dialog {
+  width: min(1500px, 100%);
   max-height: calc(100vh - 72px);
   overflow-y: auto;
 }
