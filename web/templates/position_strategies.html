@@ -37,14 +37,9 @@
   margin: 14px 0;
 }
 
-/* 本页弹窗内容不高，按钮栏不需要 sticky（sticky 是策略管理页超长弹窗的设计，
-   在这里会悬浮到视口底部遮挡参数区） */
-.rule-strategy-page .rule-strategy-dialog-actions {
-  position: static;
-}
-
-/* 弹窗整体限制在视口内（modal padding 36px×2），内容超出时内部滚动，
-   保证保存/取消按钮始终可见 */
+/* 弹窗整体限制在视口内（modal padding 36px×2），内容超出时内部滚动。
+   此时弹窗自身成为滚动容器，全局的 sticky 按钮栏正好钉在弹窗可见底部，
+   保存/取消始终可见（不要覆盖回 static，否则会沉到滚动区底部）。 */
 .rule-strategy-page .rule-strategy-dialog {
   max-height: calc(100vh - 72px);
   overflow-y: auto;
