@@ -268,19 +268,19 @@
   let currentBacktest = null;
   let allMultiKline = [];        // [{strategy_id, strategy_name, sizer_id, sizer_name, buy_points, sell_points, skipped_buy_points}]
   let activeResultKey = null;    // which 策略×仓位 combo's markers are shown on chart
-  // Degraded sizing flags (mirror of rule_backtest.sizing.base.DEGRADED_FLAGS)
-  const SIZING_DEGRADED_FLAGS = new Set(['kelly_floor_applied', 'atr_unavailable_fallback', 'risk_budget_invalid', 'risk_per_share_invalid']);
+  // Degraded sizing flags — synced from /api/meta (ruleMeta.sizing) in
+  // loadRuleMeta; this literal is only the pre-meta fallback.
+  let SIZING_DEGRADED_FLAGS = new Set(['kelly_floor_applied', 'atr_unavailable_fallback']);
   const SIZING_FLAG_TEXT = {
     kelly_floor_applied: '凯利≤0，降级仓位',
     atr_unavailable_fallback: '无可用ATR，降级仓位',
-    risk_budget_invalid: '风险预算无效，降级仓位',
-    risk_per_share_invalid: '每股风险无效，降级仓位',
     atr_fallback_prev_day: '使用历史ATR',
     risk_budget_unconstrained: '全买未超预算',
   };
   const SKIP_REASON_TEXT = {
     insufficient_cash: '现金不足',
     sizer_target_below_lot: '目标不足一手',
+    sizer_skip: '仓位策略跳过',
   };
   let allSymbols = [];
   let ruleMeta = { strategies: [] };
@@ -1619,6 +1619,11 @@
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '策略列表加载失败');
     ruleMeta = data || { strategies: [] };
+    // Sync degradation enums from the backend (single source of truth).
+    const sizingMeta = ruleMeta.sizing || {};
+    if (Array.isArray(sizingMeta.degraded_flags) && sizingMeta.degraded_flags.length) {
+      SIZING_DEGRADED_FLAGS = new Set(sizingMeta.degraded_flags);
+    }
     const strategies = (ruleMeta.strategies || []).filter((item) => item.valid);
     backtestStrategyListEl.innerHTML = strategies.length
       ? strategies.map((item) => `

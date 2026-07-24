@@ -68,19 +68,20 @@ class RiskBudgetSizer(PositionSizer):
                 "atr_unavailable_fallback",
                 "买入日及历史均无可用 ATR，无法计算理论止损，按降级仓位买入",
             )
+        # Constructor guarantees value > 0 and atr_mul > 0, and the engine
+        # only consults the sizer when cash > 0, so risk_budget and
+        # risk_per_share are always positive here.
         risk_budget = self.value if self.mode == "absolute" else ctx.equity * self.value
-        if risk_budget <= 0:
-            return self._fallback_decision(ctx, "risk_budget_invalid", "风险预算非正数，按降级仓位买入")
         risk_per_share = self.atr_mul * atr  # exec_price - theoretical stop
-        if risk_per_share <= 0:
-            return self._fallback_decision(ctx, "risk_per_share_invalid", "每股风险非正数，按降级仓位买入")
 
         target_qty = int(risk_budget // risk_per_share)
         flags: list[str] = []
         if lookback_used > 0:
             flags.append("atr_fallback_prev_day")
-        affordable_hint = self._qty_for_amount(ctx, ctx.cash)
-        if target_qty >= affordable_hint:
+        # Exact "full buy" reference: the engine's fee- and lot-aligned
+        # affordable quantity (fall back to an estimate if unavailable).
+        full_qty = ctx.affordable_qty or self._qty_for_amount(ctx, ctx.cash)
+        if target_qty >= full_qty:
             # A full buy stays within the risk budget — not a degradation.
             flags.append("risk_budget_unconstrained")
         budget_desc = f"{self.value:,.0f}元" if self.mode == "absolute" else f"权益的{self.value:.1%}"

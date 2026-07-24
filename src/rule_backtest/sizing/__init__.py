@@ -1,6 +1,8 @@
 from rule_backtest.sizing.base import (
     DEGRADED_FLAGS,
+    INFO_FLAGS,
     SKIP_INSUFFICIENT_CASH,
+    SKIP_SIZER,
     SKIP_TARGET_BELOW_LOT,
     AtrSource,
     PositionSizer,
@@ -14,13 +16,16 @@ from rule_backtest.sizing.registry import (
     SIZER_REGISTRY,
     build_sizer,
     sizer_types_payload,
+    sizing_flags_payload,
     validate_position_strategy,
 )
 from rule_backtest.sizing.risk_budget import RiskBudgetSizer
 
 __all__ = [
     "DEGRADED_FLAGS",
+    "INFO_FLAGS",
     "SKIP_INSUFFICIENT_CASH",
+    "SKIP_SIZER",
     "SKIP_TARGET_BELOW_LOT",
     "AtrSource",
     "PositionSizer",
@@ -33,5 +38,6 @@ __all__ = [
     "SIZER_REGISTRY",
     "build_sizer",
     "sizer_types_payload",
+    "sizing_flags_payload",
     "validate_position_strategy",
 ]

@@ -232,6 +232,24 @@ class TestSkippedBuys:
         assert result["trades"] == []
         assert result["skipped_buys"][0]["reason"] == "insufficient_cash"
 
+    def test_sizer_initiated_skip_has_own_reason(self):
+        from rule_backtest.sizing.base import PositionSizer, SizingDecision
+
+        class SkipSizer(PositionSizer):
+            sizer_type = "skip_stub"
+
+            def decide(self, ctx):
+                return SizingDecision(action="skip", note="stub skip")
+
+            @classmethod
+            def param_specs(cls):
+                return {}
+
+        result = run_engine(make_bars([10.0, 10.0]), sizer=SkipSizer())
+        assert result["trades"] == []
+        assert result["skipped_buys"][0]["reason"] == "sizer_skip"
+        assert result["skipped_buys"][0]["note"] == "stub skip"
+
 
 class TestBuyPointFlags:
     def test_flags_propagate_to_both_buy_points_payloads(self):

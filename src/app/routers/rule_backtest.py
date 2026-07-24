@@ -86,6 +86,7 @@ async def get_rule_backtest_meta() -> dict:
         "indicators": service.list_indicators(),
         "position_strategies": service.list_position_strategies(),
         "sizer_types": service.list_sizer_types(),
+        "sizing": service.list_sizing_flags(),
         # Frontend form defaults (single source — JS must not hardcode these).
         "state_values": [
             "entry_price",

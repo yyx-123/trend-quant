@@ -31,6 +31,8 @@ FALLBACK_PCT_PARAM = ParamSpec(type="float", required=False, default=0.10, min_v
 #: Skip reasons recorded in result["skipped_buys"].
 SKIP_INSUFFICIENT_CASH = "insufficient_cash"
 SKIP_TARGET_BELOW_LOT = "sizer_target_below_lot"
+#: A sizer explicitly returned action="skip" (none of the built-in sizers do).
+SKIP_SIZER = "sizer_skip"
 
 #: Flags that indicate a degraded (fallback) decision — the engine logs a
 #: warning and the UI highlights these buys. Other flags (e.g.
@@ -38,8 +40,12 @@ SKIP_TARGET_BELOW_LOT = "sizer_target_below_lot"
 DEGRADED_FLAGS = frozenset({
     "kelly_floor_applied",
     "atr_unavailable_fallback",
-    "risk_budget_invalid",
-    "risk_per_share_invalid",
+})
+
+#: Info-only flags (normal resolution paths, surfaced without highlighting).
+INFO_FLAGS = frozenset({
+    "atr_fallback_prev_day",
+    "risk_budget_unconstrained",
 })
 
 
@@ -70,6 +76,9 @@ class SizingContext:
     execution: BacktestExecutionConfig
     # Number of bars up to and including today (bounds ATR lookback).
     history_bars: int = 0
+    # Engine-computed max affordable qty (fees + lot aligned). Sizers use
+    # this as the exact "full buy" reference instead of re-estimating.
+    affordable_qty: int = 0
 
 
 @dataclass(slots=True)

@@ -198,7 +198,7 @@
         <header class="strategy-row-head">
           <div>
             <h4>${esc(item.name)} <span class="sizer-type-badge">${esc(typeLabel)}</span></h4>
-            <p class="context-hint">${esc(item.description || paramSummary(item))}</p>
+            ${item.description ? `<p class="context-hint">${esc(item.description)}</p>` : ""}
             <p class="context-hint">${esc(paramSummary(item))}</p>
             ${item.valid ? "" : `<p class="strategy-delete-text">配置无效：${esc((item.errors || []).join("；"))}</p>`}
           </div>
@@ -363,11 +363,15 @@
     if (action === "edit") openEditor(item);
     else if (action === "delete") openDelete(item);
     else if (action === "copy") {
-      const copy = { ...item, id: null, name: item.name + " 副本", strategy: JSON.parse(JSON.stringify(item.strategy || {})) };
-      openEditor({ ...copy, id: null, strategy: copy.strategy });
-      editingId = null;
-      document.getElementById("editorDialogTitle").textContent = "新增仓位策略";
-      typeEl.disabled = false;
+      // Fresh create dialog prefilled from the source: editable type, no
+      // misleading "ID: null / 类型不可修改" meta line.
+      openEditor(null);
+      nameEl.value = (item.name || "") + " 副本";
+      descEl.value = item.description || "";
+      if (item.sizer_type) {
+        typeEl.value = item.sizer_type;
+        renderParamForm((item.strategy || {}).params || {});
+      }
     }
   });
 

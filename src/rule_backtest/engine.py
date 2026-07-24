@@ -18,6 +18,7 @@ from rule_backtest.models import BacktestExecutionConfig, PositionState, RuleBac
 from rule_backtest.sizing.base import (
     DEGRADED_FLAGS,
     SKIP_INSUFFICIENT_CASH,
+    SKIP_SIZER,
     SKIP_TARGET_BELOW_LOT,
     SizingContext,
 )
@@ -337,6 +338,7 @@ class SingleSymbolAllInBacktestEngine:
             closed_trades=[t for t in trades if t.get("side") == "SELL"],
             execution=execution,
             history_bars=int(len(day_bars)),
+            affordable_qty=int(affordable_qty),
         )
         decision = sizer.decide(ctx)
         annotation = {
@@ -355,7 +357,16 @@ class SingleSymbolAllInBacktestEngine:
 
         lot_size = max(int(execution.lot_size), 1)
         target_qty = (max(int(decision.target_qty), 0) // lot_size) * lot_size
-        if decision.action == "skip" or target_qty <= 0:
+        if decision.action == "skip":
+            # No built-in sizer returns "skip"; honor it with its own reason
+            # so future sizers are not mislabeled as below-lot.
+            return 0, annotation, {
+                "date": day_str,
+                "reason": SKIP_SIZER,
+                "note": decision.note or "仓位策略主动跳过本次买入",
+                "close": float(reference_price),
+            }
+        if target_qty <= 0:
             return 0, annotation, {
                 "date": day_str,
                 "reason": SKIP_TARGET_BELOW_LOT,

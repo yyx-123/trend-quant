@@ -24,6 +24,7 @@ def make_ctx(
     closed_trades: list[dict] | None = None,
     history_bars: int = 100,
     atr_gap_days: int = 0,
+    affordable_qty: int = 0,
 ) -> SizingContext:
     """atr_gap_days: number of most recent days whose ATR is None (warmup gap)."""
     execution = BacktestExecutionConfig(slippage=0.002, fee_rate=0.0, fee_min=0.0, lot_size=100)
@@ -44,6 +45,7 @@ def make_ctx(
         closed_trades=closed_trades or [],
         execution=execution,
         history_bars=history_bars,
+        affordable_qty=affordable_qty,
     )
 
 
@@ -95,6 +97,15 @@ class TestRiskBudgetSizer:
         # budget = 1% * 100000 = 1000 -> floor(1000 / 0.75) = 1333
         d = RiskBudgetSizer(mode="equity_pct", value=0.01).decide(make_ctx())
         assert d.target_qty == 1333
+
+    def test_unconstrained_uses_engine_affordable_qty(self):
+        # target 7500/0.75 = 10000: above the engine's exact affordable 9900
+        # (fee/lot aligned) but below the rough per-share estimate 9980 — the
+        # exact reference must still flag it unconstrained.
+        ctx = make_ctx(affordable_qty=9900)
+        d = RiskBudgetSizer(mode="absolute", value=7500.0).decide(ctx)
+        assert d.target_qty == 10000
+        assert "risk_budget_unconstrained" in d.flags
 
     def test_atr_lookback_uses_previous_day(self):
         d = RiskBudgetSizer(mode="absolute", value=3000.0).decide(make_ctx(atr_gap_days=2))

@@ -13,7 +13,7 @@ from rule_backtest.engine import SingleSymbolAllInBacktestEngine
 from rule_backtest.loader import StrategyLoader
 from rule_backtest.models import DEFAULT_FEE_RATE, BacktestExecutionConfig, RuleBacktestRequest
 from rule_backtest.registry import registry_payload
-from rule_backtest.sizing import PositionStrategyLoader, build_sizer, sizer_types_payload
+from rule_backtest.sizing import PositionStrategyLoader, build_sizer, sizer_types_payload, sizing_flags_payload
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,9 @@ class RuleBacktestService:
 
     def list_sizer_types(self) -> list[dict]:
         return sizer_types_payload()
+
+    def list_sizing_flags(self) -> dict:
+        return sizing_flags_payload()
 
     def save_position_strategy(self, strategy: dict, overwrite: bool = False) -> dict:
         if not str(strategy.get("id", "")).strip():

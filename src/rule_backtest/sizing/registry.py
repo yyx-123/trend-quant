@@ -11,7 +11,14 @@ Adding a new sizer = implement PositionSizer subclass + one registry entry.
 from __future__ import annotations
 
 from rule_backtest.registry import ParamSpec
-from rule_backtest.sizing.base import PositionSizer
+from rule_backtest.sizing.base import (
+    DEGRADED_FLAGS,
+    INFO_FLAGS,
+    SKIP_INSUFFICIENT_CASH,
+    SKIP_SIZER,
+    SKIP_TARGET_BELOW_LOT,
+    PositionSizer,
+)
 from rule_backtest.sizing.fixed_pct import FixedPctSizer
 from rule_backtest.sizing.kelly import KellySizer
 from rule_backtest.sizing.risk_budget import RiskBudgetSizer
@@ -40,6 +47,17 @@ def sizer_types_payload() -> list[dict]:
         }
         out.append({"type": sizer_type, "label": cls.label, "params": params})
     return out
+
+
+def sizing_flags_payload() -> dict:
+    """Degradation/skip enums for /api/meta — keeps the frontend's "degraded
+    must be visible" highlighting in sync with the backend instead of
+    relying on a hardcoded mirror."""
+    return {
+        "degraded_flags": sorted(DEGRADED_FLAGS),
+        "info_flags": sorted(INFO_FLAGS),
+        "skip_reasons": [SKIP_INSUFFICIENT_CASH, SKIP_TARGET_BELOW_LOT, SKIP_SIZER],
+    }
 
 
 def build_sizer(payload: dict) -> PositionSizer:
