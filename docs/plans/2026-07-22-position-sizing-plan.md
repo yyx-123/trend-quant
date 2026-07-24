@@ -1,8 +1,9 @@
-# 仓位管理（Position Sizing）功能实施方案 v2
+# 仓位管理（Position Sizing）功能实施方案 v3
 
-> 日期：2026-07-22
+> 日期：2026-07-22（v3 修订：2026-07-24，吸收外部 code review 意见）
 > 分支：feature/cangwei-strategy
-> 状态：方案已获用户认可（含 v2 修订：统一降级机制），待开发
+> 状态：方案已获用户认可（v2：统一降级机制；v3：Kelly 收益率口径、atr_at 签名、
+> 数据链路细节补全），待开发
 
 ## 1. 背景与目标
 
@@ -44,6 +45,9 @@
   记录 `skipped_buys`（reason `insufficient_cash`），不视为策略降级。
 - **凯利历史口径**：同一回测 run 内、该 交易策略 × 标的 × 仓位策略 组合下
   的先前已平仓交易（回测结果不持久化，跨 run 统计不可行也无意义）。
+- **凯利首次买入全仓是刻意的**（需求 1.1 第 3 条原文确认）：虽然「信息最少时
+  下注最大」与统一降级哲学相反，但这是用户明确指定的行为，后续 review 不必
+  再质疑。
 - **仓位策略管理 UI**：独立新页面 `/position-strategies` + 导航栏新项。
 - **引擎天然满足的约束**：有持仓时不再买入（无分批买入）、卖出全量
   （无分批卖出）；闲置资金留在 cash 计入每日 equity、不产生收益
@@ -81,32 +85,50 @@
 @dataclass
 class SizingContext:        # 引擎在买入点喂给 sizer 的全部上下文
     cash: float
-    equity: float           # 无持仓时 == cash
+    equity: float           # 买入点必无持仓，故此刻 equity == cash；
+                            # 两字段保留是为未来加仓类策略留口，sizer 可任取
     reference_price: float  # 当日收盘价
     exec_price: float       # 含滑点估算成交价
-    atr_at: Callable        # 取 ATR 的回调（支持当日缺失时向前回溯）
-    closed_trades: list[dict]  # 本 run 内已平仓 SELL 交易（含 pnl）
+    atr_at: Callable[[int, int], float | None]
+                            # atr_at(period, lookback=0)；由引擎闭包绑定当日
+                            # 在 all_bars 中的原始位置 idx（过滤后未 reset index，
+                            # 与 ValueResolver.atr_value_at(idx, period) 对齐），
+                            # lookback>0 表示向前回溯 N 根；越界/预热期返回 None
+                            # （_value_at 对 idx<0 返回 None，天然安全）
+    closed_trades: list[dict]  # 本 run 内已平仓 SELL 交易（含 pnl/qty/avg_cost）
     execution: BacktestExecutionConfig
 
 @dataclass
 class SizingDecision:
     action: Literal["buy", "skip"]
-    target_qty: int          # 期望数量（未 lot 对齐，引擎最终裁决）
+    target_qty: int          # 期望数量（浮点结果须显式 int() 向下取整；
+                             # 此处不做 lot 对齐，lot 对齐与费用校验由引擎最终裁决）
     position_pct: float      # 目标投入占权益比例（展示用）
     flags: list[str]         # 降级/信息标记
     note: str                # 人类可读说明
 
 class PositionSizer(ABC):
     sizer_type: ClassVar[str]
-    fallback_pct: float = 0.10          # 统一降级仓位，所有 sizer 共享
+    def __init__(self, fallback_pct: float = 0.10, **params): ...
+                            # fallback_pct 是显式实例参数（统一降级仓位），
+                            # 不用类属性，保证每个仓位策略实例独立可调
     def decide(self, ctx: SizingContext) -> SizingDecision: ...
     def _fallback_decision(self, ctx, flag, note) -> SizingDecision: ...
     @classmethod
     def param_specs(cls) -> list[dict]  # 供 /api/meta 驱动前端表单
 ```
 
+**ATR 回溯语义（risk_budget 专用）**：`atr_at(period, lookback)` 从 lookback=0
+开始递增直至取到非 None 值；**回溯上限为序列起点**——一直回溯到 all_bars
+第一根仍为 None（上市初期预热不足）→ 走统一降级 `fallback_pct` 买入
+（flag `atr_unavailable_fallback`）。sizer 侧循环条件必须写清上限，不得依赖
+越界异常。回溯走 memoized 全序列，纯索引查找，无性能问题。
+
 **`fixed_pct.py`**：参数 `pct`（默认 1.0 = 现状全仓）。
-`target_qty = cash × pct / 每股成本`。
+`target_qty = cash × pct / 每股成本`，其中**每股成本口径与 `_max_buy_qty`
+一致**：`exec_price + exec_price × fee_rate`（不预扣最低佣金 fee_min——即使
+略高估也会被引擎 `min(affordable, ...)` 截断，安全性无虞，仅影响展示用的
+`position_pct` 精度，口径在此注明）。
 
 **`risk_budget.py`**：参数 `mode`（`absolute` | `equity_pct`）、`value`
 （如 10000 元 或 0.01）、`atr_period`（默认 20）、`atr_mul`（默认 1.5）、
@@ -118,15 +140,20 @@ class PositionSizer(ABC):
 - `target_qty = 风险预算 / 每股风险`，与最大可买数量取小：
   可买量 ≤ 目标 → 全买（info flag `risk_budget_unconstrained`，非降级）；
   反之部分买入。
-- ATR 缺失：先向前逐日回溯取最近可用 ATR（info flag
-  `atr_fallback_prev_day`）；完全无可用 ATR → 统一降级 `fallback_pct` 买入
-  （flag `atr_unavailable_fallback`）。
+- ATR 缺失处理见上文「ATR 回溯语义」：回溯取到历史 ATR → 正常路径（info
+  flag `atr_fallback_prev_day`）；回溯至序列起点仍无 → 统一降级
+  `fallback_pct` 买入（flag `atr_unavailable_fallback`）。
 
 **`kelly.py`**：参数 `lookback`（默认 10）、`fraction`（凯利乘数，默认 1.0，
 可设 0.5 半凯利）、`max_pct`（默认 1.0）、`fallback_pct`。
 
-- 取本 run 内最近 `lookback` 笔已平仓交易：胜率 p、盈亏比
-  b = 平均盈利 / 平均亏损；`f* = p − (1−p)/b`，再乘 `fraction`。
+- 取本 run 内最近 `lookback` 笔已平仓交易，**统计口径为每笔净收益率而非绝对
+  金额**（P0 修订）：`ret_i = pnl_i / (qty_i × avg_cost_i)`。引擎里
+  `avg_cost = total_cost / qty` 已含买入费用、`pnl` 是净额，故该比率正好是
+  净收益率。胜率 p 与盈亏比 b = 平均盈利收益率 / 平均亏损收益率（绝对值）都
+  基于 `ret_i` 序列计算——仓位策略会让各笔交易规模不同，若用金额口径，后期
+  大仓位盈亏会主导 b，使 Kelly 公式失真。`f* = p − (1−p)/b`，再乘
+  `fraction`。
 - 无历史（第一次买）→ 全仓（正常路径，不标记）。
 - f\* ≤ 0 → 统一降级 `fallback_pct` 买入（flag `kelly_floor_applied`）。
 - 无亏损样本 → b 视为无穷大，f\* = p（正常路径）。
@@ -143,6 +170,8 @@ class PositionSizer(ABC):
 - `db.py` 新表 `position_strategies`：`id TEXT PK, name, sizer_type,
   params_json, is_active, created_at, updated_at`（软删除，镜像
   `rule_strategies` 模式）+ CRUD 方法。
+- **被软删除的仓位策略仍被回测引用时**：loader load 失败即报错，行为与交易
+  策略一致，不做静默降级。
 - 回测未选仓位策略 → 内置全仓（fixed_pct 1.0），无需 seed 数据。
 
 ### 3.3 引擎集成（`models.py` / `engine.py`）
@@ -158,8 +187,13 @@ class PositionSizer(ABC):
     （实际投入/权益）, flags, note}`。
 - 凯利上下文：`ctx.closed_trades` 传引擎内 trades 中的 SELL 记录（天然满足
   「本笔结果成为下一次依据」）。
-- 结果新增 `sizer_id / sizer_name / skipped_buys`；charts 的 buy_points
-  带 sizing flags。
+- 结果新增 `sizer_id / sizer_name / skipped_buys`。
+- **charts 数据链路（两处 buy_points 都要透传 flags）**：engine 的 charts 有
+  两套买卖点——`charts.buy_points`（`_trade_point` 生成）与
+  `charts.kline.buy_points`（`_build_kline_payload` 生成，service 的
+  `multi_kline` 用的是后者）——sizing flags 必须**两处都带上**；另在 charts
+  新增 `skipped_buy_points`（日期/价格/原因），供 K 线空心标记使用，数据链
+  路不得断在 `skipped_buys` 顶层字段上。
 
 ### 3.4 Service / API
 
@@ -191,9 +225,14 @@ class PositionSizer(ABC):
 - `tests/unit/test_position_sizers.py`：三个 sizer 数学正确性 + 全部边界
   （统一 fallback_pct 各触发路径、ATR 回溯与缺失、风险预算封顶与全买分支、
   凯利首次全仓 / f\*≤0 兜底 / 封顶 / 无亏损样本）。
+- **Kelly 收益率口径单测**：构造仓位逐笔变化的交易序列，断言 b 不受交易
+  规模影响（同一收益率序列、不同金额规模 → 相同 f\*）。
 - 引擎测试：部分买入后现金留存且 equity 正确；skip 记入 skipped_buys；
-  凯利逐笔消费本 run 历史。
-- service / API 测试：3 × 2 组合返回 6 条结果；缺省仓位策略结果与现状一致。
+  凯利逐笔消费本 run 历史；**两套 buy_points（charts.buy_points 与
+  charts.kline.buy_points）均带 sizing flags**；charts 含
+  skipped_buy_points；ATR 回溯至序列起点仍缺失 → fallback 的边界用例。
+- service / API 测试：3 × 2 组合返回 6 条结果；缺省仓位策略结果与现状一致；
+  **`position_strategies` CRUD router 测试**（含软删除后 load 报错）。
 - 现有 golden 测试（`test_p13_memoized_golden.py`）不改动、必须通过。
 
 ## 4. 实施顺序
