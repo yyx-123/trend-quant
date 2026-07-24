@@ -42,6 +42,13 @@
 .rule-strategy-page .rule-strategy-dialog-actions {
   position: static;
 }
+
+/* 弹窗整体限制在视口内（modal padding 36px×2），内容超出时内部滚动，
+   保证保存/取消按钮始终可见 */
+.rule-strategy-page .rule-strategy-dialog {
+  max-height: calc(100vh - 72px);
+  overflow-y: auto;
+}
 .rule-strategy-page .sizer-param-field {
   display: grid;
   gap: 6px;
