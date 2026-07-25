@@ -13,6 +13,7 @@ from rule_backtest.engine import SingleSymbolAllInBacktestEngine
 from rule_backtest.loader import StrategyLoader
 from rule_backtest.models import DEFAULT_FEE_RATE, BacktestExecutionConfig, RuleBacktestRequest
 from rule_backtest.registry import registry_payload
+from rule_backtest.sizing import PositionStrategyLoader, build_sizer, sizer_types_payload, sizing_flags_payload
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +23,33 @@ class RuleBacktestService:
         self,
         strategy_loader: StrategyLoader | None = None,
         market_store: MarketStore | None = None,
+        position_loader: PositionStrategyLoader | None = None,
     ) -> None:
         self.strategy_loader = strategy_loader or StrategyLoader()
         self.market_store = market_store or MarketStore()
+        self.position_loader = position_loader or PositionStrategyLoader()
         self.engine = SingleSymbolAllInBacktestEngine()
 
     def list_strategies(self) -> list[dict]:
         return self.strategy_loader.list_strategies()
+
+    def list_position_strategies(self) -> list[dict]:
+        return self.position_loader.list_strategies()
+
+    def list_sizer_types(self) -> list[dict]:
+        return sizer_types_payload()
+
+    def list_sizing_flags(self) -> dict:
+        return sizing_flags_payload()
+
+    def save_position_strategy(self, strategy: dict, overwrite: bool = False) -> dict:
+        if not str(strategy.get("id", "")).strip():
+            strategy = dict(strategy)
+            strategy["id"] = self._generate_strategy_id(str(strategy.get("name", "") or "position"))
+        return self.position_loader.save(strategy=strategy, overwrite=overwrite)
+
+    def delete_position_strategy(self, strategy_id: str) -> dict:
+        return self.position_loader.delete(strategy_id)
 
     def list_indicators(self) -> list[dict]:
         return registry_payload()
@@ -116,12 +137,15 @@ class RuleBacktestService:
 
         results: list[dict] = []
         debug_enabled_for_first = False
-        days_per_strategy = len(trading_bars)
-        total_days = days_per_strategy * len(strategy_ids)
-        for s_idx, sid in enumerate(strategy_ids):
+        sizers = self._resolve_sizers(payload)
+        # Cartesian product: trade strategies x position sizers.
+        combos = [(sid, sizer) for sid in strategy_ids for sizer in sizers]
+        days_per_combo = len(trading_bars)
+        total_days = days_per_combo * len(combos)
+        for c_idx, (sid, sizer) in enumerate(combos):
             strategy = self.strategy_loader.load(sid)
             if progress_callback is not None:
-                day_offset = s_idx * days_per_strategy
+                day_offset = c_idx * days_per_combo
 
                 def engine_progress(day_cur: int, day_total: int, *, _offset: int = day_offset) -> None:
                     progress_callback(min(_offset + day_cur, total_days), total_days)
@@ -135,6 +159,7 @@ class RuleBacktestService:
                 end_date=end_date,
                 execution=execution,
                 run_id=datetime.now().strftime("%Y%m%d%H%M%S%f"),
+                sizer=sizer,
                 progress_callback=engine_progress,
             )
             result = self.engine.run(request)
@@ -152,8 +177,11 @@ class RuleBacktestService:
             multi_kline.append({
                 "strategy_id": r.get("strategy_id", ""),
                 "strategy_name": r.get("strategy_name", ""),
+                "sizer_id": r.get("sizer_id", ""),
+                "sizer_name": r.get("sizer_name", ""),
                 "buy_points": kline.get("buy_points", []),
                 "sell_points": kline.get("sell_points", []),
+                "skipped_buy_points": kline.get("skipped_buy_points", []),
             })
 
         first = results[0]
@@ -165,6 +193,8 @@ class RuleBacktestService:
             "status": first.get("status", "ok"),
             "run_id": first.get("run_id", ""),
             "strategy_id": first.get("strategy_id", ""),
+            "sizer_id": first.get("sizer_id", ""),
+            "sizer_name": first.get("sizer_name", ""),
             "symbol": symbol,
             "start_date": first.get("start_date"),
             "end_date": first.get("end_date"),
@@ -172,6 +202,7 @@ class RuleBacktestService:
             "final_equity": first.get("final_equity"),
             "summary": first.get("summary", {}),
             "trades": first.get("trades", []),
+            "skipped_buys": first.get("skipped_buys", []),
             "daily_nav": first.get("daily_nav", []),
             "condition_trace": first.get("condition_trace", []),
             "debug_log": first.get("debug_log", []),
@@ -200,6 +231,17 @@ class RuleBacktestService:
         if single and single not in ids:
             ids = list(ids) + [single]
         return [s for s in ids if s]
+
+    def _resolve_sizers(self, payload: dict) -> list:
+        """Position sizers for the cartesian product. Empty selection means
+        the built-in all-in behavior (sizer=None), fully backward compatible."""
+        ids = payload.get("position_strategy_ids", [])
+        if isinstance(ids, str):
+            ids = [ids]
+        ids = [s for s in ids if s]
+        if not ids:
+            return [None]
+        return [build_sizer(self.position_loader.load(psid)) for psid in ids]
 
     @staticmethod
     def _filter_bars(bars: pd.DataFrame, start_date: date | None, end_date: date | None) -> pd.DataFrame:

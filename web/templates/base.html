@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ title }} | 趋势 ETF 系统</title>
-  <link rel="stylesheet" href="/static/style.css?v={{ request.app.state.asset_version|default('1', true) if request is defined else '1' }}-20260719-heatmap-1">
+  <link rel="stylesheet" href="/static/style.css?v={{ request.app.state.asset_version|default('1', true) if request is defined else '1' }}-20260724-ui-3">
 </head>
 <body>
   {% set path = request.url.path if request is defined else '' %}
@@ -17,6 +17,7 @@
       </div>
       <nav class="site-nav">
         <a href="/rule-backtest" class="{% if path.startswith('/rule-backtest') %}is-active{% endif %}">策略管理</a>
+        <a href="/position-strategies" class="{% if path.startswith('/position-strategies') %}is-active{% endif %}">仓位策略</a>
         <a href="/market-view" class="{% if path.startswith('/market-view') %}is-active{% endif %}">标的查看</a>
         <a href="/subject-market" class="{% if path.startswith('/subject-market') %}is-active{% endif %}">标的看板</a>
         <a href="/instruments" class="{% if path.startswith('/instruments') %}is-active{% endif %}">标的管理</a>

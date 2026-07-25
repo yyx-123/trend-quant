@@ -25,6 +25,14 @@
         </button>
       </div>
     </label>
+    <label>仓位策略
+      <div class="multi-select-dropdown" id="mvBacktestSizerDropdown">
+        <button id="mvBacktestSizerBtn" type="button" class="multi-select-trigger">
+          <span id="mvBacktestSizerLabel">全仓（默认）</span>
+          <span class="multi-select-arrow">▾</span>
+        </button>
+      </div>
+    </label>
     <label>开始日期
       <input id="mvStartDate" type="date">
     </label>
@@ -115,6 +123,7 @@
           <col class="trade-col-date">
           <col class="trade-col-side">
           <col class="trade-col-qty">
+          <col class="trade-col-pos">
           <col class="trade-col-price">
           <col class="trade-col-price">
           <col class="trade-col-pnl">
@@ -131,6 +140,7 @@
             <th>日期</th>
             <th class="text-center">方向</th>
             <th class="num-cell">数量</th>
+            <th class="num-cell">仓位%</th>
             <th class="num-cell">参考价</th>
             <th class="num-cell">成交价</th>
             <th class="num-cell">交易收益</th>
@@ -144,7 +154,7 @@
           </tr>
         </thead>
         <tbody id="mvTradesBody">
-          <tr><td colspan="13">暂无交易明细。</td></tr>
+          <tr><td colspan="14">暂无交易明细。</td></tr>
         </tbody>
       </table>
     </div>
@@ -177,6 +187,20 @@
   backtestStrategyListEl.className = 'multi-select-list';
   backtestStrategyPanelEl.appendChild(backtestStrategyListEl);
   document.body.appendChild(backtestStrategyPanelEl);
+
+  // Position-sizer dropdown (仓位策略) — same body-mounted panel pattern
+  const backtestSizerDropdownEl = document.getElementById('mvBacktestSizerDropdown');
+  const backtestSizerBtnEl = document.getElementById('mvBacktestSizerBtn');
+  const backtestSizerLabelEl = document.getElementById('mvBacktestSizerLabel');
+  const backtestSizerPanelEl = document.createElement('div');
+  backtestSizerPanelEl.id = 'mvBacktestSizerPanel';
+  backtestSizerPanelEl.className = 'multi-select-panel';
+  backtestSizerPanelEl.hidden = true;
+  const backtestSizerListEl = document.createElement('div');
+  backtestSizerListEl.id = 'mvBacktestSizerList';
+  backtestSizerListEl.className = 'multi-select-list';
+  backtestSizerPanelEl.appendChild(backtestSizerListEl);
+  document.body.appendChild(backtestSizerPanelEl);
   const backtestStartEl = document.getElementById('mvStartDate');
   const backtestEndEl = document.getElementById('mvEndDate');
   const runBacktestBtnEl = document.getElementById('mvRunBacktestBtn');
@@ -242,8 +266,22 @@
   let currentZoom = null;
   let currentPayload = null;
   let currentBacktest = null;
-  let allMultiKline = [];        // [{strategy_id, strategy_name, buy_points, sell_points}]
-  let activeStrategyId = null;   // which strategy's markers are shown on chart
+  let allMultiKline = [];        // [{strategy_id, strategy_name, sizer_id, sizer_name, buy_points, sell_points, skipped_buy_points}]
+  let activeResultKey = null;    // which 策略×仓位 combo's markers are shown on chart
+  // Degraded sizing flags — synced from /api/meta (ruleMeta.sizing) in
+  // loadRuleMeta; this literal is only the pre-meta fallback.
+  let SIZING_DEGRADED_FLAGS = new Set(['kelly_floor_applied', 'atr_unavailable_fallback']);
+  const SIZING_FLAG_TEXT = {
+    kelly_floor_applied: '凯利≤0，降级仓位',
+    atr_unavailable_fallback: '无可用ATR，降级仓位',
+    atr_fallback_prev_day: '使用历史ATR',
+    risk_budget_unconstrained: '全买未超预算',
+  };
+  const SKIP_REASON_TEXT = {
+    insufficient_cash: '现金不足',
+    sizer_target_below_lot: '目标不足一手',
+    sizer_skip: '仓位策略跳过',
+  };
   let allSymbols = [];
   let ruleMeta = { strategies: [] };
   let backtestProgressHideTimer = null;
@@ -515,6 +553,56 @@
     return [...maSeries, ...bollSeries];
   }
 
+  function hasDegradedFlag(point) {
+    return (point?.flags || []).some(f => SIZING_DEGRADED_FLAGS.has(f));
+  }
+
+  function flagText(flag) {
+    return SIZING_FLAG_TEXT[flag] || flag;
+  }
+
+  function resultKey(r) {
+    return `${r?.strategy_id || ''}|${r?.sizer_id || ''}`;
+  }
+
+  function skippedBuySeries(points) {
+    return {
+      name: '跳过',
+      type: 'scatter',
+      data: (points || []).map((p) => [p.date, p.price, p]),
+      symbol: 'circle',
+      symbolSize: 14,
+      itemStyle: {
+        color: 'rgba(255,255,255,0.15)',
+        borderColor: '#6b7280',
+        borderWidth: 2,
+        borderType: 'dashed',
+      },
+      label: {
+        show: true,
+        formatter: '跳过',
+        position: 'top',
+        color: '#6b7280',
+        fontWeight: 700,
+        fontSize: 10,
+        textBorderColor: '#ffffff',
+        textBorderWidth: 3,
+      },
+      tooltip: {
+        formatter: (p) => {
+          const raw = p.data?.[2] || {};
+          return [
+            `跳过买入 ${raw.date || ''}`,
+            `收盘价：${num(raw.price, 4)}`,
+            `原因：${SKIP_REASON_TEXT[raw.reason] || raw.reason || '-'}`,
+            raw.note ? `说明：${raw.note}` : '',
+          ].filter(Boolean).join('<br/>');
+        },
+      },
+      z: 7,
+    };
+  }
+
   function tradeSeries(points, name, color, symbol) {
     return {
       name,
@@ -542,12 +630,16 @@
       tooltip: {
         formatter: (p) => {
           const raw = p.data?.[2] || {};
+          const flagLine = (raw.flags || []).length
+            ? `标记：${(raw.flags || []).map(flagText).join('、')}`
+            : '';
           return [
             `${name} ${raw.date || ''}`,
             `成交价：${num(raw.price, 4)}`,
             `参考价：${num(raw.reference_price, 4)}`,
             `数量：${raw.qty || 0}`,
-          ].join('<br/>');
+            flagLine,
+          ].filter(Boolean).join('<br/>');
         },
       },
       z: 8,
@@ -562,14 +654,19 @@
     currentCandles = candles;
     const overlays = mainOverlaySeries(indicators);
 
-    // Build trade-marker series — only the active strategy, simple names "买"/"卖"
+    // Build trade-marker series — only the active 策略×仓位 combo
     let backtestSeries = [];
-    if (activeStrategyId) {
-      const activeKline = allMultiKline.find(sk => sk.strategy_id === activeStrategyId);
+    if (activeResultKey) {
+      const activeKline = allMultiKline.find(sk => resultKey(sk) === activeResultKey);
       if (activeKline) {
+        const buys = activeKline.buy_points || [];
+        const normalBuys = buys.filter(p => !hasDegradedFlag(p));
+        const degradedBuys = buys.filter(p => hasDegradedFlag(p));
         backtestSeries = [
-          tradeSeries(activeKline.buy_points || [], '买', '#2563eb', 'pin'),
+          tradeSeries(normalBuys, '买', '#2563eb', 'pin'),
+          tradeSeries(degradedBuys, '买(降级)', '#ea580c', 'pin'),
           tradeSeries(activeKline.sell_points || [], '卖', '#f59e0b', 'pin'),
+          skippedBuySeries(activeKline.skipped_buy_points || []),
         ];
       }
     }
@@ -937,28 +1034,30 @@
   }
 
   function strategyLabel(result) {
-    const name = (ruleMeta.strategies || []).find(s => s.id === result.strategy_id)?.name;
-    return name || result.strategy_id || '-';
+    const name = result?.strategy_name
+      || (ruleMeta.strategies || []).find(s => s.id === result.strategy_id)?.name
+      || result.strategy_id || '-';
+    return result?.sizer_name ? `${name} × ${result.sizer_name}` : name;
   }
 
-  function selectChartStrategy(strategyId) {
-    if (activeStrategyId === strategyId) {
-      activeStrategyId = null;
+  function selectChartStrategy(key) {
+    if (activeResultKey === key) {
+      activeResultKey = null;
     } else {
-      activeStrategyId = strategyId;
+      activeResultKey = key;
     }
     // Re-render chart with updated markers, preserving current zoom
     if (currentPayload) {
       renderPrice(currentPayload, currentZoom);
     }
-    // Update trades table to show active strategy's trades
+    // Update trades table to show active combo's trades
     if (currentBacktest) {
       renderBacktestTrades(currentBacktest);
       renderBacktestReturns(currentBacktest);
     }
     // Update row highlights
-    for (const row of backtestSummaryEl.querySelectorAll('tr[data-strategy-id]')) {
-      row.classList.toggle('active', row.dataset.strategyId === activeStrategyId);
+    for (const row of backtestSummaryEl.querySelectorAll('tr[data-result-key]')) {
+      row.classList.toggle('active', row.dataset.resultKey === activeResultKey);
     }
   }
 
@@ -967,8 +1066,8 @@
     // Fallback for single-result backward compat
     const strategyRows = results.length
       ? results.map(r => {
-          const sid = esc(r.strategy_id || '');
-          return `<tr data-strategy-id="${sid}" class="${activeStrategyId === r.strategy_id ? 'active' : ''}"><th>${esc(strategyLabel(r))}</th>${metricRowCells(r.summary, false)}</tr>`;
+          const key = esc(resultKey(r));
+          return `<tr data-result-key="${key}" class="${activeResultKey === resultKey(r) ? 'active' : ''}"><th>${esc(strategyLabel(r))}</th>${metricRowCells(r.summary, false)}</tr>`;
         }).join('')
       : (result?.summary ? `<tr><th>${esc(result.strategy_id || '策略')}</th>${metricRowCells(result.summary, false)}</tr>` : '');
     const bench = result?.benchmark_summary || {};
@@ -995,10 +1094,10 @@
       </table>
     `;
     // Attach click handlers to strategy rows
-    for (const row of backtestSummaryEl.querySelectorAll('tr[data-strategy-id]')) {
+    for (const row of backtestSummaryEl.querySelectorAll('tr[data-result-key]')) {
       row.style.cursor = 'pointer';
       row.addEventListener('click', () => {
-        selectChartStrategy(row.dataset.strategyId);
+        selectChartStrategy(row.dataset.resultKey);
       });
     }
   }
@@ -1128,9 +1227,9 @@
   }
 
   function pickBacktestSource(result) {
-    // Use the active strategy's result if available, otherwise the top-level (first) result
-    if (activeStrategyId && result?.results) {
-      const active = result.results.find(r => r.strategy_id === activeStrategyId);
+    // Use the active combo's result if available, otherwise the top-level (first) result
+    if (activeResultKey && result?.results) {
+      const active = result.results.find(r => resultKey(r) === activeResultKey);
       if (active) return active;
     }
     return result;
@@ -1272,19 +1371,67 @@
     if (annualTableBodyEl) annualTableBodyEl.innerHTML = '';
   }
 
+  function positionPctCell(trade) {
+    if (String(trade?.side || '').toUpperCase() !== 'BUY') return '';
+    const sizing = trade?.sizing;
+    if (!sizing) return '<span class="text-muted">全仓</span>';
+    const value = Number(sizing.position_pct);
+    return Number.isFinite(value) ? pct(value) : '-';
+  }
+
+  function sizingBadge(trade) {
+    const sizing = trade?.sizing;
+    if (!sizing) return '';
+    const flags = sizing.flags || [];
+    if (!flags.length) return '';
+    const degraded = flags.some(f => SIZING_DEGRADED_FLAGS.has(f));
+    const text = flags.map(flagText).join('、');
+    const cls = degraded ? 'sizing-badge sizing-badge--degraded' : 'sizing-badge';
+    return ` <span class="${cls}" title="${esc(sizing.note || text)}">${esc(degraded ? '降级' : '提示')}</span>`;
+  }
+
+  function skippedTradeRow(skip) {
+    const reason = SKIP_REASON_TEXT[skip.reason] || skip.reason || '-';
+    return `
+      <tr class="trade-row-skipped" title="${esc(skip.note || '')}">
+        <td>${esc(skip.date || '')}</td>
+        <td class="text-center">跳过</td>
+        <td class="num-cell">0</td>
+        <td class="num-cell">-</td>
+        <td class="num-cell">${num(skip.close, 4)}</td>
+        <td class="num-cell">-</td>
+        <td class="num-cell">-</td>
+        <td class="num-cell">-</td>
+        <td class="num-cell">-</td>
+        <td class="num-cell">-</td>
+        <td class="num-cell">${esc(reason)}</td>
+        <td class="num-cell">-</td>
+        <td class="num-cell">-</td>
+        <td class="num-cell">-</td>
+      </tr>
+    `;
+  }
+
   function renderBacktestTrades(result) {
     const tradesSource = pickBacktestSource(result);
-    const trades = attachHoldingDays(tradesSource?.trades || [])
+    const trades = attachHoldingDays(tradesSource?.trades || []);
+    const skipped = (tradesSource?.skipped_buys || []).map(s => ({ ...s, _skipped: true }));
+    const rows = [...trades, ...skipped]
       .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
     const strategyName = tradesSource?.strategy_name || strategyLabel(tradesSource) || '';
-    tradeMetaEl.textContent = trades.length
-      ? `${strategyName ? esc(strategyName) + ' | ' : ''}${tradesSource.start_date || '-'} ~ ${tradesSource.end_date || '-'} | ${trades.length} 笔`
+    const label = tradesSource?.sizer_name ? `${strategyName} × ${tradesSource.sizer_name}` : strategyName;
+    tradeMetaEl.textContent = rows.length
+      ? `${label ? esc(label) + ' | ' : ''}${tradesSource.start_date || '-'} ~ ${tradesSource.end_date || '-'} | ${trades.length} 笔交易${skipped.length ? ` + ${skipped.length} 次跳过` : ''}`
       : '本次回测无交易。';
-    tradesBodyEl.innerHTML = trades.length ? trades.map((t) => `
-      <tr>
+    tradesBodyEl.innerHTML = rows.length ? rows.map((t) => {
+      if (t._skipped) return skippedTradeRow(t);
+      const degraded = (t.sizing?.flags || []).some(f => SIZING_DEGRADED_FLAGS.has(f));
+      return `
+      <tr class="${degraded ? 'trade-row-degraded' : ''}">
         <td>${esc(t.date || '')}</td>
-        <td class="text-center">${esc(sideLabel(t.side))}</td>
+        <td class="text-center">${esc(sideLabel(t.side))}${sizingBadge(t)}</td>
         <td class="num-cell">${esc(t.qty || 0)}</td>
+        <td class="num-cell">${positionPctCell(t)}</td>
         <td class="num-cell">${num(t.reference_price, 4)}</td>
         <td class="num-cell">${num(t.exec_price, 4)}</td>
         <td class="num-cell">${tradePnlCell(t)}</td>
@@ -1296,7 +1443,7 @@
         <td class="num-cell">${money(t.commission)}</td>
         <td class="num-cell">${money(t.stamp_tax)}</td>
       </tr>
-    `).join('') : '<tr><td colspan="13">本次回测无交易。</td></tr>';
+    `; }).join('') : '<tr><td colspan="14">本次回测无交易。</td></tr>';
   }
 
   function renderBacktestDebug(result) {
@@ -1313,11 +1460,14 @@
       allMultiKline = [{
         strategy_id: result.strategy_id || '',
         strategy_name: strategyLabel({ strategy_id: result.strategy_id }) || result.strategy_id || '',
+        sizer_id: result.sizer_id || '',
+        sizer_name: result.sizer_name || '',
         buy_points: result.charts.kline.buy_points || [],
         sell_points: result.charts.kline.sell_points || [],
+        skipped_buy_points: result.charts.kline.skipped_buy_points || [],
       }];
     }
-    activeStrategyId = null;
+    activeResultKey = null;
     renderBacktestSummary(result);
     renderBacktestTrades(result);
     renderBacktestReturns(result);
@@ -1432,6 +1582,25 @@
       .filter(Boolean);
   }
 
+  function selectedSizerIds() {
+    return [...backtestSizerListEl.querySelectorAll('input[type="checkbox"]:checked')]
+      .map(cb => cb.value)
+      .filter(Boolean);
+  }
+
+  function updateSizerDropdownLabel() {
+    const ids = selectedSizerIds();
+    const items = (ruleMeta.position_strategies || []).filter(s => s.valid);
+    if (!ids.length) {
+      backtestSizerLabelEl.textContent = '全仓（默认）';
+    } else if (ids.length === 1) {
+      const found = items.find(s => s.id === ids[0]);
+      backtestSizerLabelEl.textContent = found ? (found.name || found.id) : ids[0];
+    } else {
+      backtestSizerLabelEl.textContent = `已选 ${ids.length} 个仓位策略`;
+    }
+  }
+
   function updateStrategyDropdownLabel() {
     const ids = selectedStrategyIds();
     const strategies = (ruleMeta.strategies || []).filter(s => s.valid);
@@ -1450,6 +1619,11 @@
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '策略列表加载失败');
     ruleMeta = data || { strategies: [] };
+    // Sync degradation enums from the backend (single source of truth).
+    const sizingMeta = ruleMeta.sizing || {};
+    if (Array.isArray(sizingMeta.degraded_flags) && sizingMeta.degraded_flags.length) {
+      SIZING_DEGRADED_FLAGS = new Set(sizingMeta.degraded_flags);
+    }
     const strategies = (ruleMeta.strategies || []).filter((item) => item.valid);
     backtestStrategyListEl.innerHTML = strategies.length
       ? strategies.map((item) => `
@@ -1461,6 +1635,17 @@
       : '<div class="multi-select-empty">暂无可用策略</div>';
     updateStrategyDropdownLabel();
     runBacktestBtnEl.disabled = !strategies.length;
+
+    const sizers = (ruleMeta.position_strategies || []).filter((item) => item.valid);
+    backtestSizerListEl.innerHTML = sizers.length
+      ? sizers.map((item) => `
+        <label class="multi-select-option">
+          <input type="checkbox" value="${esc(item.id)}">
+          <span>${esc(item.name || item.id)}</span>
+        </label>
+      `).join('')
+      : '<div class="multi-select-empty">暂无仓位策略，默认全仓</div>';
+    updateSizerDropdownLabel();
   }
 
   function selectedSymbol() {
@@ -1501,7 +1686,7 @@
         backtestEndEl.value = data.meta?.end || '';
         updateBacktestRangeLabel();
         tradeMetaEl.textContent = '运行回测后显示。';
-        tradesBodyEl.innerHTML = '<tr><td colspan="13">暂无交易明细。</td></tr>';
+        tradesBodyEl.innerHTML = '<tr><td colspan="14">暂无交易明细。</td></tr>';
         clearBacktestReturns();
         debugInfoEl.textContent = '暂无结果。';
         debugPreviewEl.textContent = '';
@@ -1576,6 +1761,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           strategy_ids: strategyIds,
+          position_strategy_ids: selectedSizerIds(),
           symbol,
           start_date: backtestStartEl.value,
           end_date: backtestEndEl.value,
@@ -1631,10 +1817,34 @@
     updateStrategyDropdownLabel();
   });
 
+  // --- Sizer dropdown (checkbox panel) ---
+  backtestSizerBtnEl.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (backtestSizerPanelEl.hidden) {
+      const rect = backtestSizerBtnEl.getBoundingClientRect();
+      backtestSizerPanelEl.style.top = (rect.bottom + 4) + 'px';
+      backtestSizerPanelEl.style.left = rect.left + 'px';
+      backtestSizerPanelEl.style.minWidth = rect.width + 'px';
+      backtestSizerPanelEl.hidden = false;
+      backtestSizerBtnEl.classList.add('multi-select-open');
+    } else {
+      backtestSizerPanelEl.hidden = true;
+      backtestSizerBtnEl.classList.remove('multi-select-open');
+    }
+  });
+
+  backtestSizerListEl.addEventListener('change', () => {
+    updateSizerDropdownLabel();
+  });
+
   document.addEventListener('click', (event) => {
     if (!backtestStrategyPanelEl.contains(event.target) && !backtestStrategyDropdownEl.contains(event.target)) {
       backtestStrategyPanelEl.hidden = true;
       backtestStrategyBtnEl.classList.remove('multi-select-open');
+    }
+    if (!backtestSizerPanelEl.contains(event.target) && !backtestSizerDropdownEl.contains(event.target)) {
+      backtestSizerPanelEl.hidden = true;
+      backtestSizerBtnEl.classList.remove('multi-select-open');
     }
   });
   backtestStartEl.addEventListener('change', updateBacktestRangeLabel);
