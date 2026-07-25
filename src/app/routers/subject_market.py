@@ -25,6 +25,17 @@ logger = logging.getLogger(__name__)
 _dashboard_cache = RevisionCache()
 
 
+def warm_dashboard_cache() -> None:
+    """Pre-compute the EOD dashboard payload (called from app lifespan hooks).
+
+    Fills the same RevisionCache the endpoint reads, so the first user hit
+    after startup or after the daily 16:30 update is served from cache.
+    """
+    db = get_db()
+    revision = db.get_market_dashboard_revision()
+    _dashboard_cache.get_or_compute(revision, lambda: build_subject_dashboard_payload(db))
+
+
 @router.get("", response_class=HTMLResponse)
 async def subject_market_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(

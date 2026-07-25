@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import os
@@ -39,6 +39,18 @@ async def lifespan(app: FastAPI):
     Path("data").mkdir(exist_ok=True)
     init_db()
 
+    # Dashboard cache warmup: pre-compute the subject dashboard payload so the
+    # first user request after startup / daily update is a cache hit instead of
+    # a multi-second cold rebuild.
+    def _warm_dashboard() -> None:
+        try:
+            from app.routers.subject_market import warm_dashboard_cache
+
+            warm_dashboard_cache()
+            logger.info("Dashboard cache warmed")
+        except Exception:
+            logger.exception("Dashboard cache warmup failed")
+
     # Startup cache check: full rebuild in background when trend params or
     # formula versions drifted (also covers first-ever bootstrap).
     def _rebuild_check() -> None:
@@ -49,6 +61,9 @@ async def lifespan(app: FastAPI):
             logger.info("Indicator cache startup check: %s", result.get("status"))
         except Exception:
             logger.exception("Indicator cache startup check failed")
+        # Warm after the check so a rebuild (which changes the data revision)
+        # never leaves a stale warmed payload behind.
+        _warm_dashboard()
 
     threading.Thread(target=_rebuild_check, daemon=True).start()
 
@@ -86,6 +101,9 @@ async def lifespan(app: FastAPI):
             run_date=_date.today().isoformat(),
             status=str(pipeline.get("status", "")),
         )
+        # Daily update changed the data revision; re-warm in background so the
+        # next user request does not pay the cold-rebuild cost.
+        threading.Thread(target=_warm_dashboard, daemon=True).start()
 
     disable_scheduler = str(os.getenv("TREND_QUANT_DISABLE_SCHEDULER", "")).strip().lower() in {
         "1",
