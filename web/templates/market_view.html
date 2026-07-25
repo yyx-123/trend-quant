@@ -1738,8 +1738,11 @@
 
       if (progData.status !== 'running') {
         if (progData.status === 'error') throw new Error(progData.error || '回测运行出错');
-        if (!progData.result) throw new Error('回测结果为空');
-        return progData.result;
+        // Result is fetched separately so polling stays lightweight.
+        const resultResp = await fetch(`/rule-backtest/api/result/${encodeURIComponent(runId)}`);
+        const resultData = await resultResp.json();
+        if (!resultResp.ok) throw new Error(resultData.detail || '回测结果获取失败');
+        return resultData;
       }
       if (Date.now() - lastChangeAt > STALL_LIMIT_MS) {
         throw new Error('回测进度长时间无更新，可能已中断，请重试');

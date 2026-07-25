@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -182,6 +183,10 @@ class AssetVersionMiddleware:
 
 
 app.add_middleware(AssetVersionMiddleware)
+# Compress larger JSON/HTML bodies (backtest results, market series). The
+# app sits directly behind the frp relay with no nginx in between, so
+# compression must happen here; browsers decompress natively.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 if static_dir.exists():

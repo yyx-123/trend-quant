@@ -64,6 +64,54 @@ class TestMarketDataCRUD:
         assert summary["symbol"] == "SUM.SS" if "symbol" in summary else True
 
 
+class TestMarketSymbolsCache:
+    """list_market_symbols is cached in-process (the DISTINCT over ~1M rows is
+    expensive on a cold page cache); writes must invalidate the cache."""
+
+    @staticmethod
+    def _df() -> pd.DataFrame:
+        return pd.DataFrame([{
+            "time": "2025-01-06", "open": 10.0, "high": 11.0,
+            "low": 9.0, "close": 10.5, "volume": 1_000_000, "amount": 1_050_000,
+            "provider": "test",
+        }])
+
+    def test_second_call_serves_from_cache(self, test_db) -> None:
+        test_db.save_market_data("A.SS", self._df(), price_mode="qfq")
+        first = test_db.list_market_symbols(price_mode="qfq")
+        assert "A.SS" in first
+        # Bypass save_market_data so no invalidation fires; the cached answer
+        # must be served (and must be an independent copy).
+        with test_db._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO market_data_qfq "
+                "(symbol, time, open, high, low, close, volume, amount, provider) "
+                "VALUES ('GHOST.SS', '2025-01-06', 1, 1, 1, 1, 1, 1, 'test')"
+            )
+        second = test_db.list_market_symbols(price_mode="qfq")
+        assert "GHOST.SS" not in second
+        first.append("MUTATED.SS")
+        assert "MUTATED.SS" not in test_db.list_market_symbols(price_mode="qfq")
+
+    def test_save_invalidates_cache(self, test_db) -> None:
+        test_db.save_market_data("A.SS", self._df(), price_mode="qfq")
+        assert "A.SS" in test_db.list_market_symbols(price_mode="qfq")
+        test_db.save_market_data("NEW.SZ", self._df(), price_mode="qfq")
+        assert "NEW.SZ" in test_db.list_market_symbols(price_mode="qfq")
+
+    def test_clear_invalidates_cache(self, test_db) -> None:
+        test_db.save_market_data("A.SS", self._df(), price_mode="qfq")
+        assert "A.SS" in test_db.list_market_symbols(price_mode="qfq")
+        test_db.clear_market_data(price_mode="qfq")
+        assert "A.SS" not in test_db.list_market_symbols(price_mode="qfq")
+
+    def test_price_modes_cached_independently(self, test_db) -> None:
+        test_db.save_market_data("Q.SS", self._df(), price_mode="qfq")
+        test_db.save_market_data("R.SS", self._df(), price_mode="raw")
+        assert test_db.list_market_symbols(price_mode="qfq") == ["Q.SS"]
+        assert test_db.list_market_symbols(price_mode="raw") == ["R.SS"]
+
+
 class TestInstrumentMetadata:
     def test_save_and_list(self, test_db) -> None:
         test_db.save_instrument_metadata([

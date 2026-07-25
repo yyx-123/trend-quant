@@ -17,6 +17,73 @@ from rule_backtest.sizing import PositionStrategyLoader, build_sizer, sizer_type
 
 logger = logging.getLogger(__name__)
 
+# Per-strategy fields kept when a backtest result is serialized for the
+# frontend. Per-bar series (daily_nav, charts, drawdown, benchmark.series,
+# condition_trace, monthly_returns) are intentionally excluded: the UI never
+# reads them and they dominate the payload size (several MB per strategy on
+# long ranges), which stalls delivery over the frp relay link.
+_RESULT_KEEP_KEYS = (
+    "run_id",
+    "status",
+    "strategy_id",
+    "strategy_name",
+    "sizer_id",
+    "sizer_name",
+    "symbol",
+    "start_date",
+    "end_date",
+    "initial_capital",
+    "final_equity",
+    "summary",
+    "trades",
+    "skipped_buys",
+    "annual_returns",
+    "monthly_heatmap",
+)
+
+# Top-level fields kept. Note the heavy backward-compat duplicates of the
+# first result (charts / daily_nav / drawdown / condition_trace / benchmark /
+# monthly_returns) are dropped as well; small duplicates (summary, trades...)
+# stay so the legacy single-result frontend path keeps working.
+_TOP_KEEP_KEYS = (
+    "results",
+    "benchmark_summary",
+    "multi_kline",
+    "status",
+    "run_id",
+    "strategy_id",
+    "sizer_id",
+    "sizer_name",
+    "symbol",
+    "start_date",
+    "end_date",
+    "initial_capital",
+    "final_equity",
+    "summary",
+    "trades",
+    "skipped_buys",
+    "annual_returns",
+    "monthly_heatmap",
+    "debug_log",
+)
+
+
+def slim_backtest_result(result: dict) -> dict:
+    """Return a transport-slimmed copy of a full backtest result.
+
+    Computation is untouched — the full result stays in the in-memory job;
+    this only trims what is serialized to the browser. K-line markers come
+    from ``multi_kline`` (already slim) and the K-line chart itself uses the
+    market-view daily endpoint, so per-strategy candle/series payloads are
+    pure waste on the wire.
+    """
+    out = {k: result[k] for k in _TOP_KEEP_KEYS if k in result and k != "results"}
+    out["results"] = [
+        {k: r[k] for k in _RESULT_KEEP_KEYS if k in r}
+        for r in result.get("results", [])
+    ]
+    return out
+
 
 class RuleBacktestService:
     def __init__(
@@ -120,6 +187,19 @@ class RuleBacktestService:
         if trading_bars.empty:
             raise ValueError(f"symbol has no market data in range: {symbol}")
 
+        results: list[dict] = []
+        debug_enabled_for_first = False
+        sizers = self._resolve_sizers(payload)
+        # Cartesian product: trade strategies x position sizers.
+        combos = [(sid, sizer) for sid in strategy_ids for sizer in sizers]
+        days_per_combo = len(trading_bars)
+        total_days = days_per_combo * len(combos)
+        if progress_callback is not None:
+            # Report the real total up front: the UI shows 0/N during
+            # preparation (e.g. instrument-type resolution) instead of the
+            # meaningless 0/1 placeholder.
+            progress_callback(0, total_days)
+
         instrument_type = str(payload.get("instrument_type", "") or "").strip().lower()
         if instrument_type not in {"etf", "stock"}:
             instrument_type = self._resolve_instrument_type(symbol)
@@ -135,13 +215,6 @@ class RuleBacktestService:
             debug_log_enabled=self._parse_debug_flag(payload.get("debug_log_enabled")),
         )
 
-        results: list[dict] = []
-        debug_enabled_for_first = False
-        sizers = self._resolve_sizers(payload)
-        # Cartesian product: trade strategies x position sizers.
-        combos = [(sid, sizer) for sid in strategy_ids for sizer in sizers]
-        days_per_combo = len(trading_bars)
-        total_days = days_per_combo * len(combos)
         for c_idx, (sid, sizer) in enumerate(combos):
             strategy = self.strategy_loader.load(sid)
             if progress_callback is not None:

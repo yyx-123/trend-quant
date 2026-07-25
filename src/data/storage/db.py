@@ -16,6 +16,12 @@ class Database:
     def __init__(self, db_path: str | Path = "data/trend_quant.db") -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # In-process cache for list_market_symbols(): the DISTINCT query scans
+        # a ~1M-row table and costs seconds on a cold page cache (notably on
+        # WSL2, which reclaims cached pages aggressively). Invalidated by any
+        # market-data write below. Note: writes from OTHER processes do not
+        # invalidate this cache; all in-app writers go through these methods.
+        self._market_symbols_cache: dict[str, list[str]] = {}
         self._init_tables()
         self._migrate_schema()
 
@@ -680,6 +686,7 @@ class Database:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 records,
             )
+        self._market_symbols_cache.pop(table, None)
 
     def load_market_data(self, symbol: str, price_mode: str = "qfq"):
         import pandas as pd
@@ -702,11 +709,16 @@ class Database:
 
     def list_market_symbols(self, price_mode: str = "qfq") -> list[str]:
         table = self._market_table(price_mode)
+        cached = self._market_symbols_cache.get(table)
+        if cached is not None:
+            return list(cached)
         with self._connect() as conn:
             rows = conn.execute(
                 f"SELECT DISTINCT symbol FROM {table} ORDER BY symbol"
             ).fetchall()
-            return [r["symbol"] for r in rows]
+        symbols = [r["symbol"] for r in rows]
+        self._market_symbols_cache[table] = symbols
+        return list(symbols)
 
     def get_market_data_summary(self, symbol: str, price_mode: str = "qfq") -> dict:
         table = self._market_table(price_mode)
@@ -724,6 +736,7 @@ class Database:
         table = self._market_table(price_mode)
         with self._connect() as conn:
             cur = conn.execute(f"DELETE FROM {table}")
+            self._market_symbols_cache.pop(table, None)
             return int(cur.rowcount or 0)
 
     # ------------------------------------------------------------------

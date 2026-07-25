@@ -166,13 +166,16 @@ class ServiceProgressTest(unittest.TestCase):
         total_expected = n_bars * len(strategy_ids)
         self.assertEqual("ok", result["status"])
         self.assertEqual(2, len(result["results"]))
-        self.assertEqual(total_expected, len(calls))
-        self.assertEqual((total_expected, total_expected), calls[-1])
+        # First call reports the real total up front (0, N) before any bar runs.
+        self.assertEqual((0, total_expected), calls[0])
+        bar_calls = calls[1:]
+        self.assertEqual(total_expected, len(bar_calls))
+        self.assertEqual((total_expected, total_expected), bar_calls[-1])
         # Progress is globally monotonic and stays within bounds.
-        currents = [c for c, _ in calls]
+        currents = [c for c, _ in bar_calls]
         self.assertEqual(sorted(currents), currents)
         self.assertTrue(all(1 <= c <= total_expected for c in currents))
-        self.assertTrue(all(t == total_expected for _, t in calls))
+        self.assertTrue(all(t == total_expected for _, t in bar_calls))
         # First strategy occupies the first half, second the second half.
         self.assertTrue(all(c <= n_bars for c in currents[:n_bars]))
         self.assertTrue(all(c > n_bars for c in currents[n_bars:]))

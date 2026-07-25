@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from core.calendar import previous_trading_day
 from rule_backtest.models import DEFAULT_FEE_RATE
-from rule_backtest.service import RuleBacktestService
+from rule_backtest.service import RuleBacktestService, slim_backtest_result
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,9 @@ async def run_rule_backtest(payload: RuleBacktestRunRequest) -> dict:
     """Start a rule backtest in a background thread and return immediately.
 
     The client polls GET /api/progress/{run_id} for K-line-level progress
-    and the final result. Jobs live only in memory (see RULE_JOB_TTL_SECONDS).
+    (small responses only) and fetches the finished result once from
+    GET /api/result/{run_id}. Jobs live only in memory (see
+    RULE_JOB_TTL_SECONDS).
     """
     # Cap end_date to previous trading day (intraday data is never persisted).
     payload.end_date = _cap_end_date(payload.end_date)
@@ -160,7 +162,10 @@ async def run_rule_backtest(payload: RuleBacktestRunRequest) -> dict:
                 if job:
                     job["status"] = result.get("status", "ok")
                     job["progress_current"] = job.get("progress_total", 1)
-                    job["result"] = result
+                    # Full result stays in memory (future on-demand detail
+                    # endpoints); only the slimmed copy goes on the wire.
+                    job["result_full"] = result
+                    job["result"] = slim_backtest_result(result)
             logger.info(
                 "Rule backtest completed run_id=%s status=%s elapsed=%.1fs",
                 run_id,
@@ -190,20 +195,37 @@ async def run_rule_backtest(payload: RuleBacktestRunRequest) -> dict:
 
 @router.get("/api/progress/{run_id}")
 async def get_rule_backtest_progress(run_id: str) -> dict:
+    """Progress-only response: intentionally never carries the result, so
+    polling stays cheap even when the finished payload is large."""
     with _rule_jobs_lock:
         job = _rule_jobs.get(run_id)
     if job is None:
         raise HTTPException(status_code=404, detail="回测任务不存在或已过期")
-    resp: dict = {
+    return {
         "run_id": job["run_id"],
         "status": job["status"],
         "progress_current": job.get("progress_current", 0),
         "progress_total": job.get("progress_total", 1),
         "error": job.get("error"),
     }
-    if job["status"] != "running" and job.get("result") is not None:
-        resp["result"] = job["result"]
-    return resp
+
+
+@router.get("/api/result/{run_id}")
+async def get_rule_backtest_result(run_id: str) -> dict:
+    """Fetch the (slimmed) backtest result once the run has finished.
+
+    Reads the same in-memory job as the progress endpoint — nothing is
+    persisted (jobs expire after RULE_JOB_TTL_SECONDS).
+    """
+    with _rule_jobs_lock:
+        job = _rule_jobs.get(run_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="回测任务不存在或已过期")
+    if job["status"] == "running":
+        raise HTTPException(status_code=409, detail="回测仍在运行中")
+    if job.get("result") is None:
+        raise HTTPException(status_code=404, detail="回测无可用结果")
+    return job["result"]
 
 
 @router.post("/api/strategies")
