@@ -168,6 +168,22 @@ class RuleBacktestService:
     ) -> dict:
         strategy_ids = self._normalize_strategy_ids(payload)
         symbol = str(payload.get("symbol", "")).strip().upper()
+
+        # Batch-drill snapshot mode: run a frozen strategy payload (from a
+        # batch snapshot) instead of loading the current DB version, so
+        # drill-down re-runs reproduce the batch-time configuration.
+        snapshot_strategy = payload.get("strategy_config")
+        if isinstance(snapshot_strategy, dict) and snapshot_strategy:
+            from rule_backtest.validators import StrategyConfigValidator
+
+            validation = StrategyConfigValidator().validate_and_normalize(snapshot_strategy)
+            if not validation.ok:
+                raise ValueError("; ".join(validation.errors))
+            snapshot_strategy = validation.normalized or snapshot_strategy
+            strategy_ids = [str(snapshot_strategy.get("id") or "snapshot")]
+        else:
+            snapshot_strategy = None
+
         if not strategy_ids:
             raise ValueError("strategy_ids is required")
         if not symbol:
@@ -216,7 +232,7 @@ class RuleBacktestService:
         )
 
         for c_idx, (sid, sizer) in enumerate(combos):
-            strategy = self.strategy_loader.load(sid)
+            strategy = snapshot_strategy if snapshot_strategy is not None else self.strategy_loader.load(sid)
             if progress_callback is not None:
                 day_offset = c_idx * days_per_combo
 

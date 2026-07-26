@@ -235,6 +235,83 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_manual_trades_user_status
                     ON manual_trades(user_id, status, id);
 
+                CREATE TABLE IF NOT EXISTS batch_backtest_runs (
+                    batch_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    categories_json TEXT NOT NULL DEFAULT '[]',
+                    strategy_snapshot_json TEXT NOT NULL DEFAULT '[]',
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    total_cells INTEGER NOT NULL DEFAULT 0,
+                    done_cells INTEGER NOT NULL DEFAULT 0,
+                    ok_cells INTEGER NOT NULL DEFAULT 0,
+                    failed_cells INTEGER NOT NULL DEFAULT 0,
+                    skipped_cells INTEGER NOT NULL DEFAULT 0,
+                    current_symbol TEXT,
+                    data_anchor_date TEXT,
+                    data_version TEXT,
+                    engine_version TEXT NOT NULL DEFAULT '1.0',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TEXT,
+                    error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_batch_backtest_runs_status
+                    ON batch_backtest_runs(status, created_at);
+
+                CREATE TABLE IF NOT EXISTS batch_backtest_cells (
+                    batch_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL,
+                    symbol_name TEXT,
+                    strategy_name TEXT,
+                    category_l1 TEXT,
+                    category_l2 TEXT,
+                    category_l3 TEXT,
+                    asset_type TEXT,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    start_date TEXT,
+                    end_date TEXT,
+                    bar_count INTEGER,
+                    total_return REAL,
+                    annual_return REAL,
+                    max_drawdown REAL,
+                    sharpe REAL,
+                    sortino REAL,
+                    calmar REAL,
+                    win_rate REAL,
+                    profit_factor REAL,
+                    trade_count INTEGER,
+                    final_equity REAL,
+                    benchmark_total_return REAL,
+                    benchmark_annual_return REAL,
+                    excess_annual_return REAL,
+                    annual_returns_json TEXT,
+                    monthly_heatmap_json TEXT,
+                    trades_json TEXT,
+                    skipped_buys_json TEXT,
+                    monthly_nav_json TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (batch_id, symbol, strategy_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_batch_cells_batch
+                    ON batch_backtest_cells(batch_id);
+                CREATE INDEX IF NOT EXISTS idx_batch_cells_annual_return
+                    ON batch_backtest_cells(batch_id, annual_return);
+
+                CREATE TABLE IF NOT EXISTS batch_backtest_symbol_features (
+                    batch_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    ann_volatility REAL,
+                    momentum_250 REAL,
+                    bh_max_drawdown REAL,
+                    trend_score_avg REAL,
+                    amount_ma20 REAL,
+                    bar_count INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (batch_id, symbol)
+                );
+
                 """
             )
 
@@ -1104,6 +1181,214 @@ class Database:
         with self._connect() as conn:
             conn.execute("DELETE FROM indicator_daily")
             conn.execute("DELETE FROM trend_daily")
+
+    # ------------------------------------------------------------------
+    # batch backtest (批量回测)
+    # ------------------------------------------------------------------
+    def create_batch_run_if_idle(self, batch: dict) -> bool:
+        """Insert a new batch run only when no other run is ``running``.
+
+        The check-and-insert is wrapped in BEGIN IMMEDIATE so two concurrent
+        POST /run requests cannot both pass the idle check (409 race).
+        Returns True when the batch was created.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT batch_id FROM batch_backtest_runs WHERE status = 'running' LIMIT 1"
+            ).fetchone()
+            if row:
+                return False
+            conn.execute(
+                """INSERT INTO batch_backtest_runs
+                   (batch_id, name, status, categories_json, strategy_snapshot_json,
+                    config_json, total_cells, data_anchor_date, data_version, engine_version)
+                   VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    batch["batch_id"],
+                    batch.get("name", ""),
+                    batch.get("categories_json", "[]"),
+                    batch.get("strategy_snapshot_json", "[]"),
+                    batch.get("config_json", "{}"),
+                    int(batch.get("total_cells", 0)),
+                    batch.get("data_anchor_date"),
+                    batch.get("data_version"),
+                    batch.get("engine_version", "1.0"),
+                ),
+            )
+            return True
+
+    def update_batch_run(self, batch_id: str, **fields: Any) -> None:
+        """Generic field update for batch progress / status transitions."""
+        allowed = {
+            "name", "status", "total_cells", "done_cells", "ok_cells",
+            "failed_cells", "skipped_cells", "current_symbol", "finished_at", "error",
+        }
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return
+        clause = ", ".join(f"{k} = ?" for k in sets)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE batch_backtest_runs SET {clause} WHERE batch_id = ?",
+                (*sets.values(), batch_id),
+            )
+
+    def get_batch_run(self, batch_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM batch_backtest_runs WHERE batch_id = ?", (batch_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_running_batch_run(self) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM batch_backtest_runs WHERE status = 'running' LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_batch_runs(self, limit: int = 100) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM batch_backtest_runs ORDER BY created_at DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_interrupted_batch_runs(self) -> int:
+        """Startup cleanup: daemon worker threads die with the process, so any
+        batch still 'running' at boot is an orphan — mark it interrupted."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE batch_backtest_runs
+                   SET status = 'interrupted', error = '服务重启导致批次中断',
+                       finished_at = CURRENT_TIMESTAMP
+                   WHERE status = 'running'"""
+            )
+            return cur.rowcount
+
+    def insert_batch_cell(self, cell: dict) -> None:
+        """Insert one result cell. Called per cell (per-cell commit) so a
+        crash mid-batch never loses already-computed cells."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO batch_backtest_cells
+                   (batch_id, symbol, strategy_id, symbol_name, strategy_name,
+                    category_l1, category_l2, category_l3, asset_type,
+                    status, error, start_date, end_date, bar_count,
+                    total_return, annual_return, max_drawdown, sharpe, sortino, calmar,
+                    win_rate, profit_factor, trade_count, final_equity,
+                    benchmark_total_return, benchmark_annual_return, excess_annual_return,
+                    annual_returns_json, monthly_heatmap_json, trades_json,
+                    skipped_buys_json, monthly_nav_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    cell["batch_id"], cell["symbol"], cell["strategy_id"],
+                    cell.get("symbol_name"), cell.get("strategy_name"),
+                    cell.get("category_l1"), cell.get("category_l2"), cell.get("category_l3"),
+                    cell.get("asset_type"), cell["status"], cell.get("error"),
+                    cell.get("start_date"), cell.get("end_date"), cell.get("bar_count"),
+                    cell.get("total_return"), cell.get("annual_return"), cell.get("max_drawdown"),
+                    cell.get("sharpe"), cell.get("sortino"), cell.get("calmar"),
+                    cell.get("win_rate"), cell.get("profit_factor"), cell.get("trade_count"),
+                    cell.get("final_equity"),
+                    cell.get("benchmark_total_return"), cell.get("benchmark_annual_return"),
+                    cell.get("excess_annual_return"),
+                    cell.get("annual_returns_json"), cell.get("monthly_heatmap_json"),
+                    cell.get("trades_json"), cell.get("skipped_buys_json"),
+                    cell.get("monthly_nav_json"),
+                ),
+            )
+
+    _CELL_METRIC_COLUMNS = (
+        "c.batch_id, c.symbol, c.strategy_id, c.symbol_name, c.strategy_name,"
+        " c.category_l1, c.category_l2, c.category_l3, c.asset_type,"
+        " c.status, c.error, c.start_date, c.end_date, c.bar_count,"
+        " c.total_return, c.annual_return, c.max_drawdown, c.sharpe, c.sortino, c.calmar,"
+        " c.win_rate, c.profit_factor, c.trade_count, c.final_equity,"
+        " c.benchmark_total_return, c.benchmark_annual_return, c.excess_annual_return"
+    )
+
+    def get_batch_cells(self, batch_id: str) -> list[dict]:
+        """All cells with metric columns (no blobs), LEFT JOIN symbol features
+        (skipped symbols have no feature row — views must handle nulls)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT {self._CELL_METRIC_COLUMNS},
+                           f.ann_volatility, f.momentum_250, f.bh_max_drawdown,
+                           f.trend_score_avg, f.amount_ma20
+                    FROM batch_backtest_cells c
+                    LEFT JOIN batch_backtest_symbol_features f
+                      ON f.batch_id = c.batch_id AND f.symbol = c.symbol
+                    WHERE c.batch_id = ?
+                    ORDER BY c.symbol, c.strategy_id""",
+                (batch_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_batch_cell_detail(self, batch_id: str, symbol: str, strategy_id: str) -> dict | None:
+        """Single cell including JSON blobs (annual/monthly/trades/monthly_nav)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM batch_backtest_cells
+                   WHERE batch_id = ? AND symbol = ? AND strategy_id = ?""",
+                (batch_id, symbol, strategy_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def insert_batch_symbol_features(self, batch_id: str, symbol: str, features: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO batch_backtest_symbol_features
+                   (batch_id, symbol, ann_volatility, momentum_250, bh_max_drawdown,
+                    trend_score_avg, amount_ma20, bar_count)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    batch_id, symbol,
+                    features.get("ann_volatility"), features.get("momentum_250"),
+                    features.get("bh_max_drawdown"), features.get("trend_score_avg"),
+                    features.get("amount_ma20"), features.get("bar_count"),
+                ),
+            )
+
+    def delete_batch_run(self, batch_id: str) -> bool:
+        """Cascade-delete run + cells + features. Refuses to delete a running
+        batch (cancel first). Returns True when deleted."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM batch_backtest_runs WHERE batch_id = ?", (batch_id,)
+            ).fetchone()
+            if row is None or row["status"] == "running":
+                return False
+            conn.execute("DELETE FROM batch_backtest_cells WHERE batch_id = ?", (batch_id,))
+            conn.execute(
+                "DELETE FROM batch_backtest_symbol_features WHERE batch_id = ?", (batch_id,)
+            )
+            conn.execute("DELETE FROM batch_backtest_runs WHERE batch_id = ?", (batch_id,))
+            return True
+
+    def get_market_data_anchor(self) -> dict:
+        """Batch anchor: latest bar date + data version of the qfq table."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(time) AS anchor_date, MAX(updated_at) AS data_version"
+                " FROM market_data_qfq"
+            ).fetchone()
+        return {
+            "anchor_date": row["anchor_date"] if row else None,
+            "data_version": row["data_version"] if row else None,
+        }
+
+    def count_bars_by_symbol(self, price_mode: str = "qfq") -> dict[str, int]:
+        """Bar counts per symbol (single indexed GROUP BY) — batch ETA estimates."""
+        table = self._market_table(price_mode)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT symbol, COUNT(*) AS n FROM {table} GROUP BY symbol"
+            ).fetchall()
+        return {r["symbol"]: int(r["n"]) for r in rows}
 
 
 def init_db(db_path: str | Path = "data/trend_quant.db") -> Database:

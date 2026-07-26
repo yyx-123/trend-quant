@@ -28,6 +28,9 @@ RULE_JOB_TTL_SECONDS = 1800
 class RuleBacktestRunRequest(BaseModel):
     strategy_ids: list[str] = Field(default_factory=list)
     position_strategy_ids: list[str] = Field(default_factory=list)
+    # Batch drill-down: frozen strategy payload from a batch snapshot. When
+    # present it replaces strategy_ids (StrategyLoader is skipped).
+    strategy_config: dict | None = Field(default=None)
     symbol: str
     start_date: str = Field(default="")
     end_date: str = Field(default="")

@@ -1,0 +1,820 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="batch-page">
+  <!-- ── 发起区 ───────────────────────────────────────────── -->
+  <section class="table-panel batch-panel">
+    <div class="batch-panel-head">
+      <h2>发起批量回测</h2>
+      <span class="batch-hint">按一级类目 × 多策略批量执行，全生命周期、满仓买卖，结果持久化可复查。</span>
+    </div>
+    <div class="batch-form-row">
+      <div class="batch-field">
+        <label class="batch-label">标的范围（一级类目，可多选）</label>
+        <div id="bbCategories" class="batch-chips"><span class="batch-muted">加载中…</span></div>
+      </div>
+      <div class="batch-field">
+        <label class="batch-label">策略（可多选，含随机指标的策略不可批量）</label>
+        <div id="bbStrategies" class="batch-chips"><span class="batch-muted">加载中…</span></div>
+      </div>
+    </div>
+    <div class="batch-form-row batch-form-row--actions">
+      <input id="bbName" type="text" class="batch-name-input" placeholder="批次名称（可选，默认自动生成）">
+      <span id="bbEta" class="batch-eta"></span>
+      <button id="bbRunBtn" type="button" class="confirm-ok-btn batch-run-btn">运行批量回测</button>
+      <button id="bbCancelBtn" type="button" class="confirm-cancel-btn" hidden>取消批次</button>
+    </div>
+    <div id="bbProgressWrap" class="batch-progress-wrap" hidden>
+      <progress id="bbProgress" value="0" max="100"></progress>
+      <span id="bbProgressText" class="batch-muted"></span>
+    </div>
+  </section>
+
+  <!-- ── 批次列表 ─────────────────────────────────────────── -->
+  <section class="table-panel batch-panel">
+    <div class="batch-panel-head">
+      <h2>历史批次</h2>
+      <button id="bbRefreshRuns" type="button" class="ghost-btn batch-mini-btn">刷新</button>
+    </div>
+    <div class="table-shell batch-runs-shell">
+      <table class="backtest-metrics-table" id="bbRunsTable">
+        <thead>
+          <tr>
+            <th>时间</th><th>名称</th><th>状态</th><th>进度</th>
+            <th>成功/失败/跳过</th><th>数据截止</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="bbRunsBody">
+          <tr><td colspan="7" class="batch-muted">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── 结果区 ───────────────────────────────────────────── -->
+  <section id="bbResultSection" class="table-panel batch-panel" hidden>
+    <div class="batch-panel-head">
+      <h2 id="bbResultTitle">批次结果</h2>
+      <span id="bbResultMeta" class="batch-muted"></span>
+    </div>
+    <div class="batch-tabs">
+      <button type="button" class="batch-tab is-active" data-tab="detail">明细大表</button>
+      <button type="button" class="batch-tab" data-tab="heatmap">策略×类目透视</button>
+      <button type="button" class="batch-tab" data-tab="scatter">超额 vs 特征</button>
+      <button type="button" class="batch-tab" data-tab="bucket">特征分桶</button>
+    </div>
+    <p class="batch-analysis-banner" id="bbAnalysisBanner" hidden>
+      ⚠️ 本视图仅用于<strong>描述性观察与假设生成</strong>，非统计推断。样本量有限、多重比较下可能出现噪声“规律”；超额 = 策略年化 − 买入持有年化（基准不含交易摩擦，超额系统性略偏低，对交易多的策略不利）。结论需独立验证。
+    </p>
+
+    <!-- Tab 1: 明细大表 -->
+    <div id="bbTabDetail" class="batch-tab-page">
+      <div class="batch-filter-bar">
+        <select id="bbFilterStrategy"></select>
+        <select id="bbFilterCategory"></select>
+        <select id="bbFilterStatus">
+          <option value="">全部状态</option>
+          <option value="ok">ok</option>
+          <option value="failed">failed</option>
+          <option value="skipped">skipped</option>
+        </select>
+        <label class="batch-check"><input type="checkbox" id="bbFilterMinBars" checked> 仅 bar_count ≥ 250</label>
+        <label class="batch-check"><input type="checkbox" id="bbFilterHasTrades"> 仅看有交易的格子</label>
+        <span id="bbDetailCount" class="batch-muted"></span>
+      </div>
+      <div class="table-shell batch-detail-shell" id="bbDetailShell">
+        <table class="backtest-metrics-table batch-detail-table" id="bbDetailTable">
+          <thead><tr id="bbDetailHead"></tr></thead>
+          <tbody id="bbDetailBody"></tbody>
+        </table>
+        <div id="bbDetailSentinel" class="batch-sentinel batch-muted"></div>
+      </div>
+    </div>
+
+    <!-- Tab 2: 透视热力图 -->
+    <div id="bbTabHeatmap" class="batch-tab-page" hidden>
+      <div class="batch-filter-bar">
+        <select id="bbHeatMetric">
+          <option value="excess_annual_return">超额年化（中位数）</option>
+          <option value="annual_return">策略年化（中位数）</option>
+          <option value="win_rate">胜率（中位数）</option>
+          <option value="sharpe">夏普（中位数）</option>
+          <option value="calmar">卡玛（中位数）</option>
+        </select>
+        <select id="bbHeatLevel">
+          <option value="category_l1">一级类目</option>
+          <option value="category_l2">二级类目</option>
+        </select>
+        <span class="batch-muted">每格标注样本量 n；n&lt;5 置灰不参与解读</span>
+      </div>
+      <div id="bbHeatChart" class="batch-chart"></div>
+    </div>
+
+    <!-- Tab 3: 散点 -->
+    <div id="bbTabScatter" class="batch-tab-page" hidden>
+      <div class="batch-filter-bar">
+        <select id="bbScatterStrategy"></select>
+        <select id="bbScatterX">
+          <option value="momentum_250">标的动量（近250日）</option>
+          <option value="ann_volatility">年化波动率</option>
+          <option value="bh_max_drawdown">买入持有最大回撤</option>
+          <option value="trend_score_avg">趋势度（trend_score 均值）</option>
+          <option value="amount_ma20">流动性（日均成交额）</option>
+          <option value="bar_count">历史长度（bar 数）</option>
+        </select>
+        <select id="bbScatterY">
+          <option value="excess_annual_return">超额年化</option>
+          <option value="excess_total_return">超额总收益</option>
+          <option value="annual_return">策略年化</option>
+        </select>
+        <span class="batch-muted">按一级类目着色；特征缺失的标的不参与</span>
+      </div>
+      <div id="bbScatterChart" class="batch-chart"></div>
+    </div>
+
+    <!-- Tab 4: 特征分桶 -->
+    <div id="bbTabBucket" class="batch-tab-page" hidden>
+      <div class="batch-filter-bar">
+        <select id="bbBucketFeature">
+          <option value="momentum_250">标的动量（近250日）</option>
+          <option value="ann_volatility">年化波动率</option>
+          <option value="bh_max_drawdown">买入持有最大回撤</option>
+          <option value="trend_score_avg">趋势度（trend_score 均值）</option>
+          <option value="amount_ma20">流动性（日均成交额）</option>
+          <option value="bar_count">历史长度（bar 数）</option>
+        </select>
+        <span class="batch-muted">按特征三分位分桶，柱高 = 桶内超额年化中位数（标注 n）</span>
+      </div>
+      <div id="bbBucketChart" class="batch-chart"></div>
+    </div>
+  </section>
+</div>
+
+<script src="/static/echarts.min.js?v={{ request.app.state.asset_version|default('1', true) }}"></script>
+<script>
+(function () {
+  'use strict';
+
+  var state = {
+    meta: null,
+    categories: new Set(),
+    strategies: new Set(),
+    pollTimer: null,
+    currentBatchId: null,
+    currentBatch: null,
+    cells: [],
+    charts: {},
+    // 明细表
+    detailRows: [],
+    detailRendered: 0,
+    detailSort: { key: 'excess_annual_return', dir: -1 },
+    activeTab: 'detail'
+  };
+
+  var DETAIL_PAGE = 200;
+
+  var COLUMNS = [
+    { key: 'symbol', label: '标的', fmt: text },
+    { key: 'symbol_name', label: '名称', fmt: text },
+    { key: 'strategy_name', label: '策略', fmt: text },
+    { key: 'category_l1', label: '类目', fmt: text },
+    { key: 'status', label: '状态', fmt: statusBadge },
+    { key: 'bar_count', label: 'K线数', fmt: int },
+    { key: 'total_return', label: '总收益', fmt: pct },
+    { key: 'annual_return', label: '年化', fmt: pct },
+    { key: 'excess_annual_return', label: '超额年化', fmt: pctSigned },
+    { key: 'max_drawdown', label: '最大回撤', fmt: pct },
+    { key: 'sharpe', label: '夏普', fmt: num2 },
+    { key: 'win_rate', label: '胜率', fmt: pct },
+    { key: 'profit_factor', label: '盈亏比', fmt: num2 },
+    { key: 'trade_count', label: '交易数', fmt: int },
+    { key: 'error', label: '备注', fmt: text }
+  ];
+
+  // ── 工具 ────────────────────────────────────────────────
+  function text(v) { return v == null || v === '' ? '—' : String(v); }
+  function int(v) { return v == null ? '—' : String(v); }
+  function num2(v) { return v == null || !isFinite(v) ? '—' : Number(v).toFixed(2); }
+  function pct(v) { return v == null || !isFinite(v) ? '—' : (v * 100).toFixed(1) + '%'; }
+  function pctSigned(v) {
+    if (v == null || !isFinite(v)) return '—';
+    var s = (v * 100).toFixed(1) + '%';
+    return v > 0 ? '+' + s : s;
+  }
+  function statusBadge(v) { return v || '—'; }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmtSecs(sec) {
+    if (sec < 90) return Math.round(sec) + ' 秒';
+    if (sec < 5400) return '约 ' + Math.round(sec / 60) + ' 分钟';
+    return '约 ' + (sec / 3600).toFixed(1) + ' 小时';
+  }
+  function median(arr) {
+    if (!arr.length) return null;
+    var s = arr.slice().sort(function (a, b) { return a - b; });
+    var mid = s.length >> 1;
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  }
+  function el(id) { return document.getElementById(id); }
+
+  // ── 元数据与发起 ─────────────────────────────────────────
+  function loadMeta() {
+    fetch('/batch-backtest/api/meta').then(function (r) { return r.json(); }).then(function (meta) {
+      state.meta = meta;
+      renderChips(meta);
+      if (meta.running_batch_id) {
+        pollProgress(meta.running_batch_id);
+        el('bbRunBtn').disabled = true;
+        el('bbCancelBtn').hidden = false;
+        state.currentBatchId = meta.running_batch_id;
+        el('bbProgressWrap').hidden = false;
+      }
+    });
+  }
+
+  function renderChips(meta) {
+    var catBox = el('bbCategories');
+    catBox.innerHTML = '';
+    meta.categories.forEach(function (c) {
+      var chip = document.createElement('label');
+      chip.className = 'batch-chip';
+      chip.innerHTML = '<input type="checkbox" value="' + esc(c.name) + '"> ' +
+        esc(c.name) + ' <span class="batch-chip-count">' + c.symbol_count + '</span>';
+      chip.querySelector('input').addEventListener('change', function (e) {
+        e.target.checked ? state.categories.add(c.name) : state.categories.delete(c.name);
+        chip.classList.toggle('is-on', e.target.checked);
+        updateEta();
+      });
+      catBox.appendChild(chip);
+    });
+
+    var stBox = el('bbStrategies');
+    stBox.innerHTML = '';
+    meta.strategies.forEach(function (s) {
+      var chip = document.createElement('label');
+      chip.className = 'batch-chip' + (s.uses_random_indicator ? ' is-disabled' : '');
+      chip.innerHTML = '<input type="checkbox" value="' + esc(s.id) + '"' +
+        (s.uses_random_indicator ? ' disabled' : '') + '> ' + esc(s.name) +
+        (s.uses_random_indicator ? ' <span class="batch-chip-badge">随机指标</span>' : '');
+      if (!s.uses_random_indicator) {
+        chip.querySelector('input').addEventListener('change', function (e) {
+          e.target.checked ? state.strategies.add(s.id) : state.strategies.delete(s.id);
+          chip.classList.toggle('is-on', e.target.checked);
+          updateEta();
+        });
+      }
+      stBox.appendChild(chip);
+    });
+  }
+
+  function updateEta() {
+    var etaEl = el('bbEta');
+    if (!state.meta || !state.categories.size || !state.strategies.size) {
+      etaEl.textContent = '';
+      etaEl.className = 'batch-eta';
+      return;
+    }
+    var sec = 0;
+    state.meta.categories.forEach(function (c) {
+      if (state.categories.has(c.name)) sec += c.estimated_seconds_per_strategy;
+    });
+    sec *= state.strategies.size;
+    etaEl.textContent = '预计 ' + state.categories.size + ' 类目 × ' + state.strategies.size +
+      ' 策略，耗时 ' + fmtSecs(sec);
+    etaEl.className = 'batch-eta' + (sec > 3600 ? ' batch-eta--warn' : '');
+  }
+
+  function runBatch() {
+    if (!state.categories.size) { alert('请选择至少一个一级类目'); return; }
+    if (!state.strategies.size) { alert('请选择至少一个策略'); return; }
+    el('bbRunBtn').disabled = true;
+    fetch('/batch-backtest/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        categories: Array.from(state.categories),
+        strategy_ids: Array.from(state.strategies),
+        name: el('bbName').value.trim()
+      })
+    }).then(async function (r) {
+      if (r.status === 409) {
+        var d = await r.json();
+        alert(d.detail || '已有批次在运行');
+        el('bbRunBtn').disabled = false;
+        return;
+      }
+      if (!r.ok) {
+        var d2 = await r.json().catch(function () { return {}; });
+        alert(d2.detail || ('发起失败：' + r.status));
+        el('bbRunBtn').disabled = false;
+        return;
+      }
+      var data = await r.json();
+      state.currentBatchId = data.batch_id;
+      el('bbProgressWrap').hidden = false;
+      el('bbCancelBtn').hidden = false;
+      pollProgress(data.batch_id);
+      loadRuns();
+    }).catch(function () {
+      alert('网络错误，发起失败');
+      el('bbRunBtn').disabled = false;
+    });
+  }
+
+  function pollProgress(batchId) {
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    state.pollTimer = setInterval(function () {
+      fetch('/batch-backtest/api/progress/' + encodeURIComponent(batchId))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (p) {
+          if (!p) { clearInterval(state.pollTimer); state.pollTimer = null; return; }
+          var pctDone = p.total_cells ? Math.round(100 * p.done_cells / p.total_cells) : 0;
+          el('bbProgress').value = pctDone;
+          el('bbProgressText').textContent =
+            p.status + ' ' + pctDone + '%（' + p.done_cells + '/' + p.total_cells +
+            ' 格，成功 ' + p.ok_cells + ' 失败 ' + p.failed_cells + ' 跳过 ' + p.skipped_cells +
+            (p.current_symbol ? '，当前 ' + p.current_symbol : '') + '）';
+          if (p.status !== 'running') {
+            clearInterval(state.pollTimer);
+            state.pollTimer = null;
+            el('bbRunBtn').disabled = false;
+            el('bbCancelBtn').hidden = true;
+            loadRuns();
+            loadBatch(batchId);
+          }
+        })
+        .catch(function () {});
+    }, 1000);
+  }
+
+  function cancelBatch() {
+    if (!state.currentBatchId) return;
+    if (!confirm('确定取消当前批次？已完成的格子会保留。')) return;
+    fetch('/batch-backtest/api/cancel/' + encodeURIComponent(state.currentBatchId), { method: 'POST' })
+      .then(function () { el('bbProgressText').textContent = '取消中…（当前格子完成后停止）'; });
+  }
+
+  // ── 批次列表 ─────────────────────────────────────────────
+  function loadRuns() {
+    fetch('/batch-backtest/api/runs').then(function (r) { return r.json(); }).then(function (data) {
+      var body = el('bbRunsBody');
+      body.innerHTML = '';
+      if (!data.runs.length) {
+        body.innerHTML = '<tr><td colspan="7" class="batch-muted">还没有批次，先在上方发起一个。</td></tr>';
+        return;
+      }
+      data.runs.forEach(function (run) {
+        var tr = document.createElement('tr');
+        tr.dataset.batchId = run.batch_id;
+        if (run.batch_id === state.currentBatchId) tr.classList.add('active');
+        var progress = run.status === 'running'
+          ? (run.total_cells ? Math.round(100 * run.done_cells / run.total_cells) + '%' : '0%')
+          : run.done_cells + '/' + run.total_cells;
+        tr.innerHTML =
+          '<td>' + esc((run.created_at || '').slice(0, 19)) + '</td>' +
+          '<td>' + esc(run.name || run.batch_id) + '</td>' +
+          '<td><span class="batch-status batch-status--' + esc(run.status) + '">' + esc(run.status) + '</span></td>' +
+          '<td>' + esc(progress) + '</td>' +
+          '<td>' + run.ok_cells + ' / ' + run.failed_cells + ' / ' + run.skipped_cells + '</td>' +
+          '<td>' + esc((run.data_anchor_date || '—').slice(0, 10)) + '</td>' +
+          '<td class="batch-run-actions">' +
+            '<button type="button" class="ghost-btn batch-mini-btn" data-act="load">载入</button>' +
+            '<button type="button" class="ghost-btn batch-mini-btn" data-act="rerun">重跑</button>' +
+            '<button type="button" class="del-btn" data-act="del" title="删除批次">✕</button>' +
+          '</td>';
+        tr.addEventListener('click', function (e) {
+          var act = e.target.dataset && e.target.dataset.act;
+          if (act === 'del') { deleteRun(run); return; }
+          if (act === 'rerun') { rerunPrefill(run); return; }
+          loadBatch(run.batch_id);
+          if (run.status === 'running') pollProgress(run.batch_id);
+        });
+        body.appendChild(tr);
+      });
+    });
+  }
+
+  function deleteRun(run) {
+    if (!confirm('删除批次「' + (run.name || run.batch_id) + '」及其全部结果？')) return;
+    fetch('/batch-backtest/api/runs/' + encodeURIComponent(run.batch_id), { method: 'DELETE' })
+      .then(async function (r) {
+        if (!r.ok) {
+          var d = await r.json().catch(function () { return {}; });
+          alert(d.detail || '删除失败');
+        }
+        loadRuns();
+      });
+  }
+
+  function rerunPrefill(run) {
+    try {
+      var cats = JSON.parse(run.categories_json || '[]');
+      var snap = JSON.parse(run.strategy_snapshot_json || '[]');
+      state.categories = new Set(cats);
+      state.strategies = new Set(snap.map(function (s) { return s.id; }));
+      renderChips(state.meta);
+      // 重新勾选
+      document.querySelectorAll('#bbCategories input').forEach(function (input) {
+        input.checked = state.categories.has(input.value);
+        input.parentElement.classList.toggle('is-on', input.checked);
+      });
+      document.querySelectorAll('#bbStrategies input').forEach(function (input) {
+        if (input.disabled) return;
+        input.checked = state.strategies.has(input.value);
+        input.parentElement.classList.toggle('is-on', input.checked);
+      });
+      updateEta();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e) { alert('批次配置解析失败'); }
+  }
+
+  // ── 结果加载与 Tab 切换 ──────────────────────────────────
+  function loadBatch(batchId) {
+    fetch('/batch-backtest/api/runs/' + encodeURIComponent(batchId) + '/cells')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data) return;
+        state.currentBatchId = batchId;
+        state.currentBatch = data.batch;
+        state.cells = data.cells || [];
+        el('bbResultSection').hidden = false;
+        el('bbResultTitle').textContent = '批次结果：' + (data.batch.name || batchId);
+        el('bbResultMeta').textContent =
+          '共 ' + state.cells.length + ' 格（ok ' + data.batch.ok_cells +
+          ' / failed ' + data.batch.failed_cells + ' / skipped ' + data.batch.skipped_cells +
+          '），数据截止 ' + (data.batch.data_anchor_date || '—').slice(0, 10);
+        initFilters();
+        renderActiveTab();
+      });
+  }
+
+  function switchTab(tab) {
+    state.activeTab = tab;
+    document.querySelectorAll('.batch-tab').forEach(function (b) {
+      b.classList.toggle('is-active', b.dataset.tab === tab);
+    });
+    ['detail', 'heatmap', 'scatter', 'bucket'].forEach(function (t) {
+      el('bbTab' + t[0].toUpperCase() + t.slice(1)).hidden = t !== tab;
+    });
+    el('bbAnalysisBanner').hidden = tab === 'detail';
+    renderActiveTab();
+  }
+
+  function renderActiveTab() {
+    if (!state.cells.length) return;
+    if (state.activeTab === 'detail') renderDetail();
+    else if (state.activeTab === 'heatmap') renderHeatmap();
+    else if (state.activeTab === 'scatter') renderScatter();
+    else if (state.activeTab === 'bucket') renderBucket();
+  }
+
+  function getChart(id) {
+    if (!state.charts[id]) state.charts[id] = echarts.init(el(id));
+    return state.charts[id];
+  }
+
+  // ── Tab 1: 明细大表 ──────────────────────────────────────
+  function initFilters() {
+    var strategies = {}, cats = {};
+    state.cells.forEach(function (c) {
+      if (c.strategy_name) strategies[c.strategy_name] = true;
+      if (c.category_l1) cats[c.category_l1] = true;
+    });
+    fillSelect(el('bbFilterStrategy'), '全部策略', Object.keys(strategies));
+    fillSelect(el('bbFilterCategory'), '全部类目', Object.keys(cats));
+    fillSelect(el('bbScatterStrategy'), null, Object.keys(strategies));
+    renderDetailHead();
+  }
+
+  function fillSelect(select, allLabel, values) {
+    select.innerHTML = '';
+    if (allLabel != null) {
+      var opt = document.createElement('option');
+      opt.value = ''; opt.textContent = allLabel;
+      select.appendChild(opt);
+    }
+    values.sort().forEach(function (v) {
+      var o = document.createElement('option');
+      o.value = v; o.textContent = v;
+      select.appendChild(o);
+    });
+  }
+
+  function renderDetailHead() {
+    var head = el('bbDetailHead');
+    head.innerHTML = '';
+    COLUMNS.forEach(function (col) {
+      var th = document.createElement('th');
+      th.textContent = col.label;
+      if (state.detailSort.key === col.key) {
+        th.textContent += state.detailSort.dir > 0 ? ' ▲' : ' ▼';
+      }
+      th.addEventListener('click', function () {
+        if (state.detailSort.key === col.key) state.detailSort.dir *= -1;
+        else state.detailSort = { key: col.key, dir: -1 };
+        renderDetailHead();
+        renderDetail();
+      });
+      head.appendChild(th);
+    });
+  }
+
+  function detailFilteredRows() {
+    var fStrategy = el('bbFilterStrategy').value;
+    var fCat = el('bbFilterCategory').value;
+    var fStatus = el('bbFilterStatus').value;
+    var minBars = el('bbFilterMinBars').checked;
+    var hasTrades = el('bbFilterHasTrades').checked;
+    var rows = state.cells.filter(function (c) {
+      if (fStrategy && c.strategy_name !== fStrategy) return false;
+      if (fCat && c.category_l1 !== fCat) return false;
+      if (fStatus && c.status !== fStatus) return false;
+      if (minBars && !(c.bar_count >= 250)) return false;
+      if (hasTrades && !(c.trade_count > 0)) return false;
+      return true;
+    });
+    var key = state.detailSort.key, dir = state.detailSort.dir;
+    rows.sort(function (a, b) {
+      var va = a[key], vb = b[key];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === 'string') return va.localeCompare(vb) * dir;
+      return (va - vb) * dir;
+    });
+    return rows;
+  }
+
+  function renderDetail() {
+    state.detailRows = detailFilteredRows();
+    state.detailRendered = 0;
+    el('bbDetailBody').innerHTML = '';
+    el('bbDetailCount').textContent = state.detailRows.length + ' 行（点击行钻取单标的细节）';
+    appendDetailRows();
+  }
+
+  function appendDetailRows() {
+    var body = el('bbDetailBody');
+    var rows = state.detailRows;
+    var end = Math.min(state.detailRendered + DETAIL_PAGE, rows.length);
+    for (var i = state.detailRendered; i < end; i++) {
+      var c = rows[i];
+      var tr = document.createElement('tr');
+      if (c.status === 'ok' && !(c.trade_count > 0)) tr.classList.add('batch-row-zero');
+      tr.innerHTML = COLUMNS.map(function (col) {
+        var cls = '';
+        if (col.key === 'excess_annual_return' && c[col.key] != null) {
+          cls = c[col.key] > 0 ? ' class="batch-pos"' : ' class="batch-neg"';
+        }
+        if (col.key === 'status') cls = ' class="batch-status-cell batch-status-cell--' + esc(c.status) + '"';
+        return '<td' + cls + '>' + esc(col.fmt(c[col.key])) + '</td>';
+      }).join('');
+      if (c.status === 'ok') {
+        tr.classList.add('batch-row-drill');
+        tr.title = '点击钻取：用批次快照重跑该标的';
+        (function (cell) {
+          tr.addEventListener('click', function () { drill(cell); });
+        })(c);
+      }
+      body.appendChild(tr);
+    }
+    state.detailRendered = end;
+    el('bbDetailSentinel').textContent =
+      state.detailRendered < rows.length ? '下滑加载更多（' + state.detailRendered + '/' + rows.length + '）' : '';
+  }
+
+  function drill(cell) {
+    var url = '/market-view?drill=1&batch_id=' + encodeURIComponent(state.currentBatchId) +
+      '&strategy_id=' + encodeURIComponent(cell.strategy_id) +
+      '&symbol=' + encodeURIComponent(cell.symbol);
+    window.location.href = url;
+  }
+
+  // ── Tab 2: 透视热力图 ────────────────────────────────────
+  function okCells() {
+    return state.cells.filter(function (c) { return c.status === 'ok'; });
+  }
+
+  function renderHeatmap() {
+    var metric = el('bbHeatMetric').value;
+    var level = el('bbHeatLevel').value;
+    var groups = {}; // strategy -> category -> [values]
+    var catSet = {}, stSet = {};
+    okCells().forEach(function (c) {
+      var v = c[metric];
+      if (v == null || !isFinite(v)) return;
+      var cat = c[level] || '未分类';
+      catSet[cat] = true; stSet[c.strategy_name] = true;
+      (groups[c.strategy_name] = groups[c.strategy_name] || {});
+      (groups[c.strategy_name][cat] = groups[c.strategy_name][cat] || []).push(v);
+    });
+    var cats = Object.keys(catSet).sort();
+    var strategies = Object.keys(stSet).sort();
+    var data = [], grey = [];
+    strategies.forEach(function (s, yi) {
+      cats.forEach(function (cat, xi) {
+        var vals = (groups[s] && groups[s][cat]) || [];
+        if (vals.length < 5) {
+          grey.push([xi, yi, vals.length]);
+        } else {
+          data.push([xi, yi, median(vals), vals.length]);
+        }
+      });
+    });
+    var chart = getChart('bbHeatChart');
+    var isPct = metric !== 'sharpe' && metric !== 'calmar';
+    chart.setOption({
+      tooltip: {
+        formatter: function (p) {
+          if (p.seriesIndex === 1) return cats[p.value[0]] + ' × ' + strategies[p.value[1]] + '<br>n=' + p.value[2] + '（样本过少）';
+          return cats[p.value[0]] + ' × ' + strategies[p.value[1]] + '<br>中位数: ' +
+            (isPct ? (p.value[2] * 100).toFixed(1) + '%' : p.value[2].toFixed(2)) + '（n=' + p.value[3] + '）';
+        }
+      },
+      grid: { left: 140, right: 90, top: 30, bottom: 60 },
+      xAxis: { type: 'category', data: cats, splitArea: { show: true } },
+      yAxis: { type: 'category', data: strategies, splitArea: { show: true } },
+      visualMap: {
+        min: data.length ? Math.min.apply(null, data.map(function (d) { return d[2]; })) : -1,
+        max: data.length ? Math.max.apply(null, data.map(function (d) { return d[2]; })) : 1,
+        calculable: true, orient: 'vertical', right: 8, top: 'center',
+        inRange: { color: ['#c15b58', '#f5f1e8', '#1b825f'] },
+        formatter: function (v) { return isPct ? (v * 100).toFixed(0) + '%' : v.toFixed(1); }
+      },
+      series: [
+        {
+          type: 'heatmap',
+          data: data,
+          label: {
+            show: true,
+            formatter: function (p) {
+              return (isPct ? (p.value[2] * 100).toFixed(1) + '%' : p.value[2].toFixed(2)) + '\nn=' + p.value[3];
+            },
+            fontSize: 10
+          }
+        },
+        {
+          type: 'heatmap',
+          data: grey,
+          itemStyle: { color: '#e8e8e4' },
+          label: { show: true, formatter: function (p) { return 'n=' + p.value[2]; }, fontSize: 10, color: '#999' }
+        }
+      ]
+    }, true);
+    chart.resize();
+  }
+
+  // ── Tab 3: 散点 ──────────────────────────────────────────
+  function renderScatter() {
+    var strategy = el('bbScatterStrategy').value;
+    var xKey = el('bbScatterX').value;
+    var yKey = el('bbScatterY').value;
+    var byCat = {};
+    okCells().forEach(function (c) {
+      if (strategy && c.strategy_name !== strategy) return;
+      var x = c[xKey];
+      var y = yKey === 'excess_total_return'
+        ? (c.total_return != null && c.benchmark_total_return != null ? c.total_return - c.benchmark_total_return : null)
+        : c[yKey];
+      if (x == null || y == null || !isFinite(x) || !isFinite(y)) return;
+      var cat = c.category_l1 || '未分类';
+      (byCat[cat] = byCat[cat] || []).push([x, y, c.symbol, c.symbol_name]);
+    });
+    var palette = ['#0d7a71', '#c7834c', '#4a6fa5', '#c15b58', '#7a5195', '#1b825f', '#8c8c8c'];
+    var cats = Object.keys(byCat).sort();
+    var chart = getChart('bbScatterChart');
+    chart.setOption({
+      tooltip: {
+        formatter: function (p) {
+          var d = p.data;
+          return esc(d[2]) + ' ' + esc(d[3] || '') + '<br>x: ' +
+            (Math.abs(d[0]) < 10 ? d[0].toFixed(3) : d[0].toLocaleString()) +
+            '<br>y: ' + (d[1] * 100).toFixed(1) + '%';
+        }
+      },
+      legend: { data: cats, top: 0 },
+      grid: { left: 70, right: 30, top: 40, bottom: 50 },
+      xAxis: { type: 'value', name: el('bbScatterX').selectedOptions[0].textContent, scale: true },
+      yAxis: {
+        type: 'value', name: el('bbScatterY').selectedOptions[0].textContent, scale: true,
+        axisLabel: { formatter: function (v) { return (v * 100).toFixed(0) + '%'; } }
+      },
+      series: cats.map(function (cat, i) {
+        return {
+          name: cat, type: 'scatter', data: byCat[cat],
+          symbolSize: 8, itemStyle: { color: palette[i % palette.length], opacity: 0.75 }
+        };
+      })
+    }, true);
+    chart.resize();
+  }
+
+  // ── Tab 4: 特征分桶 ──────────────────────────────────────
+  function renderBucket() {
+    var feature = el('bbBucketFeature').value;
+    var ok = okCells().filter(function (c) {
+      return c[feature] != null && isFinite(c[feature]) &&
+        c.excess_annual_return != null && isFinite(c.excess_annual_return);
+    });
+    var noFeatureCount = okCells().length - ok.length;
+    // 按（标的）特征去重后定三分位（同一标的出现在多个策略行里，避免重复加权）
+    var bySymbol = {};
+    ok.forEach(function (c) { bySymbol[c.symbol] = c[feature]; });
+    var values = Object.keys(bySymbol).map(function (s) { return bySymbol[s]; }).sort(function (a, b) { return a - b; });
+    if (values.length < 6) {
+      getChart('bbBucketChart').clear();
+      el('bbBucketChart').innerHTML = '<p class="batch-muted">有效样本不足（需 ≥6 个有特征的标的），无法分桶。</p>';
+      return;
+    }
+    var q1 = values[Math.floor(values.length / 3)];
+    var q2 = values[Math.floor(values.length * 2 / 3)];
+    var bucketOf = function (v) { return v <= q1 ? 0 : (v <= q2 ? 1 : 2); };
+    var labels = ['低（≤' + fmtFeature(q1) + '）', '中', '高（>' + fmtFeature(q2) + '）'];
+    if (noFeatureCount > 0) labels.push('无特征');
+
+    var strategies = {};
+    ok.forEach(function (c) {
+      var b = bucketOf(c[feature]);
+      (strategies[c.strategy_name] = strategies[c.strategy_name] || [[], [], [], []])[b].push(c.excess_annual_return);
+    });
+    if (noFeatureCount > 0) {
+      okCells().forEach(function (c) {
+        if (c[feature] == null || !isFinite(c[feature])) {
+          if (c.excess_annual_return == null || !isFinite(c.excess_annual_return)) return;
+          (strategies[c.strategy_name] = strategies[c.strategy_name] || [[], [], [], []])[3].push(c.excess_annual_return);
+        }
+      });
+    }
+    var names = Object.keys(strategies).sort();
+    var chart = getChart('bbBucketChart');
+    chart.setOption({
+      tooltip: {
+        trigger: 'axis',
+        formatter: function (ps) {
+          return ps.map(function (p) {
+            var d = strategies[p.seriesName][p.dataIndex];
+            return p.marker + ' ' + esc(p.seriesName) + ': ' +
+              (d.length ? (median(d) * 100).toFixed(1) + '%（n=' + d.length + '）' : '无数据');
+          }).join('<br>');
+        }
+      },
+      legend: { data: names, top: 0 },
+      grid: { left: 70, right: 30, top: 40, bottom: 50 },
+      xAxis: { type: 'category', data: labels },
+      yAxis: {
+        type: 'value', name: '超额年化中位数',
+        axisLabel: { formatter: function (v) { return (v * 100).toFixed(0) + '%'; } }
+      },
+      series: names.map(function (name) {
+        return {
+          name: name, type: 'bar',
+          data: strategies[name].map(function (arr) { return arr.length ? median(arr) : null; }),
+          label: {
+            show: true, position: 'top', fontSize: 10,
+            formatter: function (p) {
+              var arr = strategies[name][p.dataIndex];
+              return arr.length ? 'n=' + arr.length : '';
+            }
+          }
+        };
+      })
+    }, true);
+    chart.resize();
+  }
+
+  function fmtFeature(v) {
+    if (v == null) return '—';
+    if (Math.abs(v) >= 1e8) return (v / 1e8).toFixed(1) + '亿';
+    if (Math.abs(v) >= 1e4) return (v / 1e4).toFixed(1) + '万';
+    if (Math.abs(v) < 10) return v.toFixed(2);
+    return v.toFixed(0);
+  }
+
+  // ── 事件绑定 ─────────────────────────────────────────────
+  el('bbRunBtn').addEventListener('click', runBatch);
+  el('bbCancelBtn').addEventListener('click', cancelBatch);
+  el('bbRefreshRuns').addEventListener('click', loadRuns);
+  document.querySelectorAll('.batch-tab').forEach(function (b) {
+    b.addEventListener('click', function () { switchTab(b.dataset.tab); });
+  });
+  ['bbFilterStrategy', 'bbFilterCategory', 'bbFilterStatus', 'bbFilterMinBars', 'bbFilterHasTrades'].forEach(function (id) {
+    el(id).addEventListener('change', renderDetail);
+  });
+  ['bbHeatMetric', 'bbHeatLevel'].forEach(function (id) { el(id).addEventListener('change', renderHeatmap); });
+  ['bbScatterStrategy', 'bbScatterX', 'bbScatterY'].forEach(function (id) { el(id).addEventListener('change', renderScatter); });
+  el('bbBucketFeature').addEventListener('change', renderBucket);
+  el('bbDetailShell').addEventListener('scroll', function (e) {
+    var t = e.target;
+    if (t.scrollTop + t.clientHeight >= t.scrollHeight - 80) appendDetailRows();
+  });
+  window.addEventListener('resize', function () {
+    Object.keys(state.charts).forEach(function (id) { state.charts[id].resize(); });
+  });
+
+  loadMeta();
+  loadRuns();
+})();
+</script>
+{% endblock %}

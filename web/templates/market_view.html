@@ -48,6 +48,11 @@
     </div>
   </div>
 
+  <div id="mvDrillBanner" class="batch-analysis-banner" hidden>
+    <span id="mvDrillBannerText"></span>
+    <button id="mvDrillExitBtn" type="button" class="ghost-btn batch-mini-btn" style="margin-left:10px;">退出快照模式</button>
+  </div>
+
   <div class="viz-panel market-chart-panel">
     <div class="market-chart-head">
       <h3 id="mvChartTitle">日 K</h3>
@@ -1750,10 +1755,15 @@
     }
   }
 
+  // Batch drill-down context (批量回测快照重跑模式): when set, the backtest
+  // runs the frozen strategy payload from the batch snapshot instead of the
+  // current DB version, over the batch-recorded date range.
+  let drillContext = null;
+
   async function runRuleBacktest() {
     const symbol = selectedSymbol();
-    const strategyIds = selectedStrategyIds();
-    if (!symbol || !strategyIds.length) return;
+    const strategyIds = drillContext ? [] : selectedStrategyIds();
+    if (!symbol || (!strategyIds.length && !drillContext)) return;
     runBacktestBtnEl.disabled = true;
     runBacktestBtnEl.textContent = '回测中';
     showBacktestProgress();
@@ -1764,6 +1774,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           strategy_ids: strategyIds,
+          strategy_config: drillContext ? drillContext.strategy_config : null,
           position_strategy_ids: selectedSizerIds(),
           symbol,
           start_date: backtestStartEl.value,
@@ -1901,7 +1912,57 @@
     }
   })();
 
-  Promise.all([loadRuleMeta(), loadSymbols()]).catch((err) => {
+  // --- Batch drill-down (快照重跑模式) ---
+  const drillBannerEl = document.getElementById('mvDrillBanner');
+  const drillBannerTextEl = document.getElementById('mvDrillBannerText');
+  const drillExitBtnEl = document.getElementById('mvDrillExitBtn');
+
+  function exitDrillMode() {
+    drillContext = null;
+    drillBannerEl.hidden = true;
+    updateStrategyDropdownLabel();
+    // 去掉 URL 上的钻取参数，避免刷新后再次触发
+    window.history.replaceState({}, '', '/market-view');
+  }
+
+  drillExitBtnEl.addEventListener('click', exitDrillMode);
+
+  async function initDrillMode() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('drill') !== '1') return;
+    const batchId = params.get('batch_id') || '';
+    const strategyId = params.get('strategy_id') || '';
+    const symbol = (params.get('symbol') || '').trim().toUpperCase();
+    if (!batchId || !strategyId || !symbol) return;
+    let snap = null;
+    try {
+      const qs = new URLSearchParams({ strategy_id: strategyId, symbol });
+      const resp = await fetch(`/batch-backtest/api/runs/${encodeURIComponent(batchId)}/snapshot?${qs}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || '批次快照读取失败');
+      snap = data;
+    } catch (err) {
+      alert(`批次快照读取失败（${err.message}），已回退常规模式。`);
+      window.history.replaceState({}, '', '/market-view');
+      return;
+    }
+    drillContext = snap;
+    drillBannerTextEl.textContent =
+      `批次快照重跑：${snap.batch_name || snap.batch_id} / ${snap.strategy_name || snap.strategy_id}` +
+      `，区间 ${snap.start_date || '起点'} ~ ${snap.end_date || '—'}。` +
+      '结果基于批次快照重跑，可能因历史数据修正产生轻微差异。';
+    drillBannerEl.hidden = false;
+    backtestStrategyLabelEl.textContent = `${snap.strategy_name || snap.strategy_id}（批次快照）`;
+    symbolSearchEl.value = symbol;
+    symbolInputEl.value = symbol;
+    await loadDaily(symbol);
+    if (snap.start_date) backtestStartEl.value = String(snap.start_date).slice(0, 10);
+    if (snap.end_date) backtestEndEl.value = String(snap.end_date).slice(0, 10);
+    updateBacktestRangeLabel();
+    await runRuleBacktest();
+  }
+
+  Promise.all([loadRuleMeta(), loadSymbols()]).then(initDrillMode).catch((err) => {
     chartTitleEl.textContent = `加载失败：${err.message}`;
     rangeMetaEl.textContent = '';
   });

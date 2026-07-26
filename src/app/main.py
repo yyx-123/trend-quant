@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.routers import (
+    batch_backtest,
     instruments,
     manual_trade,
     market_view,
@@ -29,7 +30,9 @@ from audit.app_logger import get_logger, setup_logging
 from core.jobs import daily_market_update_job
 from core.scheduler import SchedulerManager
 from core.settings import load_settings
-from data.storage.db import init_db
+# Import the module (not the function) so tests can monkeypatch init_db
+# and have the lifespan use the patched test double.
+from data.storage import db as db_module
 
 settings = load_settings()
 setup_logging(settings.logging.level)
@@ -39,7 +42,13 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Path("data").mkdir(exist_ok=True)
-    init_db()
+    db = db_module.init_db()
+
+    # Batch backtest orphan cleanup: worker threads are daemon and die with
+    # the process, so any batch still 'running' at boot is an orphan.
+    interrupted = db.mark_interrupted_batch_runs()
+    if interrupted:
+        logger.warning("Marked %d orphaned batch backtest run(s) as interrupted", interrupted)
 
     # Dashboard cache warmup: pre-compute the subject dashboard payload so the
     # first user request after startup / daily update is a cache hit instead of
@@ -198,6 +207,7 @@ app.include_router(instruments.router)
 app.include_router(market_view.router)
 app.include_router(subject_market.router)
 app.include_router(manual_trade.router)
+app.include_router(batch_backtest.router)
 
 
 @app.get("/", include_in_schema=False)
