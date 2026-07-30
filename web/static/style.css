@@ -952,19 +952,29 @@ button:disabled {
   color: var(--text);
 }
 
-.backtest-metrics-table tbody tr[data-strategy-id] {
+.backtest-metrics-table tbody tr[data-result-key] {
   cursor: pointer;
+}
+
+/* 单元格自带背景色，hover/active 必须落在 th/td 上才可见 */
+.backtest-metrics-table tbody tr[data-result-key] th,
+.backtest-metrics-table tbody tr[data-result-key] td {
   transition: background 0.15s;
 }
 
-.backtest-metrics-table tbody tr[data-strategy-id]:hover {
-  background: rgba(20, 41, 51, 0.04);
+.backtest-metrics-table tbody tr[data-result-key]:hover th,
+.backtest-metrics-table tbody tr[data-result-key]:hover td {
+  background: rgba(13, 122, 113, 0.06);
 }
 
-.backtest-metrics-table tbody tr[data-strategy-id].active th,
-.backtest-metrics-table tbody tr[data-strategy-id].active td {
-  background: rgba(13, 122, 113, 0.08);
+.backtest-metrics-table tbody tr[data-result-key].active th,
+.backtest-metrics-table tbody tr[data-result-key].active td {
+  background: rgba(13, 122, 113, 0.15);
+}
+
+.backtest-metrics-table tbody tr[data-result-key].active th {
   box-shadow: inset 3px 0 0 var(--accent);
+  color: var(--accent-strong);
 }
 
 .market-price-chart {
@@ -3412,6 +3422,46 @@ details > summary::marker {
 
 .heatmap-note {
   margin: 8px 2px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.heatmap-crumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 2px 0;
+}
+
+.heatmap-crumb[hidden] {
+  display: none;
+}
+
+.heatmap-crumb-btn {
+  border: 1px solid rgba(20, 41, 51, 0.18);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #334155;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.heatmap-crumb-btn:hover {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+
+.heatmap-crumb-btn.is-current {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  font-weight: 700;
+  cursor: default;
+}
+
+.heatmap-crumb-sep {
   color: var(--muted);
   font-size: 12px;
 }

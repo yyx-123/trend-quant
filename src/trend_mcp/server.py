@@ -1,6 +1,6 @@
 """MCP server for trend-quant.
 
-Exposes 5 tools to external agents via MCP SSE transport:
+Exposes 7 tools to external agents via MCP SSE transport:
 
 1. **trend_dashboard** -- 标的看板: multi-symbol trend dashboard grouped by
    three-level category hierarchy (EOD daily bars).
@@ -13,6 +13,10 @@ Exposes 5 tools to external agents via MCP SSE transport:
    a given buy entry.
 5. **list_instruments** -- 标的列表: searchable / filterable instrument
    catalogue.
+6. **add_trade** -- 手工交易录入: record a buy trade for a user
+   (username/password authenticated, same path as the web UI).
+7. **open_positions** -- 持仓概览: realtime overview of a user's open
+   (not yet closed) positions.
 """
 
 from __future__ import annotations
@@ -23,20 +27,16 @@ from datetime import datetime
 import pandas as pd
 from mcp.server.fastmcp import FastMCP
 
-from core.display import format_symbol_display
+from core.display import filter_fully_classified, format_symbol_display
 from core.display import load_instrument_name_map as _config_name_map
 from services.market_indicators import compute_market_indicators, trend_config as _trend_config
 from services.dashboard import RevisionCache, build_subject_dashboard_payload
-from core.calendar import is_past_market_open, is_realtime_available, is_trading_day
+from core.calendar import is_realtime_available, is_trading_day
 from core.symbols import normalize_symbol as _normalize_symbol
-from data.intraday_service import (
-    build_intraday_dashboard,
-    build_synthetic_bar,
-    compute_intraday_trend_score,
-)
+from data.intraday_service import build_intraday_dashboard, build_intraday_overlay
 from data.service import DataService
 from data.storage.db import get_db
-from core.trend import safe_float
+from services import trade_records as tr
 from services.stop_loss import StopLossError, compute_stop_loss
 
 # ---------------------------------------------------------------------------
@@ -157,13 +157,7 @@ def intraday_dashboard(category: str = "") -> dict:
 
     # Filter to fully classified instruments (same rule as the web intraday job).
     metadata_map = db.get_instrument_metadata_map()
-    classified = [
-        s for s in symbols
-        if s in metadata_map
-        and str(metadata_map[s].get("category_l1", "")).strip()
-        and str(metadata_map[s].get("category_l2", "")).strip()
-        and str(metadata_map[s].get("category_l3", "")).strip()
-    ]
+    classified = filter_fully_classified(symbols, metadata_map)
 
     # Optional category filter (match any level, case-insensitive).
     if category.strip():
@@ -272,52 +266,22 @@ def symbol_detail(symbol: str, days: int = 60, rsi_period: int = 14, intraday: b
     payload["meta"]["is_intraday"] = False
 
     # --- Intraday overlay (synthetic bar from live quotes) ----------------
-    # Gate on is_past_market_open: on a trading day at/past the 9:30 open,
-    # today's bar must be present. If the daily write job has already
-    # persisted it, the DB data is used as-is; otherwise synthesize one
-    # from live quotes — this also covers the post-close window before
-    # the write job runs.
-    if intraday and is_past_market_open():
-        try:
-            # Intraday trend uses FULL history (same ruler as EOD), not
-            # the display-truncated window (kimi review §3.3).
-            hist = full_df.copy()
-            hist["time"] = pd.to_datetime(hist["time"], errors="coerce")
-            hist = (
-                hist.dropna(subset=["time", "open", "high", "low", "close"])
-                .sort_values("time")
-                .reset_index(drop=True)
-            )
-            if not hist.empty and hist["time"].iloc[-1].date() >= datetime.now().date():
-                # Today's bar is already persisted — nothing to overlay.
-                pass
-            elif not hist.empty:
-                quote = DataService().fetch_latest_quote(symbol)
-                if quote and quote.get("price") is not None:
-                    intraday_result = compute_intraday_trend_score(hist, quote, trend_cfg)
-                    if intraday_result.get("ok"):
-                        prev_vol = safe_float(hist["volume"].iloc[-1], 0.0) if len(hist) > 0 else 0.0
-                        synth = build_synthetic_bar(quote, prev_vol)
-                        payload["dates"].append(str(datetime.now().date()))
-                        payload["candles"]["open"].append(round(float(synth["open"]), 4))
-                        payload["candles"]["high"].append(round(float(synth["high"]), 4))
-                        payload["candles"]["low"].append(round(float(synth["low"]), 4))
-                        payload["candles"]["close"].append(round(float(synth["close"]), 4))
-                        payload["volumes"].append(int(synth["volume"]))
-                        payload["indicators"]["trend_intraday"] = {
-                            "score": intraday_result["trend_score"],
-                            "price_direction": intraday_result["price_direction"],
-                            "confidence": intraday_result["confidence"],
-                            "atr": intraday_result["atr"],
-                            "price": intraday_result["price"],
-                            "ma_mid": intraday_result["ma_mid"],
-                            "calc_details": intraday_result.get("calc_details", {}),
-                        }
-                        payload["meta"]["is_intraday"] = True
-                        payload["meta"]["intraday_ts"] = datetime.now().isoformat()
-        except Exception as exc:
-            # Fall back to EOD data if intraday fetch fails.
-            logger.warning("Intraday overlay failed for %s; falling back to EOD: %s", symbol, exc)
+    # Shared implementation (data.intraday_service.build_intraday_overlay) —
+    # same code path as the web daily-K endpoint. Intraday trend uses FULL
+    # history (same ruler as EOD), not the display-truncated window.
+    if intraday:
+        overlay = build_intraday_overlay(symbol, full_df, trend_cfg)
+        if overlay:
+            bar = overlay["bar"]
+            payload["dates"].append(overlay["date"])
+            payload["candles"]["open"].append(round(float(bar["open"]), 4))
+            payload["candles"]["high"].append(round(float(bar["high"]), 4))
+            payload["candles"]["low"].append(round(float(bar["low"]), 4))
+            payload["candles"]["close"].append(round(float(bar["close"]), 4))
+            payload["volumes"].append(int(bar["volume"]))
+            payload["indicators"]["trend_intraday"] = overlay["trend"]
+            payload["meta"]["is_intraday"] = True
+            payload["meta"]["intraday_ts"] = overlay["ts"]
 
     return payload
 
@@ -422,3 +386,140 @@ def list_instruments(
         )
 
     return {"ok": True, "count": len(result), "instruments": result}
+
+
+# ---------------------------------------------------------------------------
+# Tool 6 -- add_trade (manual trade entry)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def add_trade(
+    username: str,
+    password: str,
+    symbol: str,
+    buy_date: str,
+    buy_price: float,
+    shares: float,
+) -> dict:
+    """录入一笔手工交易（买入），与网页端手工交易共用同一条录入链路。
+
+    Args:
+        username: 手工交易账号用户名
+        password: 手工交易账号密码
+        symbol: 标的代码，如 510300.SS 或 510300
+        buy_date: 买入日期，格式 YYYY-MM-DD（须不晚于最新数据日期）
+        buy_price: 买入均价，必须大于 0，且落在买入当日K线 [low, high] 区间内
+        shares: 买入份数，必须大于 0
+
+    Returns:
+        成功时 ok=True 并返回落库后的完整交易记录（含 id、status=open）；
+        失败时 ok=False 并附 error（凭据错误 / 标的不存在 / 价格超出当日
+        区间 / 参数非法等）。
+    """
+    try:
+        trade = tr.create_trade(
+            username,
+            password,
+            symbol=symbol,
+            buy_date=buy_date,
+            buy_price=buy_price,
+            shares=shares,
+        )
+    except (tr.TradeAuthError, tr.TradePermissionError, tr.TradeRecordError, StopLossError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "trade": trade}
+
+
+# ---------------------------------------------------------------------------
+# Tool 7 -- open_positions (realtime overview)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def open_positions(username: str, password: str) -> dict:
+    """返回指定用户当前持仓（未清仓交易）的实时概览。
+
+    与网页端手工交易同一口径：交易时段（9:30-15:00，含午间休盘）内
+    最新价 / 浮盈 / 吊灯止损价等均含盘中实时报价（is_intraday=True），
+    非交易时段回退为最新日K收盘口径。
+
+    Args:
+        username: 手工交易账号用户名
+        password: 手工交易账号密码
+
+    Returns:
+        - positions: 每笔持仓的概览（按持仓金额降序），含买入信息、
+          最新价、持仓金额、浮盈金额/比例、最大浮盈、最大回撤、持有
+          交易日数、硬止损价、吊灯止损价及各自是否已触发
+        - summary: 合计持仓数、总持仓金额、总浮盈金额、整体浮盈比例
+        - is_intraday / intraday_ts: 数据口径标记
+    """
+    try:
+        payload = tr.list_trades(username, password, intraday=True)
+    except (tr.TradeAuthError, tr.TradePermissionError, tr.TradeRecordError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+    positions: list[dict] = []
+    total_value = 0.0
+    total_pnl = 0.0
+    total_cost = 0.0
+    is_intraday = False
+    intraday_ts: str | None = None
+
+    for t in payload["trades"]:
+        if t["status"] != "open":
+            continue
+        if t.get("error"):
+            positions.append(
+                {
+                    "trade_id": t["id"],
+                    "symbol": t["symbol"],
+                    "name": t["name"],
+                    "buy_date": t["buy_date"],
+                    "buy_price": t["buy_price"],
+                    "shares": t["shares"],
+                    "error": t["error"],
+                }
+            )
+            continue
+        stops = t.get("stops") or {}
+        holding = t.get("holding") or {}
+        positions.append(
+            {
+                "trade_id": t["id"],
+                "symbol": t["symbol"],
+                "name": t["name"],
+                "buy_date": t["buy_date"],
+                "buy_price": t["buy_price"],
+                "shares": t["shares"],
+                "latest_price": t.get("latest_price"),
+                "position_value": t.get("position_value"),
+                "pnl_amount": t.get("pnl_amount"),
+                "pnl_pct": holding.get("pnl_pct"),
+                "max_gain_pct": holding.get("max_gain_pct"),
+                "max_drawdown": holding.get("max_drawdown"),
+                "hold_days": holding.get("hold_days"),
+                "hard_stop_price": stops.get("hard_stop_price"),
+                "hard_stop_triggered": stops.get("hard_stop_triggered"),
+                "chandelier_stop_price": stops.get("chandelier_stop_price"),
+                "chandelier_stop_triggered": stops.get("chandelier_stop_triggered"),
+            }
+        )
+        total_value += float(t.get("position_value") or 0.0)
+        total_pnl += float(t.get("pnl_amount") or 0.0)
+        total_cost += float(t["buy_price"]) * float(t["shares"])
+        is_intraday = is_intraday or bool(t.get("is_intraday"))
+        intraday_ts = intraday_ts or t.get("intraday_ts")
+
+    return {
+        "ok": True,
+        "user": payload["user"]["username"],
+        "is_intraday": is_intraday,
+        "intraday_ts": intraday_ts,
+        "summary": {
+            "count": len(positions),
+            "total_position_value": round(total_value, 2),
+            "total_pnl_amount": round(total_pnl, 2),
+            "total_pnl_pct": round(total_pnl / total_cost * 100, 2) if total_cost > 0 else 0.0,
+        },
+        "positions": positions,
+    }

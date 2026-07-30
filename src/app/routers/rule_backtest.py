@@ -55,10 +55,13 @@ class PositionStrategySaveRequest(BaseModel):
 
 
 def _cap_end_date(end_date_str: str) -> str:
-    """Ensure backtest *end_date* does not include today or future dates.
+    """Cap *end_date* so it never points past the most recent trading day.
 
-    Intraday data is never persisted, so backtesting must stop at the
-    most recent confirmed trading day.
+    Intraday data is never persisted, so only future dates need guarding:
+    ``previous_trading_day`` returns today itself on trading days, meaning
+    a request for today passes through and the backtest simply runs up to
+    the latest persisted bar — which includes today once the daily update
+    job has written it.
     """
     if not end_date_str.strip():
         return end_date_str
@@ -114,7 +117,8 @@ async def run_rule_backtest(payload: RuleBacktestRunRequest) -> dict:
     GET /api/result/{run_id}. Jobs live only in memory (see
     RULE_JOB_TTL_SECONDS).
     """
-    # Cap end_date to previous trading day (intraday data is never persisted).
+    # Cap end_date to the most recent trading day (today allowed — the run
+    # then covers it if and only if its bar is already persisted).
     payload.end_date = _cap_end_date(payload.end_date)
 
     run_id = datetime.now().strftime("%Y%m%d%H%M%S%f")

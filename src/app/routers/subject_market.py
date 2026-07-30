@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from core.calendar import is_realtime_available, is_trading_day, trading_session_status
+from core.display import filter_fully_classified
 from data.intraday_service import build_intraday_dashboard
 from data.service import DataService
 from data.storage.db import get_db
@@ -113,15 +114,9 @@ async def start_intraday_dashboard() -> dict:
                     _intraday_jobs[job_id]["message"] = "本地无日K数据"
                 return
 
-            # Filter to classified instruments only.
+            # Filter to fully classified instruments only.
             metadata_map = db.get_instrument_metadata_map()
-            classified = [
-                s for s in symbols
-                if s in metadata_map
-                and str(metadata_map[s].get("category_l1", "")).strip()
-                and str(metadata_map[s].get("category_l2", "")).strip()
-                and str(metadata_map[s].get("category_l3", "")).strip()
-            ]
+            classified = filter_fully_classified(symbols, metadata_map)
             if not classified:
                 with _intraday_jobs_lock:
                     _intraday_jobs[job_id]["status"] = "error"

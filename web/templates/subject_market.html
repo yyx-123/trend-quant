@@ -24,7 +24,8 @@
       </div>
     </div>
     <div id="heatmapChart" class="heatmap-chart"></div>
-    <p class="heatmap-note">面积 = 近20日平均成交额（盘中模式按当日成交额） · 颜色 = 最新趋势值 MA5（红涨绿跌） · 点击色块下钻，底部面包屑返回 · 悬停查看详情</p>
+    <div id="heatmapCrumb" class="heatmap-crumb" hidden></div>
+    <p class="heatmap-note">面积 = 等大面积（同级色块面积相同，与成交额无关） · 颜色 = 最新趋势值 MA5（红涨绿跌，类目为成员成交额加权） · 点击色块下钻，底部面包屑返回 · 悬停查看详情</p>
   </section>
   <div id="intradayProgress" class="intraday-progress-wrap" hidden>
     <progress id="intradayProgressBar" max="100" value="0" aria-label="盘中计算进度"></progress>
@@ -66,10 +67,14 @@
   const heatmapPanel = document.getElementById('heatmapPanel');
   const heatmapTabsEl = document.getElementById('heatmapTabs');
   const heatmapChartEl = document.getElementById('heatmapChart');
+  const heatmapCrumbEl = document.getElementById('heatmapCrumb');
   let heatmapChart = null;
   let heatmapPayload = null;
   let heatmapActiveL1 = null;
   let heatmapResizeTimer = null;
+  let heatActiveGroup = null;   // 当前一级类目分组
+  let heatTreeNodes = null;     // 当前分组的 treemap 静态树（buildHeatTree）
+  let heatViewPath = [];        // 下钻路径（L2/L3 节点），空 = 顶层视图
 
   const escHtml = (value) => String(value ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -114,50 +119,53 @@
     return s.length <= maxChars ? s : `${s.slice(0, Math.max(1, maxChars - 1))}…`;
   }
 
-  // 框面积：近20日平均成交额，缺失时回退当日成交额。
-  function heatNodeSize(item) {
-    const avg = Number(item?.amount_avg20);
-    if (Number.isFinite(avg) && avg > 0) return avg;
-    const amt = Number(item?.amount);
-    if (Number.isFinite(amt) && amt > 0) return amt;
-    return 0;
-  }
-
-  // 递归构建 treemap 节点，同时按面积占比估算像素边长，决定标签显示策略：
-  // 大框显示名称+MA5，中框仅名称（超长截断），小框不显示文字。
-  function buildHeatTree(group, canvasArea) {
+  // 等大面积色块：不再按成交额决定面积。treemap 按兄弟节点的 value 比例
+  // 分配面积，因此把每个节点的 value 都固定为 1 —— 同一父节点下的所有
+  // 兄弟色块（二级类目之间 / 三级类目之间 / 类目内各标的之间）面积完全相同。
+  // 这里只构建静态结构（颜色 / 层级），标签文字由 layoutHeatLabels 按当前
+  // 下钻视图的实际显示面积动态计算 —— 直接下钻放大后标签会重新生成，
+  // 不会出现"色块放大了名字还是不显示"。
+  function buildHeatTree(group) {
     const l2Nodes = [];
-    let total = 0;
     for (const l2 of group.items || []) {
       const l3Nodes = [];
-      let l2Total = 0;
       for (const l3 of l2.children || []) {
-        const leaves = [];
-        let l3Total = 0;
-        for (const inst of l3.children || []) {
-          const size = heatNodeSize(inst);
-          if (size <= 0) continue;
-          leaves.push({ name: inst.name || inst.symbol, value: size, meta: inst, isLeaf: true });
-          l3Total += size;
-        }
+        const leaves = (l3.children || []).map((inst) => {
+          const color = heatColor(inst.trend_ma5);
+          return {
+            name: inst.name || inst.symbol, value: 1, meta: inst, isLeaf: true, level: 3,
+            itemStyle: { color: color.fill }, labelColor: color.text,
+            // 叶子节点不设标题条（防止下钻后 levels 样式偏移时出现空白条）。
+            upperLabel: { show: false },
+          };
+        });
         if (!leaves.length) continue;
-        l3Nodes.push({ name: l3.category_l3, value: l3Total, children: leaves, meta: l3 });
-        l2Total += l3Total;
+        l3Nodes.push({
+          name: l3.category_l3, value: 1, children: leaves, meta: l3, level: 2,
+          itemStyle: { color: heatColorSoft(l3.trend_ma5) },
+          // 标题条挂在节点自身：下钻改变层级时不随 levels 偏移。
+          upperLabel: { show: true, height: 17, fontSize: 11, color: '#52596b', formatter: (p) => p.data.upperText || '' },
+        });
       }
       if (!l3Nodes.length) continue;
-      l2Nodes.push({ name: l2.category_l2, value: l2Total, children: l3Nodes, meta: l2 });
-      total += l2Total;
+      l2Nodes.push({
+        name: l2.category_l2, value: 1, children: l3Nodes, meta: l2, level: 1,
+        itemStyle: { color: heatColorSoft(l2.trend_ma5) },
+        upperLabel: { show: true, height: 24, fontSize: 13, fontWeight: 700, color: '#1f2937', formatter: (p) => p.data.upperText || '' },
+      });
     }
-    const decorate = (node, share, depth) => {
+    return l2Nodes;
+  }
+
+  // 按当前视图根节点把画布面积均分给各兄弟节点，估算每个色块的像素边长，
+  // 据此（重新）生成标签：大框显示名称+MA5，中框仅名称（超长截断），小框不显示文字。
+  function layoutHeatLabels(viewNodes, canvasArea) {
+    const decorate = (node, share) => {
       const side = Math.sqrt(Math.max(share, 0) * canvasArea);
       const meta = node.meta || {};
-      if (depth === 3) {
-        const color = heatColor(meta.trend_ma5);
-        node.itemStyle = { color: color.fill };
+      if (node.level === 3) {
         const fontSize = Math.max(10, Math.min(14, side / 7));
-        node.label = { color: color.text, fontSize };
-        // 叶子节点不设标题条（防止下钻后 levels 样式偏移时出现空白条）。
-        node.upperLabel = { show: false };
+        node.label = { color: node.labelColor, fontSize };
         const chars = Math.floor((side * 0.9) / fontSize);
         let text = side < 32 ? '' : clipHeatText(node.name, chars);
         if (text && side >= 92) {
@@ -166,24 +174,17 @@
         }
         node.labelText = text;
       } else {
-        node.itemStyle = { color: heatColorSoft(meta.trend_ma5) };
-        const chars = Math.floor(side / (depth === 1 ? 13 : 11));
-        node.upperText = side < (depth === 1 ? 56 : 42) ? '' : clipHeatText(node.name, chars);
-        // 标题条挂在节点自身：下钻改变层级时不随 levels 偏移。
-        node.upperLabel = depth === 1
-          ? { show: true, height: 24, fontSize: 13, fontWeight: 700, color: '#1f2937', formatter: (p) => p.data.upperText || '' }
-          : { show: true, height: 17, fontSize: 11, color: '#52596b', formatter: (p) => p.data.upperText || '' };
+        const chars = Math.floor(side / (node.level === 1 ? 13 : 11));
+        node.upperText = side < (node.level === 1 ? 56 : 42) ? '' : clipHeatText(node.name, chars);
       }
       const kids = node.children || [];
-      const sum = kids.reduce((acc, kid) => acc + (Number(kid.value) || 0), 0);
       for (const kid of kids) {
-        decorate(kid, sum > 0 ? share * (Number(kid.value) || 0) / sum : 0, depth + 1);
+        decorate(kid, kids.length ? share / kids.length : 0);
       }
     };
-    for (const node of l2Nodes) {
-      decorate(node, total > 0 ? (Number(node.value) || 0) / total : 0, 1);
+    for (const node of viewNodes) {
+      decorate(node, viewNodes.length ? 1 / viewNodes.length : 0);
     }
-    return l2Nodes;
   }
 
   function heatTooltip(param) {
@@ -206,7 +207,7 @@
     }
     return [
       `<div class="heat-tip-title">${escHtml(d.name)}</div>`,
-      `<div class="heat-tip-sub">${m.member_count == null ? '—' : m.member_count} 个标的 · 成交额加权</div>`,
+      `<div class="heat-tip-sub">${m.member_count == null ? '—' : m.member_count} 个标的 · 趋势值按成交额加权</div>`,
       `<table class="heat-tip-table">`,
       `<tr><td>趋势 MA5</td><td class="${ma5Class}">${fmtScore(m.trend_ma5)}</td></tr>`,
       `<tr><td>强度</td><td>${m.strength == null ? '—' : m.strength}</td></tr>`,
@@ -216,10 +217,7 @@
     ].join('');
   }
 
-  function heatmapOption(group) {
-    const width = heatmapChartEl.clientWidth || 1000;
-    const height = heatmapChartEl.clientHeight || 560;
-    const data = buildHeatTree(group, width * height);
+  function heatmapOption(group, viewNodes) {
     return {
       animationDuration: 400,
       tooltip: { confine: true, formatter: heatTooltip },
@@ -228,17 +226,10 @@
         name: group.category_l1,
         left: 0, right: 0, top: 0, bottom: 0,
         roam: false,
-        nodeClick: 'zoomToNode',
-        zoomToNodeRatio: 0.32,
-        breadcrumb: {
-          show: true,
-          bottom: 2,
-          left: 10,
-          height: 22,
-          emptyItemWidth: 0,
-          itemStyle: { color: 'rgba(255, 255, 255, 0.94)', borderColor: 'rgba(20, 41, 51, 0.18)', borderWidth: 1, textStyle: { color: '#334155', fontSize: 12 } },
-          emphasis: { itemStyle: { color: '#ffffff', textStyle: { color: '#0a5b55' } } },
-        },
+        // 下钻不走内置 zoomToNode：标签需要按新视图重算（见 renderHeatView），
+        // 因此点击由页面接管后整树重渲染，面包屑也是自定义的。
+        nodeClick: false,
+        breadcrumb: { show: false },
         label: { show: true, fontSize: 12, lineHeight: 15, formatter: (p) => p.data.labelText || '' },
         upperLabel: { show: false },
         levels: [
@@ -250,7 +241,7 @@
           // 叶子标的
           { itemStyle: { borderColor: '#ffffff', borderWidth: 0.8, gapWidth: 0.5 } },
         ],
-        data,
+        data: viewNodes,
       }],
     };
   }
@@ -272,6 +263,13 @@
     if (!heatmapChart && window.echarts) {
       try {
         heatmapChart = echarts.init(heatmapChartEl);
+        heatmapChart.on('click', (params) => {
+          const d = params?.data;
+          // 只对有子节点的类目色块下钻；叶子标的点击不缩放
+          if (!d || !Array.isArray(d.children) || !d.children.length) return;
+          heatViewPath.push(d);
+          renderHeatView();
+        });
       } catch (err) {
         heatmapChart = null;
       }
@@ -281,9 +279,49 @@
       return;
     }
     const group = groups.find((g) => g.category_l1 === heatmapActiveL1) || groups[0];
+    heatActiveGroup = group;
+    // 切换一级类目 / 刷新数据后回到顶层视图并重建树（路径里的节点引用随之失效）
+    heatViewPath = [];
+    heatTreeNodes = buildHeatTree(group);
     heatmapChart.resize();
-    heatmapChart.setOption(heatmapOption(group), true);
+    renderHeatView();
   }
+
+  // 按当前下钻路径重算标签并重渲染。ECharts 内置 zoom 只是放大既有数据，
+  // 标签是构建时算死的静态字符串，小色块下钻后依然无文字 —— 所以这里每次
+  // 都以"当前视图根节点铺满画布"为前提重新生成标签。
+  function renderHeatView() {
+    if (!heatmapChart || !heatActiveGroup || !heatTreeNodes) return;
+    const width = heatmapChartEl.clientWidth || 1000;
+    const height = heatmapChartEl.clientHeight || 560;
+    const root = heatViewPath.length ? heatViewPath[heatViewPath.length - 1] : null;
+    const viewNodes = root ? [root] : heatTreeNodes;
+    layoutHeatLabels(viewNodes, width * height);
+    heatmapChart.setOption(heatmapOption(heatActiveGroup, viewNodes), true);
+    renderHeatCrumb();
+  }
+
+  function renderHeatCrumb() {
+    if (!heatViewPath.length) {
+      heatmapCrumbEl.hidden = true;
+      heatmapCrumbEl.innerHTML = '';
+      return;
+    }
+    const parts = [heatActiveGroup.category_l1, ...heatViewPath.map((n) => n.name)];
+    heatmapCrumbEl.innerHTML = parts.map((label, i) => (
+      `${i ? '<span class="heatmap-crumb-sep" aria-hidden="true">›</span>' : ''}` +
+      `<button type="button" class="heatmap-crumb-btn${i === parts.length - 1 ? ' is-current' : ''}" data-depth="${i}">${escHtml(label)}</button>`
+    )).join('');
+    heatmapCrumbEl.hidden = false;
+  }
+
+  heatmapCrumbEl.addEventListener('click', (event) => {
+    const btn = event.target.closest('.heatmap-crumb-btn');
+    if (!btn) return;
+    // depth 0 = 回到一级类目顶层；depth i = 截断到路径第 i 个节点
+    heatViewPath.length = Number(btn.dataset.depth);
+    renderHeatView();
+  });
 
   heatmapTabsEl.addEventListener('click', (event) => {
     const btn = event.target.closest('.heatmap-tab');

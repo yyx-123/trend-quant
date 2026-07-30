@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
+import data.intraday_service as intraday_service
 from app.routers import market_view
 from app.routers.market_view import build_market_payload, compute_market_indicators
 from core.trend import calculate_trend_score_snapshot
@@ -291,10 +292,10 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
         fake_db = FakeMarketViewDb(df)
         with (
             patch.object(market_view, "get_db", return_value=fake_db),
-            patch.object(market_view, "is_past_market_open", return_value=past_open),
-            patch.object(market_view, "DataService") as mock_ds_cls,
+            patch.object(intraday_service, "is_past_market_open", return_value=past_open),
+            patch.object(intraday_service, "DataService") as mock_ds_cls,
             patch.object(
-                market_view, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT
+                intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT
             ),
         ):
             if isinstance(quote, Exception):

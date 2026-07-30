@@ -1492,6 +1492,7 @@
     applyRsiConfigToInputs(payload.meta?.rsi_config || {});
     if (!backtestStartEl.value && payload.meta?.start) backtestStartEl.value = payload.meta.start;
     if (!backtestEndEl.value && payload.meta?.end) backtestEndEl.value = payload.meta.end;
+    updateBacktestEndMax();
     updateBacktestRangeLabel();
     // Intraday badge: "盘中实时" while the session is running, "收盘估算"
     // after 15:00 when the bar is synthesized from the closing snapshot
@@ -1901,16 +1902,24 @@
     if (heatChart) heatChart.resize();
   });
 
-  // Cap backtest end date to yesterday (intraday data not persisted).
-  (function setBacktestDateMax() {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const maxDate = yesterday.toISOString().slice(0, 10);
+  // 回测结束日期上限 = 当前标的数据库内最新K线日期（meta.end，由日K接口基于
+  // 落库数据生成，不含盘中实时合成的K线）。当日K线一旦落库（如每日更新任务
+  // 完成后）即可选当天；未落库时最多选到最新已有K线。数据尚未加载时用本地
+  // 今天兜底，仅防止选到未来日期。
+  function localTodayStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function updateBacktestEndMax() {
+    const maxDate = currentPayload?.meta?.end || localTodayStr();
     backtestEndEl.setAttribute('max', maxDate);
     if (backtestEndEl.value && backtestEndEl.value > maxDate) {
       backtestEndEl.value = maxDate;
+      updateBacktestRangeLabel();
     }
-  })();
+  }
+  updateBacktestEndMax();
 
   // --- Batch drill-down (快照重跑模式) ---
   const drillBannerEl = document.getElementById('mvDrillBanner');

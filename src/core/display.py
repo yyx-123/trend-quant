@@ -56,3 +56,19 @@ def build_symbol_display(symbol: str | None, name_map: dict[str, str] | None = N
     if name_map is not None:
         map_name = str(name_map.get(normalized, "") or "")
     return format_symbol_display(normalized, map_name)
+
+
+def filter_fully_classified(symbols: list[str], metadata_map: dict[str, dict]) -> list[str]:
+    """Keep only symbols with a complete L1/L2/L3 category classification.
+
+    Shared by the web intraday dashboard job and the MCP intraday_dashboard
+    tool (both require fully classified instruments).
+    """
+    return [
+        s
+        for s in symbols
+        if s in metadata_map
+        and str(metadata_map[s].get("category_l1", "")).strip()
+        and str(metadata_map[s].get("category_l2", "")).strip()
+        and str(metadata_map[s].get("category_l3", "")).strip()
+    ]

@@ -1,6 +1,9 @@
 """Unit tests for trend_mcp.server.symbol_detail intraday overlay gating.
 
-Rules under test (mirrors the /market-view/api/daily overlay):
+Rules under test (the overlay itself lives in
+``data.intraday_service.build_intraday_overlay``, shared with the
+/market-view/api/daily endpoint; the gate/quote/trend collaborators are
+therefore patched in that module's namespace):
   1. Not a trading day / before 9:30 -> no overlay.
   2. Trading day past 9:30 and DB lacks today's bar -> synthesize one from
      live quotes (also covers the post-close window before the 16:30 daily
@@ -17,6 +20,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
+import data.intraday_service as intraday_service
 from trend_mcp import server
 
 
@@ -87,9 +91,9 @@ class _FakeDb:
 def _call_symbol_detail(df: pd.DataFrame, *, past_open: bool):
     with (
         patch.object(server, "get_db", return_value=_FakeDb(df)),
-        patch.object(server, "is_past_market_open", return_value=past_open),
-        patch.object(server, "DataService") as mock_ds_cls,
-        patch.object(server, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT),
+        patch.object(intraday_service, "is_past_market_open", return_value=past_open),
+        patch.object(intraday_service, "DataService") as mock_ds_cls,
+        patch.object(intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT),
         patch.object(server, "_config_name_map", return_value={}),
         patch.object(server, "_load_instruments_raw", return_value=[]),
     ):

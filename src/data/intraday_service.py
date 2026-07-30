@@ -8,6 +8,7 @@ calculation.
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from datetime import datetime
 from math import isfinite
@@ -18,9 +19,12 @@ import pandas as pd
 
 from data.storage.db import Database
 from data.service import DataService
+from core.calendar import is_past_market_open
 from core.indicators import atr as _compute_atr
 from core.trend import _detect_trend_phase
 from core.trend import calculate_trend_score_snapshot, safe_float
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # synthetic bar construction
@@ -64,6 +68,92 @@ def build_synthetic_bar(quote: dict, prev_volume: float) -> dict:
         "volume": float(prev_volume) if prev_volume > 0 else 0.0,
         "amount": quote_amount,
     }
+
+
+# ---------------------------------------------------------------------------
+# intraday overlay — shared by the web daily-K endpoint and MCP symbol_detail
+# ---------------------------------------------------------------------------
+
+
+def _clean_daily_hist(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a daily-bar frame for intraday computations (time/OHLCV)."""
+    if df.empty:
+        return df
+    df = df.copy()
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df = (
+        df.dropna(subset=["time", "open", "high", "low", "close"])
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def build_intraday_overlay(
+    symbol: str,
+    hist: pd.DataFrame,
+    trend_config: dict,
+    data_service: DataService | None = None,
+) -> dict | None:
+    """Build today's synthetic-bar overlay for a daily-K payload, or None.
+
+    Single implementation behind both the web daily-K endpoint
+    (``routers/market_view``) and the MCP ``symbol_detail`` tool, so the two
+    surfaces can never drift apart:
+
+    - gated on ``is_past_market_open`` — at/past the 9:30 open today's bar
+      must be present; this also covers the post-close window before the
+      daily write job persists it;
+    - returns None when today's bar is already persisted (DB data wins),
+      outside the gate, or on any quote/compute failure (silent EOD
+      fallback, warning logged);
+    - the synthetic bar's volume prefers the quote's own figure (post-close
+      it is the full-day actual), falling back to the previous day's
+      approximation while the session is still running.
+
+    Returns ``{"date", "ts", "bar", "trend"}`` where ``bar`` is the
+    synthetic bar dict and ``trend`` the intraday trend snapshot.
+    """
+    if not is_past_market_open():
+        return None
+    try:
+        hist = _clean_daily_hist(hist)
+        if hist.empty or hist["time"].iloc[-1].date() >= datetime.now().date():
+            # Today's bar is already persisted — nothing to overlay.
+            return None
+        ds = data_service or DataService()
+        quote = ds.fetch_latest_quote(symbol)
+        if not quote or quote.get("price") is None:
+            return None
+        result = compute_intraday_trend_score(hist, quote, trend_config)
+        if not result.get("ok"):
+            return None
+        prev_vol = safe_float(hist["volume"].iloc[-1], 0.0) if len(hist) else 0.0
+        synth = build_synthetic_bar(quote, prev_vol)
+        quote_vol = safe_float(quote.get("volume"), 0.0)
+        if quote_vol > 0:
+            synth["volume"] = quote_vol
+        return {
+            "date": str(datetime.now().date()),
+            "ts": datetime.now().isoformat(),
+            "bar": synth,
+            "trend": {
+                "score": result["trend_score"],
+                "price_direction": result["price_direction"],
+                "confidence": result["confidence"],
+                "atr": result["atr"],
+                "price": result["price"],
+                "ma_mid": result["ma_mid"],
+                "calc_details": result.get("calc_details", {}),
+            },
+        }
+    except Exception as exc:
+        # Fall back to EOD data if the intraday fetch fails.
+        logger.warning("Intraday overlay failed for %s; falling back to EOD: %s", symbol, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
