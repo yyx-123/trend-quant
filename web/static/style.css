@@ -3949,6 +3949,10 @@ details > summary::marker {
   border-top: 1px dashed var(--line);
 }
 
+.mt-trade-detail[hidden] {
+  display: none;
+}
+
 .mt-trade-detail-note {
   color: var(--muted);
   font-size: 12px;
