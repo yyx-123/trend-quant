@@ -142,7 +142,7 @@
           <option value="amount_ma20">流动性（日均成交额）</option>
           <option value="bar_count">历史长度（bar 数）</option>
         </select>
-        <span class="batch-muted">按特征三分位分桶，柱高 = 桶内超额年化中位数（标注 n）</span>
+        <span class="batch-muted">按特征三分位分桶，箱线图展示桶内超额年化分布（须=最小/最大，箱=25%～75%，中线=中位数）</span>
       </div>
       <div id="bbBucketChart" class="batch-chart"></div>
     </div>
@@ -216,6 +216,18 @@
     var s = arr.slice().sort(function (a, b) { return a - b; });
     var mid = s.length >> 1;
     return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  }
+  function quantile(sortedArr, q) {
+    var pos = (sortedArr.length - 1) * q;
+    var base = Math.floor(pos), rest = pos - base;
+    return sortedArr[base + 1] !== undefined
+      ? sortedArr[base] + rest * (sortedArr[base + 1] - sortedArr[base])
+      : sortedArr[base];
+  }
+  function boxStats(arr) { // [min, Q1, median, Q3, max]
+    if (!arr.length) return null;
+    var s = arr.slice().sort(function (a, b) { return a - b; });
+    return [s[0], quantile(s, 0.25), quantile(s, 0.5), quantile(s, 0.75), s[s.length - 1]];
   }
   function el(id) { return document.getElementById(id); }
 
@@ -606,6 +618,7 @@
       var v = c[metric];
       if (v == null || !isFinite(v)) return;
       var cat = c[level] || '未分类';
+      if (level === 'category_l2') cat = (c.category_l1 || '未分类') + '-' + cat;
       catSet[cat] = true; stSet[c.strategy_name] = true;
       (groups[c.strategy_name] = groups[c.strategy_name] || {});
       (groups[c.strategy_name][cat] = groups[c.strategy_name][cat] || []).push(v);
@@ -625,6 +638,10 @@
     });
     var chart = getChart('bbHeatChart');
     var isPct = metric !== 'sharpe' && metric !== 'calmar';
+    // 颜色以 0 为中性的对称发散刻度（A 股习惯：正红负绿）：否则数据全为正时整图一片同色，看不出差异
+    var dMin = data.length ? Math.min.apply(null, data.map(function (d) { return d[2]; })) : -1;
+    var dMax = data.length ? Math.max.apply(null, data.map(function (d) { return d[2]; })) : 1;
+    var lim = Math.max(Math.abs(dMin), Math.abs(dMax)) || 1;
     chart.setOption({
       tooltip: {
         formatter: function (p) {
@@ -633,14 +650,20 @@
             (isPct ? (p.value[2] * 100).toFixed(1) + '%' : p.value[2].toFixed(2)) + '（n=' + p.value[3] + '）';
         }
       },
-      grid: { left: 140, right: 90, top: 30, bottom: 60 },
-      xAxis: { type: 'category', data: cats, splitArea: { show: true } },
+      grid: { left: 170, right: 90, top: 30, bottom: 110 },
+      xAxis: {
+        type: 'category', data: cats, splitArea: { show: true },
+        axisLabel: { interval: 0, rotate: 40, fontSize: 11 }
+      },
       yAxis: { type: 'category', data: strategies, splitArea: { show: true } },
       visualMap: {
-        min: data.length ? Math.min.apply(null, data.map(function (d) { return d[2]; })) : -1,
-        max: data.length ? Math.max.apply(null, data.map(function (d) { return d[2]; })) : 1,
+        // 显式指定维度：数据为 [x, y, 中位数, n]，不指定时默认取最后一维 n，会导致所有格子同色
+        seriesIndex: 0,
+        dimension: 2,
+        min: -lim,
+        max: lim,
         calculable: true, orient: 'vertical', right: 8, top: 'center',
-        inRange: { color: ['#c15b58', '#f5f1e8', '#1b825f'] },
+        inRange: { color: ['#0f6b4f', '#7fbfa3', '#f5f1e8', '#e5a69b', '#b03a48'] },
         formatter: function (v) { return isPct ? (v * 100).toFixed(0) + '%' : v.toFixed(1); }
       },
       series: [
@@ -695,8 +718,11 @@
         }
       },
       legend: { data: cats, top: 0 },
-      grid: { left: 70, right: 30, top: 40, bottom: 50 },
-      xAxis: { type: 'value', name: el('bbScatterX').selectedOptions[0].textContent, scale: true },
+      grid: { left: 70, right: 40, top: 40, bottom: 60 },
+      xAxis: {
+        type: 'value', name: el('bbScatterX').selectedOptions[0].textContent,
+        nameLocation: 'middle', nameGap: 32, scale: true
+      },
       yAxis: {
         type: 'value', name: el('bbScatterY').selectedOptions[0].textContent, scale: true,
         axisLabel: { formatter: function (v) { return (v * 100).toFixed(0) + '%'; } }
@@ -749,33 +775,35 @@
     }
     var names = Object.keys(strategies).sort();
     var chart = getChart('bbBucketChart');
+    var fmtPct = function (v) { return (v * 100).toFixed(1) + '%'; };
     chart.setOption({
       tooltip: {
-        trigger: 'axis',
-        formatter: function (ps) {
-          return ps.map(function (p) {
-            var d = strategies[p.seriesName][p.dataIndex];
-            return p.marker + ' ' + esc(p.seriesName) + ': ' +
-              (d.length ? (median(d) * 100).toFixed(1) + '%（n=' + d.length + '）' : '无数据');
-          }).join('<br>');
+        trigger: 'item',
+        formatter: function (p) {
+          if (p.seriesType !== 'boxplot' || !p.data) return '';
+          var d = p.data; // [min, Q1, median, Q3, max]
+          var bucketArr = strategies[p.seriesName][p.dataIndex] || [];
+          return esc(p.seriesName) + ' × ' + esc(p.name) + '（n=' + bucketArr.length + '）<br>' +
+            '最大：' + fmtPct(d[4]) + '<br>75%：' + fmtPct(d[3]) + '<br>中位数：' + fmtPct(d[2]) +
+            '<br>25%：' + fmtPct(d[1]) + '<br>最小：' + fmtPct(d[0]);
         }
       },
       legend: { data: names, top: 0 },
       grid: { left: 70, right: 30, top: 40, bottom: 50 },
       xAxis: { type: 'category', data: labels },
       yAxis: {
-        type: 'value', name: '超额年化中位数',
+        type: 'value', name: '超额年化', scale: true,
         axisLabel: { formatter: function (v) { return (v * 100).toFixed(0) + '%'; } }
       },
       series: names.map(function (name) {
         return {
-          name: name, type: 'bar',
-          data: strategies[name].map(function (arr) { return arr.length ? median(arr) : null; }),
+          name: name, type: 'boxplot',
+          data: strategies[name].slice(0, labels.length).map(function (arr) { return boxStats(arr) || '-'; }),
           label: {
-            show: true, position: 'top', fontSize: 10,
+            show: true, position: 'top', fontSize: 9, color: '#888',
             formatter: function (p) {
               var arr = strategies[name][p.dataIndex];
-              return arr.length ? 'n=' + arr.length : '';
+              return arr && arr.length ? 'n=' + arr.length : '';
             }
           }
         };
