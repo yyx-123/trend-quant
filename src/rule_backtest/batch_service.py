@@ -159,8 +159,12 @@ def compute_features(
         return features
 
     closes = pd.to_numeric(feat_bars["close"], errors="coerce").dropna()
+    # 防御：非正价格（复权事故/脏数据）会污染收益率特征 —— 整列作废，特征记缺失
+    if not closes.empty and bool((closes <= 0).any()):
+        logger.warning("compute_features: %s has non-positive closes; features set to None", symbol)
+        closes = closes.iloc[0:0]
     if len(closes) >= 2:
-        returns = closes.pct_change().dropna()
+        returns = closes.pct_change().replace([float("inf"), float("-inf")], pd.NA).dropna()
         if len(returns) >= 2:
             features["ann_volatility"] = float(returns.std() * (252 ** 0.5))
         base = closes.iloc[-251] if len(closes) > 250 else closes.iloc[0]

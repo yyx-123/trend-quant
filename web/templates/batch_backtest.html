@@ -707,8 +707,37 @@
     });
     var palette = ['#0d7a71', '#c7834c', '#4a6fa5', '#c15b58', '#7a5195', '#1b825f', '#8c8c8c'];
     var cats = Object.keys(byCat).sort();
+    // 离群点防护：单点极端值会把坐标轴拉爆，1%~99% 分位内范围与全距差距过大时裁剪坐标
+    var xs = [], ys = [];
+    cats.forEach(function (cat) {
+      byCat[cat].forEach(function (pt) { xs.push(pt[0]); ys.push(pt[1]); });
+    });
+    xs.sort(function (a, b) { return a - b; });
+    ys.sort(function (a, b) { return a - b; });
+    function clipBounds(sorted) {
+      if (sorted.length < 20) return null;
+      var lo = quantile(sorted, 0.01), hi = quantile(sorted, 0.99);
+      var full = sorted[sorted.length - 1] - sorted[0], inner = hi - lo;
+      if (!(inner > 0) || !(full > 3 * inner)) return null; // 全距未显著大于分位内距，不裁
+      var pad = inner * 0.05;
+      return { min: lo - pad, max: hi + pad, lo: lo, hi: hi };
+    }
+    var xClip = clipBounds(xs), yClip = clipBounds(ys);
+    var hidden = 0;
+    if (xClip || yClip) {
+      cats.forEach(function (cat) {
+        byCat[cat].forEach(function (pt) {
+          if ((xClip && (pt[0] < xClip.lo || pt[0] > xClip.hi)) ||
+              (yClip && (pt[1] < yClip.lo || pt[1] > yClip.hi))) hidden++;
+        });
+      });
+    }
     var chart = getChart('bbScatterChart');
     chart.setOption({
+      graphic: hidden > 0 ? [{
+        type: 'text', right: 44, top: 6,
+        style: { text: '已隐藏 ' + hidden + ' 个离群点（坐标按 1%~99% 分位裁剪）', fontSize: 11, fill: '#a15c07' }
+      }] : [],
       tooltip: {
         formatter: function (p) {
           var d = p.data;
@@ -721,10 +750,12 @@
       grid: { left: 70, right: 40, top: 40, bottom: 60 },
       xAxis: {
         type: 'value', name: el('bbScatterX').selectedOptions[0].textContent,
-        nameLocation: 'middle', nameGap: 32, scale: true
+        nameLocation: 'middle', nameGap: 32, scale: true,
+        min: xClip ? xClip.min : null, max: xClip ? xClip.max : null
       },
       yAxis: {
         type: 'value', name: el('bbScatterY').selectedOptions[0].textContent, scale: true,
+        min: yClip ? yClip.min : null, max: yClip ? yClip.max : null,
         axisLabel: { formatter: function (v) { return (v * 100).toFixed(0) + '%'; } }
       },
       series: cats.map(function (cat, i) {
@@ -781,11 +812,12 @@
         trigger: 'item',
         formatter: function (p) {
           if (p.seriesType !== 'boxplot' || !p.data) return '';
-          var d = p.data; // [min, Q1, median, Q3, max]
+          // ECharts boxplot 的 p.data[0] 是类目索引，五分位数在 d[1..5]
+          var d = p.data; // [catIdx, min, Q1, median, Q3, max]
           var bucketArr = strategies[p.seriesName][p.dataIndex] || [];
           return esc(p.seriesName) + ' × ' + esc(p.name) + '（n=' + bucketArr.length + '）<br>' +
-            '最大：' + fmtPct(d[4]) + '<br>75%：' + fmtPct(d[3]) + '<br>中位数：' + fmtPct(d[2]) +
-            '<br>25%：' + fmtPct(d[1]) + '<br>最小：' + fmtPct(d[0]);
+            '最大：' + fmtPct(d[5]) + '<br>75%：' + fmtPct(d[4]) + '<br>中位数：' + fmtPct(d[3]) +
+            '<br>25%：' + fmtPct(d[2]) + '<br>最小：' + fmtPct(d[1]);
         }
       },
       legend: { data: names, top: 0 },

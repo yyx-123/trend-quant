@@ -25,8 +25,8 @@ class TickFlowProviderTest(unittest.TestCase):
     def test_symbol_and_adjust_mapping(self) -> None:
         self.assertEqual(TickFlowProvider._to_tickflow_symbol("518850.SS"), "518850.SH")
         self.assertEqual(TickFlowProvider._to_tickflow_symbol("159915.SZ"), "159915.SZ")
-        self.assertEqual(TickFlowProvider._adjust_type("qfq"), "forward_additive")
-        self.assertEqual(TickFlowProvider._adjust_type("hfq"), "backward_additive")
+        self.assertEqual(TickFlowProvider._adjust_type("qfq"), "forward")
+        self.assertEqual(TickFlowProvider._adjust_type("hfq"), "backward")
         self.assertEqual(TickFlowProvider._adjust_type("none"), "none")
 
     @patch.dict(os.environ, {"TICKFLOW_API_KEY": "starter-test-key"}, clear=True)
@@ -65,7 +65,7 @@ class TickFlowProviderTest(unittest.TestCase):
         )
         _, kwargs = client.klines.get.call_args
         self.assertEqual(kwargs["period"], "1d")
-        self.assertEqual(kwargs["adjust"], "forward_additive")
+        self.assertEqual(kwargs["adjust"], "forward")
         self.assertEqual(kwargs["start_time"], TickFlowProvider._to_milliseconds(date(2026, 5, 31)))
         self.assertEqual(len(result), 1)
         self.assertEqual(result.iloc[0]["symbol"], "518850.SS")

@@ -163,6 +163,7 @@ class DataServiceTickFlowOnlyTest(unittest.TestCase):
         provider = FlakyBatchProvider()
         service.providers["tickflow"] = provider
         service.market_store = FakeMarketStore()
+        service.raw_store = FakeMarketStore()
 
         results = service.backfill_daily_histories(
             [
@@ -184,6 +185,7 @@ class DataServiceTickFlowOnlyTest(unittest.TestCase):
         provider = PermissionDeniedBatchProvider()
         service.providers["tickflow"] = provider
         service.market_store = FakeMarketStore()
+        service.raw_store = FakeMarketStore()
 
         results = service.backfill_daily_histories(
             [

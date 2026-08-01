@@ -225,8 +225,8 @@ class SingleSymbolAllInBacktestEngine:
             initial_capital=execution.initial_capital,
             lot_size=execution.lot_size,
         )
-        benchmark_nav = benchmark.get("series", [])
-        benchmark_summary = compute_summary(daily_nav=benchmark_nav, trades=[], turnover_total=0.0)
+        benchmark_nav = (benchmark or {}).get("series", [])
+        benchmark_summary = compute_summary(daily_nav=benchmark_nav, trades=[], turnover_total=0.0) if benchmark_nav else {}
         kline_payload = self._build_kline_payload(bars=bars, trades=trades, skipped_buys=skipped_buys)
 
         return {
@@ -577,11 +577,18 @@ class SingleSymbolAllInBacktestEngine:
         }
 
     @staticmethod
-    def _buy_and_hold_benchmark(bars: pd.DataFrame, initial_capital: float, lot_size: int) -> dict:
+    def _buy_and_hold_benchmark(bars: pd.DataFrame, initial_capital: float, lot_size: int) -> dict | None:
         if bars.empty:
             return {"name": "buy_and_hold", "series": []}
         first_close = float(bars.iloc[0]["close"])
-        qty = int((initial_capital // first_close) // lot_size) * lot_size if first_close > 0 else 0
+        if first_close <= 0:
+            # 非正价格 = 行情数据异常（历史上的等差复权事故）。返回 None 让上层
+            # 把基准/超额记为缺失，而不是静默退化为「全程现金、基准年化 0%」。
+            logger.warning(
+                "buy-and-hold benchmark skipped: non-positive first close %.6f", first_close
+            )
+            return None
+        qty = int((initial_capital // first_close) // lot_size) * lot_size
         cash = initial_capital - qty * first_close
         series = [
             {"date": row["date"].isoformat(), "equity": float(cash + qty * float(row["close"]))}

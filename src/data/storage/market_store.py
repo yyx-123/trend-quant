@@ -19,6 +19,10 @@ class MarketStore:
         self._get_db().save_market_data(symbol, df, price_mode=self.price_mode)
         return f"sqlite/{self.price_mode}/{symbol}"
 
+    def replace_history(self, symbol: str, df: pd.DataFrame) -> int:
+        """全量重写一个标的（同事务删除+插入），返回写入行数。"""
+        return self._get_db().replace_market_data(symbol, df, price_mode=self.price_mode)
+
     def load_history(self, symbol: str) -> pd.DataFrame:
         return self._get_db().load_market_data(symbol, price_mode=self.price_mode)
 

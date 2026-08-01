@@ -65,11 +65,13 @@ class TickFlowProvider(IDataProvider):
 
     @staticmethod
     def _adjust_type(adjust: str) -> str:
+        # qfq 必须是等比前复权（"forward"）：等差（forward_additive）会对
+        # 早期低价 + 高累计分红的标的把历史价格减穿零（负价格事故 2026-07）。
         return {
-            "qfq": "forward_additive",
-            "hfq": "backward_additive",
+            "qfq": "forward",
+            "hfq": "backward",
             "none": "none",
-        }.get(str(adjust or "").strip().lower(), "forward_additive")
+        }.get(str(adjust or "").strip().lower(), "forward")
 
     def _get_client(self):
         if TickFlow is None or not self.api_key:
@@ -245,6 +247,58 @@ class TickFlowProvider(IDataProvider):
                     errors[symbol] = error_text
 
         return data_by_symbol, errors
+
+    def fetch_ex_factors(
+        self,
+        symbols: list[str],
+        *,
+        batch_size: int = 100,
+    ) -> tuple[dict[str, list[tuple[date, float]]], dict[str, str]]:
+        """批量获取除权因子：{symbol: [(ex_date, ex_factor)]} 升序。
+
+        因子语义（已验证）：qfq(t) = raw(t) / Π_{ex_date >= t} f_i，见 core/adjustment.py。
+        """
+        normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()]
+        if not normalized_symbols:
+            return {}, {}
+        client = self._get_client()
+        if client is None:
+            raise RuntimeError("TICKFLOW_API_KEY is required for TickFlow ex-factors")
+
+        factors_by_symbol: dict[str, list[tuple[date, float]]] = {}
+        errors: dict[str, str] = {}
+        batch_limit = max(1, min(int(batch_size or 100), 100))
+        chunks = [
+            normalized_symbols[index : index + batch_limit]
+            for index in range(0, len(normalized_symbols), batch_limit)
+        ]
+        for chunk in chunks:
+            tickflow_to_local = {self._to_tickflow_symbol(symbol): symbol for symbol in chunk}
+            try:
+                self._throttle("ex_factors", 60.0 / self.settings.daily_kline_batch_requests_per_minute)
+                raw = client.klines.ex_factors(list(tickflow_to_local.keys()))
+                raw_map = raw if isinstance(raw, dict) else {}
+                for tickflow_symbol, local_symbol in tickflow_to_local.items():
+                    entries = raw_map.get(tickflow_symbol)
+                    if entries is None:
+                        entries = raw_map.get(local_symbol) or []
+                    factors: list[tuple[date, float]] = []
+                    for entry in entries:
+                        ts = entry.get("timestamp") if isinstance(entry, dict) else getattr(entry, "timestamp", None)
+                        value = entry.get("ex_factor") if isinstance(entry, dict) else getattr(entry, "ex_factor", None)
+                        if ts is None or value is None:
+                            continue
+                        # 与 vendor trade_date 口径一致：UTC 毫秒时间戳的 UTC 日期
+                        day = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).date()
+                        factors.append((day, float(value)))
+                    factors.sort(key=lambda item: item[0])
+                    factors_by_symbol[local_symbol] = factors
+            except Exception as exc:
+                logger.exception("tickflow ex-factors fetch failed for %s", ",".join(chunk))
+                error_text = str(exc)
+                for symbol in chunk:
+                    errors[symbol] = error_text
+        return factors_by_symbol, errors
 
     def fetch_minute_history(
         self,

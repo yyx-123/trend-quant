@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
 
 _db_instance: Database | None = None
 
@@ -115,6 +118,17 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_market_data_qfq_symbol_time
                     ON market_data_qfq(symbol, time);
+
+                CREATE TABLE IF NOT EXISTS ex_factors (
+                    symbol TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    factor REAL NOT NULL,
+                    provider TEXT,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (symbol, time)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ex_factors_symbol_time
+                    ON ex_factors(symbol, time);
 
                 CREATE TABLE IF NOT EXISTS instrument_metadata (
                     symbol TEXT PRIMARY KEY,
@@ -737,25 +751,50 @@ class Database:
             return "market_data_raw"
         raise ValueError(f"unsupported market data price_mode: {price_mode}")
 
-    def save_market_data(self, symbol: str, df, price_mode: str = "qfq") -> None:
-        if df.empty:
-            return
-        table = self._market_table(price_mode)
+    def _market_records(self, symbol: str, df, table: str) -> tuple[list[tuple], int]:
+        """构建 upsert 记录；非正价格行（复权事故/脏数据）拦截并计数。"""
         records: list[tuple] = []
+        dropped_nonpositive = 0
         for _, row in df.iterrows():
+            values = {}
+            for col in ("open", "high", "low", "close", "volume", "amount"):
+                raw_value = row.get(col) if hasattr(row, "__getitem__") else None
+                if raw_value is None or str(raw_value) == "nan":
+                    values[col] = None
+                else:
+                    values[col] = float(raw_value)
+            # 防御：非正价格永不落库 —— 宁可缺行不出错数据
+            price_vals = [values[c] for c in ("open", "high", "low", "close")]
+            if any(v is not None and v <= 0 for v in price_vals):
+                dropped_nonpositive += 1
+                continue
             records.append(
                 (
                     symbol,
                     str(row.get("time", "")),
-                    float(row["open"]) if hasattr(row, "__getitem__") and row.get("open") is not None and str(row.get("open")) != "nan" else None,
-                    float(row["high"]) if hasattr(row, "__getitem__") and row.get("high") is not None and str(row.get("high")) != "nan" else None,
-                    float(row["low"]) if hasattr(row, "__getitem__") and row.get("low") is not None and str(row.get("low")) != "nan" else None,
-                    float(row["close"]) if hasattr(row, "__getitem__") and row.get("close") is not None and str(row.get("close")) != "nan" else None,
-                    float(row["volume"]) if hasattr(row, "__getitem__") and row.get("volume") is not None and str(row.get("volume")) != "nan" else None,
-                    float(row["amount"]) if hasattr(row, "__getitem__") and row.get("amount") is not None and str(row.get("amount")) != "nan" else None,
+                    values["open"],
+                    values["high"],
+                    values["low"],
+                    values["close"],
+                    values["volume"],
+                    values["amount"],
                     str(row.get("provider", "")) if hasattr(row, "__getitem__") and row.get("provider") is not None else None,
                 )
             )
+        if dropped_nonpositive:
+            _logger.warning(
+                "Dropped %d rows with non-positive OHLC for %s (%s)",
+                dropped_nonpositive, symbol, table,
+            )
+        return records, dropped_nonpositive
+
+    def save_market_data(self, symbol: str, df, price_mode: str = "qfq") -> None:
+        if df.empty:
+            return
+        table = self._market_table(price_mode)
+        records, _ = self._market_records(symbol, df, table)
+        if not records:
+            return
         with self._connect() as conn:
             conn.executemany(
                 f"""INSERT OR REPLACE INTO {table}
@@ -764,6 +803,22 @@ class Database:
                 records,
             )
         self._market_symbols_cache.pop(table, None)
+
+    def replace_market_data(self, symbol: str, df, price_mode: str = "qfq") -> int:
+        """同事务全量重写一个标的的行情（本地物化 qfq 用）。返回写入行数。"""
+        table = self._market_table(price_mode)
+        records, _ = self._market_records(symbol, df, table)
+        with self._connect() as conn:
+            conn.execute(f"DELETE FROM {table} WHERE symbol = ?", (symbol,))
+            if records:
+                conn.executemany(
+                    f"""INSERT OR REPLACE INTO {table}
+                       (symbol, time, open, high, low, close, volume, amount, provider)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    records,
+                )
+        self._market_symbols_cache.pop(table, None)
+        return len(records)
 
     def load_market_data(self, symbol: str, price_mode: str = "qfq"):
         import pandas as pd
@@ -815,6 +870,55 @@ class Database:
             cur = conn.execute(f"DELETE FROM {table}")
             self._market_symbols_cache.pop(table, None)
             return int(cur.rowcount or 0)
+
+    # ------------------------------------------------------------------
+    # ex_factors（除权因子：raw 真源 + 本地物化 qfq 架构的因子存储）
+    # ------------------------------------------------------------------
+    def save_ex_factors(self, symbol: str, factors, provider: str = "") -> None:
+        """Upsert 一个标的的除权因子。factors: 可迭代的 (date-like, factor)。"""
+        records: list[tuple] = []
+        for item in factors or []:
+            try:
+                day, value = str(item[0])[:10], float(item[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if value <= 0:
+                continue
+            records.append((symbol, day, value, provider or None))
+        if not records:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO ex_factors (symbol, time, factor, provider)
+                   VALUES (?, ?, ?, ?)""",
+                records,
+            )
+
+    def replace_ex_factors(self, symbol: str, factors, provider: str = "") -> None:
+        """全量重写一个标的的因子表（vendor 同步下来的权威快照）。"""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM ex_factors WHERE symbol = ?", (symbol,))
+        self.save_ex_factors(symbol, factors, provider=provider)
+
+    def load_ex_factors(self, symbol: str) -> list[tuple]:
+        """返回 [(time_str, factor)] 升序；time_str 为 'YYYY-MM-DD'。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT time, factor FROM ex_factors WHERE symbol = ? ORDER BY time",
+                (symbol,),
+            ).fetchall()
+        return [(row["time"], float(row["factor"])) for row in rows]
+
+    def load_all_ex_factors(self) -> dict[str, list[tuple]]:
+        """返回 {symbol: [(time_str, factor)]}，供批量 diff 用。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol, time, factor FROM ex_factors ORDER BY symbol, time"
+            ).fetchall()
+        result: dict[str, list[tuple]] = {}
+        for row in rows:
+            result.setdefault(row["symbol"], []).append((row["time"], float(row["factor"])))
+        return result
 
     # ------------------------------------------------------------------
     # users（手工交易记录的用户体系，密码明文存储 — 内部小工具口径）

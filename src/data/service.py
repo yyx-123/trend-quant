@@ -9,11 +9,12 @@ from typing import Callable
 import pandas as pd
 
 from audit.app_logger import get_logger
+from core.adjustment import compute_qfq, factors_equal
 from core.calendar import is_trading_day as _calendar_is_trading_day
 from core.settings import TickFlowSettings, load_settings
 from data.provider_tickflow import TickFlowProvider
 from data.storage.market_store import MarketStore
-from data.storage.db import record_job_run_safely
+from data.storage.db import get_db, record_job_run_safely
 
 logger = get_logger(__name__)
 _symbol_locks_guard = threading.Lock()
@@ -75,7 +76,10 @@ class DataService:
                 ignored,
             )
         self.provider_priority = ["tickflow"]
+        # raw（不复权）为唯一真源：历史行永不回溯改写，日更只 append；
+        # qfq 表由 raw + 除权因子本地物化（core/adjustment.py），全系统读取不变。
         self.market_store = MarketStore()
+        self.raw_store = MarketStore(price_mode="raw")
 
     def _ordered_providers(self):
         for name in self.provider_priority:
@@ -193,13 +197,90 @@ class DataService:
             }
         raise DataProviderError(f"TickFlow returned no instrument name for {symbol}")
 
+    # ------------------------------------------------------------------
+    # 除权因子同步与 qfq 本地物化（raw 真源架构）
+    # ------------------------------------------------------------------
+
+    def fetch_ex_factors(self, symbols: list[str]) -> tuple[dict[str, list], dict[str, str]]:
+        """批量拉取除权因子：{symbol: [(ex_date, factor)]}。"""
+        _name, provider = self._tickflow_provider()
+        return provider.fetch_ex_factors(symbols)
+
+    def sync_ex_factors(self, symbols: list[str], *, db=None) -> tuple[dict[str, list], list[str]]:
+        """批量同步因子：拉取 → 与本地因子表 diff → 新因子落库。
+
+        返回 (factors_map, changed_symbols)。除权检测的唯一判据 ——
+        替代旧的「重拉近期 K 线比价」法（D9），无需重拉任何行情。
+        """
+        db = db or get_db()
+        stored = db.load_all_ex_factors()
+        fetched, errors = self.fetch_ex_factors(symbols)
+        if errors:
+            logger.warning("ex-factor sync partial failure (%d symbols): %s", len(errors), errors)
+        changed: list[str] = []
+        for symbol, factors in fetched.items():
+            if not factors_equal(stored.get(symbol, []), factors):
+                db.replace_ex_factors(symbol, factors, provider="tickflow")
+                changed.append(symbol)
+        return fetched, changed
+
+    def rematerialize_qfq(self, symbol: str, factors: list | None = None, *, db=None) -> dict:
+        """由本地 raw + 除权因子全量重写该标的的 qfq 表（纯本地操作）。
+
+        raw 覆盖不如存量 qfq（过渡期半迁移状态）时拒绝物化并返回
+        raw_incomplete —— 宁可保留旧数据也不截断历史，等迁移脚本补全 raw。
+        """
+        db = db or get_db()
+        symbol = str(symbol or "").strip().upper()
+        raw = self.raw_store.load_history(symbol)
+        if raw.empty:
+            return {"symbol": symbol, "status": "no_raw", "rows": 0}
+        raw_start, raw_end = self._date_span(raw)
+        qfq_summary = db.get_market_data_summary(symbol, price_mode="qfq")
+        # 两侧时间格式不一（'YYYY-MM-DD' vs 'YYYY-MM-DD 00:00:00'），统一按前 10 位比较
+        qfq_start = str(qfq_summary["start"] or "")[:10] or None
+        qfq_end = str(qfq_summary["end"] or "")[:10] or None
+        if qfq_summary["rows"] and (
+            (raw_start and qfq_start and raw_start > qfq_start)
+            or (raw_end and qfq_end and raw_end < qfq_end)
+        ):
+            logger.warning(
+                "raw coverage %s~%s does not cover stored qfq %s~%s for %s; "
+                "skip rematerialize (run the raw migration script first)",
+                raw_start, raw_end, qfq_start, qfq_end, symbol,
+            )
+            return {"symbol": symbol, "status": "raw_incomplete", "rows": 0}
+        if factors is None:
+            factors = db.load_ex_factors(symbol)
+        qfq = compute_qfq(raw, factors)
+        qfq["provider"] = "local_raw+factors"
+        rows = self.market_store.replace_history(symbol, qfq)
+        return {"symbol": symbol, "status": "ok", "rows": int(rows)}
+
     def is_trading_day(self, day: date) -> bool:
         # Use the project-level calendar which combines weekday
         # checks with known A-share holiday exclusions.
         return _calendar_is_trading_day(day)
 
-    def ensure_daily_history(self, symbol: str, start_date: date, end_date: date, adjust: str = "qfq") -> dict:
-        existing = self.market_store.load_history(symbol)
+    def ensure_daily_history(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        adjust: str = "qfq",
+        *,
+        factors: list | None = None,
+        factors_changed: bool | None = None,
+        db=None,
+    ) -> dict:
+        """日更：raw 增量 append → 因子同步 → 本地物化 qfq。
+
+        adjust 参数仅为兼容旧调用保留；存储恒为 raw 真源 + 本地物化 qfq。
+        factors/factors_changed 由 update_pool_daily 批量预同步后传入；
+        未传时本方法自行单标的同步。
+        """
+        db = db or get_db()
+        existing = self.raw_store.load_history(symbol)
         if existing.empty:
             fetch_start = start_date
         else:
@@ -210,26 +291,62 @@ class DataService:
             else:
                 fetch_start = max(start_date, max_time.date() + timedelta(days=1))
 
-        if fetch_start > end_date:
-            return {"symbol": symbol, "status": "up_to_date", "rows": int(len(existing))}
+        raw_updated = False
+        if fetch_start <= end_date:
+            try:
+                fetched = self.fetch_daily_history(symbol, fetch_start, end_date, adjust="none")
+            except DataProviderError:
+                fetched = pd.DataFrame()  # 区间无新 bar（非交易日/停牌）视为无增量
+            if not fetched.empty:
+                merged = pd.concat([existing, fetched], ignore_index=True)
+                merged["time"] = pd.to_datetime(merged["time"], errors="coerce")
+                merged = merged.dropna(subset=["time"]).drop_duplicates(subset=["time"]).sort_values("time")
+                merged = merged.reset_index(drop=True)
+                self.raw_store.save_history(symbol, merged)
+                existing = merged
+                raw_updated = True
 
-        fetched = self.fetch_daily_history(symbol, fetch_start, end_date, adjust=adjust)
-        if fetched.empty:
-            return {"symbol": symbol, "status": "no_data", "rows": int(len(existing))}
+        # 因子同步（未预取时单标兜底）
+        if factors is None:
+            try:
+                factors_map, changed = self.sync_ex_factors([symbol], db=db)
+                factors = factors_map.get(symbol, [])
+                factors_changed = symbol in changed
+            except Exception:
+                logger.exception("ex-factor sync failed for %s; using stored factors", symbol)
+                factors = db.load_ex_factors(symbol)
+                factors_changed = False
+        elif factors_changed is None:
+            factors_changed = not factors_equal(db.load_ex_factors(symbol), factors)
 
-        merged = pd.concat([existing, fetched], ignore_index=True)
-        merged["time"] = pd.to_datetime(merged["time"], errors="coerce")
-        merged = merged.dropna(subset=["time"]).drop_duplicates(subset=["time"]).sort_values("time")
-        merged = merged.reset_index(drop=True)
-        path = self.market_store.save_history(symbol, merged)
+        # qfq 跨度落后于 raw（含从未物化过）时也需要物化 —— 自愈特性
+        qfq_summary = db.get_market_data_summary(symbol, price_mode="qfq")
+        raw_start, raw_end = self._date_span(existing)
+        qfq_start = str(qfq_summary["start"] or "")[:10] or None
+        qfq_end = str(qfq_summary["end"] or "")[:10] or None
+        qfq_behind = bool(raw_end) and (
+            not qfq_summary["rows"]
+            or qfq_end != raw_end
+            or qfq_start != raw_start
+        )
+
+        status = "updated" if raw_updated else "up_to_date"
+        remat_status = None
+        if raw_updated or factors_changed or qfq_behind:
+            remat = self.rematerialize_qfq(symbol, factors, db=db)
+            remat_status = remat.get("status")
+            if remat_status == "ok" and factors_changed:
+                status = "updated"
 
         return {
             "symbol": symbol,
-            "status": "updated",
-            "rows": int(len(merged)),
-            "path": str(path),
-            "fetched_from": fetch_start.isoformat(),
-            "fetched_to": end_date.isoformat(),
+            "status": status,
+            "rows": int(len(existing)),
+            "path": f"sqlite/raw/{symbol}",
+            "fetched_from": fetch_start.isoformat() if raw_updated else None,
+            "fetched_to": end_date.isoformat() if raw_updated else None,
+            "factors_changed": bool(factors_changed),
+            "qfq_rematerialized": remat_status,
         }
 
     @staticmethod
@@ -245,11 +362,12 @@ class DataService:
         if end_date < start_date:
             start_date, end_date = end_date, start_date
 
-        existing = self.market_store.load_history(symbol)
+        existing = self.raw_store.load_history(symbol)
         local_start_before, local_end_before = self._date_span(existing)
 
-        fetched = self.fetch_daily_history(symbol, start_date, end_date, adjust=adjust)
-        return self._save_backfill_result(
+        # raw 真源：补拉的永远是不复权数据；qfq 由本地因子物化生成
+        fetched = self.fetch_daily_history(symbol, start_date, end_date, adjust="none")
+        result = self._save_backfill_result(
             symbol=symbol,
             requested_start=start_date,
             requested_end=end_date,
@@ -257,10 +375,20 @@ class DataService:
             local_start_before=local_start_before,
             local_end_before=local_end_before,
         )
+        # 因子同步 + 本地物化 qfq（失败不拖垮 backfill 结果，等日更自愈）
+        try:
+            factors_map, _changed = self.sync_ex_factors([symbol])
+            remat = self.rematerialize_qfq(symbol, factors_map.get(symbol))
+            result["qfq_rematerialized"] = remat.get("status")
+            result["qfq_rows"] = remat.get("rows")
+        except Exception:
+            logger.exception("qfq rematerialize after backfill failed for %s", symbol)
+            result["qfq_rematerialized"] = "failed"
+        return result
 
     def _effective_fetch_start(self, symbol: str, requested_start: date) -> tuple[date, int, str | None, str | None]:
         with _symbol_lock(symbol):
-            existing = self.market_store.load_history(symbol)
+            existing = self.raw_store.load_history(symbol)
             existing_rows = int(len(existing))
             local_start_before, local_end_before = self._date_span(existing)
             if existing.empty:
@@ -290,11 +418,12 @@ class DataService:
         if requested_end < requested_start:
             requested_start, requested_end = requested_end, requested_start
 
+        store = self.raw_store  # backfill 一律写 raw 真源
         fetched_rows = int(len(fetched))
         fetched_start, fetched_end = self._date_span(fetched)
         if fetched.empty:
             with _symbol_lock(symbol):
-                existing = self.market_store.load_history(symbol)
+                existing = store.load_history(symbol)
                 existing_rows = int(len(existing))
                 local_start_after, local_end_after = self._date_span(existing)
             return {
@@ -316,7 +445,7 @@ class DataService:
             }
 
         with _symbol_lock(symbol):
-            existing = self.market_store.load_history(symbol)
+            existing = store.load_history(symbol)
             existing_rows = int(len(existing))
             current_local_start, current_local_end = self._date_span(existing)
             local_start_before = local_start_before or current_local_start
@@ -325,8 +454,8 @@ class DataService:
             to_save["time"] = pd.to_datetime(to_save["time"], errors="coerce")
             to_save = to_save.dropna(subset=["time"]).drop_duplicates(subset=["time"]).sort_values("time")
             to_save = to_save.reset_index(drop=True)
-            path = self.market_store.save_history(symbol, to_save)
-            saved = self.market_store.load_history(symbol)
+            path = store.save_history(symbol, to_save)
+            saved = store.load_history(symbol)
             rows_after = int(len(saved))
             local_start_after, local_end_after = self._date_span(saved)
         return {
@@ -479,7 +608,7 @@ class DataService:
                     symbols,
                     fetch_start,
                     end_date,
-                    adjust=adjust,
+                    adjust="none",
                     batch_size=batch_limit,
                     request_interval_seconds=0,
                 )
@@ -564,6 +693,28 @@ class DataService:
                         "error": attempt_errors.get(symbol) or "补齐失败，已达到最大重试次数",
                     }
 
+        # raw 落库完成后：批量因子同步 + 逐标的本重物化 qfq
+        ok_symbols = [symbol for symbol, payload in results.items() if payload.get("ok")]
+        if ok_symbols:
+            factors_map: dict[str, list] = {}
+            try:
+                factors_map, _changed = self.sync_ex_factors(ok_symbols)
+            except Exception:
+                logger.exception("batch ex-factor sync after backfill failed; using stored factors")
+            if progress_callback:
+                progress_callback({"event": "rematerialize_start", "total": len(ok_symbols)})
+            for index, symbol in enumerate(ok_symbols, start=1):
+                try:
+                    remat = self.rematerialize_qfq(symbol, factors_map.get(symbol))
+                    results[symbol]["result"]["qfq_rematerialized"] = remat.get("status")
+                except Exception:
+                    logger.exception("qfq rematerialize after backfill failed for %s", symbol)
+                    results[symbol]["result"]["qfq_rematerialized"] = "failed"
+                if progress_callback:
+                    progress_callback(
+                        {"event": "item_done", "symbol": symbol, "finished": index, "total": len(ok_symbols)}
+                    )
+
         return [results[symbol] for symbol in normalized_items.keys() if symbol in results]
 
     def update_pool_daily(
@@ -575,6 +726,18 @@ class DataService:
         max_retries: int = 2,
         retry_interval_seconds: float = 5.0,
     ) -> dict:
+        # 先批量预同步除权因子（~N/100 次请求），避免逐标的各拉一次；
+        # 失败时兜底为 ensure_daily_history 内部单标同步。
+        factors_map: dict[str, list] = {}
+        factor_changed: set[str] = set()
+        try:
+            factors_map, changed = self.sync_ex_factors(symbols)
+            factor_changed = set(changed)
+            if factor_changed:
+                logger.info("ex-factor changes detected for %d symbols: %s", len(changed), changed)
+        except Exception:
+            logger.exception("batch ex-factor pre-sync failed; falling back to per-symbol sync")
+
         results: list[dict] = []
         failed_symbols: list[str] = []
 
@@ -583,7 +746,14 @@ class DataService:
             last_error: str | None = None
             for attempt in range(max_retries + 1):
                 try:
-                    result = self.ensure_daily_history(symbol, start_date, end_date, adjust=adjust)
+                    result = self.ensure_daily_history(
+                        symbol,
+                        start_date,
+                        end_date,
+                        adjust=adjust,
+                        factors=factors_map.get(symbol),
+                        factors_changed=(symbol in factor_changed) if symbol in factors_map else None,
+                    )
                     break
                 except Exception as exc:
                     last_error = str(exc)

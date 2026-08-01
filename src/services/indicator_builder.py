@@ -7,10 +7,9 @@ Responsibilities:
   incrementality is unsound (master plan D4).
 - Default param-set registry with hash check (D3): a config or formula
   change marks the caches for a full rebuild.
-- Dividend/adjustment detection (D9): the daily K-line update is
-  append-only, so a corporate action silently breaks the stored series.
-  We re-fetch the recent window and compare; mismatches trigger a full
-  history re-pull of that symbol before its indicators are rebuilt.
+- Dividend/adjustment detection (D9): raw 真源架构下行情不再被回溯改写，
+  除权检测改为「vendor 除权因子 vs 本地因子表 diff」；变化的标的只需
+  本地重物化 qfq（raw × 因子），无需重拉任何 K 线。
 - Pre-rebuild backup (D10): VACUUM INTO snapshot before full rebuilds.
 """
 
@@ -18,10 +17,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
-
-import pandas as pd
 
 from audit.app_logger import get_logger
 from core.indicators import INDICATOR_FORMULA_VERSION
@@ -134,61 +131,46 @@ def rebuild_if_needed(db=None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def detect_adjustment_breaks(symbols: list[str], data_service, end_date: date, lookback: int = DIVIDEND_CHECK_BARS) -> list[str]:
-    """Return symbols whose stored recent bars diverge from the vendor.
+def detect_adjustment_breaks(symbols: list[str], data_service, end_date: date = None, lookback: int = DIVIDEND_CHECK_BARS) -> list[str]:
+    """除权变更检测（因子 diff 法）：vendor 除权因子 vs 本地因子表。
 
-    The daily update is append-only; after a corporate action the vendor's
-    qfq history is retroactively rewritten while our stored series is not.
+    raw 真源架构下，除权不再意味着行情被回溯改写 —— 因子表变化即触发
+    本地 qfq 重物化，无需重拉任何 K 线。新因子在此直接落库。
+    返回因子发生变化的标的列表。
     """
-    broken: list[str] = []
-    start_date = end_date - timedelta(days=lookback * 3)
-    for symbol in symbols:
-        try:
-            stored = data_service.market_store.load_history(symbol)
-            if stored.empty:
-                continue
-            fresh = data_service.fetch_daily_history(symbol, start=start_date, end=end_date, adjust="qfq")
-            if fresh.empty:
-                continue
-            stored = stored.copy()
-            fresh = fresh.copy()
-            stored["time"] = stored["time"].astype(str).str[:10]
-            fresh["time"] = fresh["time"].astype(str).str[:10]
-            merged = stored.merge(fresh, on="time", suffixes=("_old", "_new"))
-            if merged.empty:
-                continue
-            diff = (merged["close_old"] - merged["close_new"]).abs() / merged["close_new"].replace(0, 1)
-            if bool((diff > 1e-6).any()):
-                broken.append(symbol)
-                logger.warning("Adjustment break detected for %s (max close diff %.4f%%)", symbol, float(diff.max()) * 100)
-        except Exception:
-            logger.exception("Adjustment check failed for %s", symbol)
-    return broken
+    del end_date, lookback  # 旧比价法的参数，因子法不需要
+    try:
+        _factors, changed = data_service.sync_ex_factors(symbols)
+    except Exception:
+        logger.exception("Ex-factor sync failed")
+        return []
+    for symbol in changed:
+        logger.warning("Ex-factor change detected for %s — qfq rematerialization scheduled", symbol)
+    return changed
 
 
-def repair_broken_symbols(symbols: list[str], data_service, start_date: date, end_date: date) -> list[dict]:
-    """Full history re-pull for symbols with detected adjustment breaks.
+def repair_broken_symbols(symbols: list[str], data_service, start_date: date = None, end_date: date = None) -> list[dict]:
+    """除权变更修复：本地重物化 qfq（纯本地，秒级）。
 
-    The re-pull must start at the symbol's earliest stored date: qfq
-    adjustment retroactively rewrites ALL history, and upsert alone cannot
-    repair a broken prefix older than the fetch start (kimi review §2.2).
+    过渡期半迁移状态（raw 覆盖不如存量 qfq）下重物化会被拒绝，
+    此时先全量补拉 raw 再物化 —— 只补 raw，不碰旧 qfq 逻辑。
     """
     results = []
     for symbol in symbols:
         try:
-            stored = data_service.market_store.load_history(symbol)
-            symbol_start = start_date
-            if not stored.empty and "time" in stored.columns:
-                times = pd.to_datetime(stored["time"], errors="coerce").dropna()
-                if not times.empty:
-                    symbol_start = min(start_date, times.min().date())
-            result = data_service.backfill_daily_history(
-                symbol=symbol, start_date=symbol_start, end_date=end_date, adjust="qfq"
-            )
+            result = data_service.rematerialize_qfq(symbol)
+            if result.get("status") == "raw_incomplete" and end_date is not None:
+                logger.warning("raw incomplete for %s; backfilling raw before rematerialize", symbol)
+                result = data_service.backfill_daily_history(
+                    symbol=symbol,
+                    start_date=start_date or date(1990, 1, 1),
+                    end_date=end_date,
+                    adjust="none",
+                )
             results.append(result)
-            logger.info("Re-pulled full history for %s after adjustment break: %s", symbol, result.get("status"))
+            logger.info("Rematerialized qfq for %s after ex-factor change: %s", symbol, result.get("status"))
         except Exception:
-            logger.exception("Failed to re-pull history for %s", symbol)
+            logger.exception("Failed to rematerialize qfq for %s", symbol)
     return results
 
 

@@ -9,7 +9,7 @@ FastAPI + SQLite 的单机应用：日 K 行情驱动的趋势看板、单标的
 - **策略管理**（`/rule-backtest`）：配置化规则策略（JSON 条件树）的创建与单标的回测，多策略对比；
 - **标的管理**（`/instruments`）：标的增改、分类编辑、历史行情回填；
 - **MCP 服务**（`/mcp/sse`）：5 个工具（trend_dashboard / intraday_dashboard / symbol_detail / calc_stop_loss / list_instruments）；
-- **每日任务**：16:30 增量补齐日 K → 除权检测（必要时整标重拉）→ 指标缓存重建。
+- **每日任务**：16:30 增量补齐日 K（raw append-only）→ 除权因子 diff（变化标的本地重物化 qfq）→ 指标缓存重建。
 
 ## 架构
 
@@ -36,7 +36,7 @@ src/
 - 所有指标/趋势值只有一份实现（`core/indicators.py`、`core/trend.py`），带 `INDICATOR_FORMULA_VERSION` / `TREND_FORMULA_VERSION`；
 - 预计算表：`indicator_daily`（含盘中递推状态列）、`trend_daily`（按参数集）、`trend_param_sets`（default 参数集 hash 注册）；
 - 读取门面 `data/indicator_store.py`：**缓存优先、未命中实时算**——缓存只是加速器，回退是永久特性；
-- 整标全量重建（qfq 除权会回溯改写历史，行级增量不可行）；16:30 日更尾部重建变动标的；启动时 hash/version 校验，漂移自动全量重建（`VACUUM INTO` 备份至 `data/backups/`）。
+- 整标全量重建（复权变化会改写全历史，行级增量不可行）；16:30 日更尾部重建变动标的；启动时 hash/version 校验，漂移自动全量重建（`VACUUM INTO` 备份至 `data/backups/`）。
 
 ### 实时叠加
 
@@ -48,7 +48,7 @@ src/
 
 ## 数据存储
 
-单一 SQLite（`data/trend_quant.db`）：`market_data_qfq`（前复权日 K，主数据）、`market_data_raw`、`instrument_metadata`（标的唯一来源）、`instrument_categories`、`rule_strategies`、`job_runs`（任务记录）、`app_config`（策略参数）、`indicator_daily` / `trend_daily` / `trend_param_sets`（预计算缓存）。config/ 仅 `app.yaml`（基础设施）。密钥在 `.env`（TICKFLOW_API_KEY）。
+单一 SQLite（`data/trend_quant.db`）：`market_data_raw`（不复权日 K，**唯一真源**，append-only 永不回溯改写）、`ex_factors`（除权因子）、`market_data_qfq`（等比前复权日 K，由 raw + 因子本地物化，`core/adjustment.py`，全系统读取入口）、`instrument_metadata`（标的唯一来源）、`instrument_categories`、`rule_strategies`、`job_runs`（任务记录）、`app_config`（策略参数）、`indicator_daily` / `trend_daily` / `trend_param_sets`（预计算缓存）。config/ 仅 `app.yaml`（基础设施）。密钥在 `.env`（TICKFLOW_API_KEY）。
 
 ## 运行
 

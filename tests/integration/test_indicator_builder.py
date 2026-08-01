@@ -106,39 +106,39 @@ class TestParamRegistry:
 
 
 class FakeDataService:
-    def __init__(self, stored: pd.DataFrame, fresh: pd.DataFrame) -> None:
-        self.market_store = type("S", (), {"load_history": lambda self, symbol: stored.copy()})()
-        self._fresh = fresh
-        self.repulled: list[str] = []
+    """raw 真源架构下的假 DataService：除权检测 = 因子 diff，修复 = 本地重物化。"""
 
-    def fetch_daily_history(self, symbol, start, end, adjust="qfq"):
-        return self._fresh.copy()
+    def __init__(self, changed: list[str] | None = None) -> None:
+        self.changed = list(changed or [])
+        self.rematerialized: list[str] = []
+        self.backfilled: list[str] = []
 
-    def backfill_daily_history(self, symbol, start_date, end_date, adjust="qfq"):
-        self.repulled.append(symbol)
+    def sync_ex_factors(self, symbols, *, db=None):
+        return ({symbol: [] for symbol in symbols}, list(self.changed))
+
+    def rematerialize_qfq(self, symbol, factors=None, *, db=None):
+        self.rematerialized.append(symbol)
+        return {"symbol": symbol, "status": "ok", "rows": 10}
+
+    def backfill_daily_history(self, symbol, start_date, end_date, adjust="none"):
+        self.backfilled.append(symbol)
         return {"symbol": symbol, "status": "updated", "added_rows": 100}
 
 
 class TestDividendDetection:
     def test_detects_break(self) -> None:
-        stored = _make_bars()
-        fresh = stored.copy()
-        fresh.loc[fresh.index[-5:], "close"] *= 0.9  # vendor retro-adjusted
-        svc = FakeDataService(stored, fresh)
+        svc = FakeDataService(changed=["T.SS"])
         broken = detect_adjustment_breaks(["T.SS"], svc, date(2026, 3, 10))
         assert broken == ["T.SS"]
 
     def test_no_break_when_identical(self) -> None:
-        stored = _make_bars()
-        svc = FakeDataService(stored, stored.copy())
+        svc = FakeDataService(changed=[])
         assert detect_adjustment_breaks(["T.SS"], svc, date(2026, 3, 10)) == []
 
     def test_pipeline_repairs_and_rebuilds(self, db) -> None:
         bars = _make_bars()
         db.save_market_data("T.SS", bars, price_mode="qfq")
-        fresh = bars.copy()
-        fresh.loc[fresh.index[-5:], "close"] *= 0.9
-        svc = FakeDataService(bars, fresh)
+        svc = FakeDataService(changed=["T.SS"])
         payload = {"results": [{"symbol": "T.SS", "status": "updated"}]}
         import services.indicator_builder as builder
 
@@ -149,7 +149,7 @@ class TestDividendDetection:
         finally:
             builder.get_db = builder_get_db  # type: ignore[assignment]
         assert result["dividend_breaks"] == ["T.SS"]
-        assert svc.repulled == ["T.SS"]
+        assert svc.rematerialized == ["T.SS"]
         assert result["rebuilt"] == 1
 
 
