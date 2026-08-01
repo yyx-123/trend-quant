@@ -1,8 +1,8 @@
 """手工交易记录 — 用户凭据校验、交易录入 / 清仓 / 列表聚合。
 
 鉴权为极简无状态方案：每个请求携带 username + password，逐次查 users
-表校验（密码明文存储，内部小工具口径）。admin 用户可查看 / 操作所有
-用户的交易记录。
+表校验（密码明文存储，内部小工具口径）。每个用户只能查看自己的交易
+记录；admin 保留清仓任意记录的权限。
 
 持仓与止损指标完全复用 ``services/manual_trade.compute_manual_trade``
 （未清仓：intraday 实时口径；已清仓：``end_date`` 截断口径），本模块只做
@@ -29,7 +29,6 @@ __all__ = [
     "TradePermissionError",
     "TradeRecordError",
     "authenticate",
-    "list_users",
     "create_trade",
     "close_trade",
     "list_trades",
@@ -58,30 +57,6 @@ def authenticate(username: str, password: str, db=None) -> dict:
     if user is None or user["password"] != str(password):
         raise TradeAuthError("用户名或密码错误")
     return {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
-
-
-def list_users(username: str, password: str, db=None) -> list[dict]:
-    """用户列表（仅 admin，供前端切换查看）。"""
-    user = authenticate(username, password, db=db)
-    if not user["is_admin"]:
-        raise TradePermissionError("仅管理员可查看用户列表")
-    db = db or get_db()
-    return [
-        {"id": u["id"], "username": u["username"], "is_admin": u["is_admin"]}
-        for u in db.list_users()
-    ]
-
-
-def _resolve_target_user(user: dict, user_id: int | None, db) -> dict:
-    """确定列表接口的目标用户：默认自己；admin 可指定任意用户。"""
-    if user_id is None or int(user_id) == user["id"]:
-        return user
-    if not user["is_admin"]:
-        raise TradePermissionError("只能查看自己的交易记录")
-    target = db.get_user(int(user_id))
-    if target is None:
-        raise TradeRecordError(f"用户不存在: {user_id}")
-    return {"id": target["id"], "username": target["username"], "is_admin": target["is_admin"]}
 
 
 # ------------------------------------------------------------------
@@ -221,19 +196,17 @@ def _closed_item(row: dict, result: dict, name_map: dict[str, str]) -> dict:
 def list_trades(
     username: str,
     password: str,
-    user_id: int | None = None,
     db=None,
     intraday: bool = True,
 ) -> dict:
-    """某用户的全部交易记录 + 实时/截止口径指标。
+    """登录用户的全部交易记录 + 实时/截止口径指标。
 
     排序：未清仓按持仓金额（份数 × 最新价）降序在前；已清仓排最后，
     按清仓日倒序。单笔计算失败不拖垮整个列表，以 ``error`` 字段返回。
     """
     user = authenticate(username, password, db=db)
     db = db or get_db()
-    target = _resolve_target_user(user, user_id, db)
-    rows = db.list_manual_trades(target["id"])
+    rows = db.list_manual_trades(user["id"])
     name_map = load_instrument_name_map()  # DB 不可用时返回 {}（单测环境）
 
     # 同 symbol 实时报价请求级去重：一次列表内每个 symbol 只拉一次报价
@@ -284,6 +257,5 @@ def list_trades(
 
     return {
         "user": user,
-        "viewing": target,
         "trades": open_items + closed_items,
     }

@@ -227,24 +227,6 @@ class TestListTrades:
         # 持有期指标按清仓日截断：buy idx -6 ~ sell idx -2，含两端共 5 根K线
         assert item["holding"]["hold_days"] == 5
 
-    def test_non_admin_cannot_view_others(self, env) -> None:
-        db, _, alice, bob, _ = env
-        with pytest.raises(tr.TradePermissionError, match="自己的"):
-            tr.list_trades("bob", "pw2", user_id=alice["id"], db=db)
-
-    def test_admin_can_view_others(self, env) -> None:
-        db, bars, alice, _, admin = env
-        d, p = _day(bars, -3)
-        tr.create_trade("alice", "pw1", symbol="510300", buy_date=d,
-                        buy_price=p, shares=100, db=db)
-        out = tr.list_trades("admin", "root", user_id=alice["id"], db=db)
-        assert out["viewing"]["username"] == "alice"
-        assert len(out["trades"]) == 1
-        # admin 默认看自己
-        own = tr.list_trades("admin", "root", db=db)
-        assert own["viewing"]["id"] == admin["id"]
-        assert own["trades"] == []
-
     def test_single_trade_error_does_not_break_list(self, env) -> None:
         db, bars, alice, *_ = env
         d, p = _day(bars, -3)
@@ -255,15 +237,6 @@ class TestListTrades:
         by_id = {t["id"]: t for t in out["trades"]}
         assert "error" not in by_id[ok["id"]]
         assert "error" in by_id[bad["id"]]
-
-
-class TestListUsers:
-    def test_admin_only(self, env) -> None:
-        db, *_ = env
-        users = tr.list_users("admin", "root", db=db)
-        assert {u["username"] for u in users} == {"alice", "bob", "admin"}
-        with pytest.raises(tr.TradePermissionError, match="管理员"):
-            tr.list_users("alice", "pw1", db=db)
 
 
 class TestEndDateCutoff:

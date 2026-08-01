@@ -48,11 +48,8 @@
   <!-- ③ 交易记录区：登录后可见 -->
   <div class="viz-panel" id="mtRecordsPanel" hidden>
     <div class="mt-records-head">
-      <h3>交易记录 <span id="mtRecordsSub" class="manual-trade-note"></span></h3>
+      <h3>交易记录</h3>
       <div class="mt-records-controls">
-        <label id="mtUserSwitchWrap" hidden>查看用户
-          <select id="mtUserSwitch"></select>
-        </label>
         <button id="mtOpenEnterBtn" type="button" class="mt-btn-sm">+ 录入</button>
         <button id="mtRefreshBtn" type="button" class="mt-btn-sm">刷新</button>
       </div>
@@ -128,9 +125,6 @@
   const loginMessageEl = document.getElementById('mtLoginMessage');
 
   const recordsPanelEl = document.getElementById('mtRecordsPanel');
-  const recordsSubEl = document.getElementById('mtRecordsSub');
-  const userSwitchWrapEl = document.getElementById('mtUserSwitchWrap');
-  const userSwitchEl = document.getElementById('mtUserSwitch');
   const openEnterBtn = document.getElementById('mtOpenEnterBtn');
   const refreshBtn = document.getElementById('mtRefreshBtn');
   const tradeListEl = document.getElementById('mtTradeList');
@@ -460,7 +454,6 @@
     loginFormEl.hidden = true;
     recordsPanelEl.hidden = false;
     showLoginMessage('已登录：' + auth.username + (auth.is_admin ? '（admin）' : ''), false);
-    if (auth.is_admin) loadUserSwitch();
     loadTrades();
   }
 
@@ -470,8 +463,6 @@
     passwordEl.value = '';
     loginFormEl.hidden = false;
     recordsPanelEl.hidden = true;
-    userSwitchWrapEl.hidden = true;
-    userSwitchEl.innerHTML = '';
     tradeListEl.innerHTML = '';
     closeModalEl.hidden = true;
     enterModalEl.hidden = true;
@@ -493,35 +484,15 @@
     }
   }
 
-  async function loadUserSwitch() {
-    try {
-      const users = await postJson('/manual-trade/api/users/list', {
-        username: auth.username, password: auth.password,
-      });
-      userSwitchEl.innerHTML = users.map(function(u) {
-        return '<option value="' + esc(u.id) + '">' + esc(u.username) +
-          (u.is_admin ? '（admin）' : '') + '</option>';
-      }).join('');
-      userSwitchEl.value = String(auth.userId || users.find(function(u) {
-        return u.username === auth.username;
-      })?.id || '');
-      userSwitchWrapEl.hidden = false;
-    } catch (err) {
-      // 用户列表加载失败不阻塞本人记录查看
-    }
-  }
-
   // ── ③ 交易记录 ─────────────────────────────────────────
   async function loadTrades() {
     if (!auth) return;
     refreshBtn.disabled = true;
     try {
       const body = {username: auth.username, password: auth.password};
-      if (auth.is_admin && userSwitchEl.value) body.user_id = Number(userSwitchEl.value);
       const data = await postJson('/manual-trade/api/trades/list', body);
-      auth.userId = data.user.id;
       currentTrades = data.trades || [];
-      renderTradeList(data);
+      renderTradeList();
     } catch (err) {
       if (err.message && err.message.indexOf('用户名或密码') >= 0) {
         onLogout();
@@ -534,9 +505,22 @@
     }
   }
 
-  function tradeCol(label, valueHtml, wide) {
-    return '<div class="mt-trade-col' + (wide ? ' mt-trade-col-wide' : '') + '"><span class="mt-trade-col-label">' + esc(label) +
-      '</span><span class="mt-trade-col-value">' + valueHtml + '</span></div>';
+  // 统一表格展示：各值的格式与原卡片保持一致，持有天数挪到外层后无需再展开详情
+  const TRADE_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '买价', '现价', '份数', '持仓金额',
+    '盈亏', '最大浮盈', '最大回撤', '硬止损价', '吊灯止损价', '持有天数', '操作'];
+
+  // 止损价单元格：329.0577（+20.35%）；两个止损价中较高者更紧、会先触发，价格加下划线提示以其为准
+  function stopCellHtml(price, distPct, dominant) {
+    if (price == null || !isFinite(Number(price))) return '—';
+    const pctHtml = '<span class="' + pctClass(distPct) + '">' + esc(fmtPct(distPct)) + '</span>';
+    const priceHtml = dominant
+      ? '<span class="mt-stop-dominant">' + esc(fmtPrice(price)) + '</span>'
+      : esc(fmtPrice(price));
+    return priceHtml + '（' + pctHtml + '）';
+  }
+
+  function holdDaysCell(holding) {
+    return holding.hold_days != null ? esc(String(holding.hold_days)) : '—';
   }
 
   function renderTradeRow(t) {
@@ -550,87 +534,62 @@
       if (t.stops.chandelier_stop_triggered) badges.push('<span class="mt-badge mt-badge-danger">⚠ 吊灯跌破</span>');
     }
 
-    let cols = tradeCol('买入', esc(t.buy_date) + ' @ ' + esc(fmtPrice(t.buy_price)) +
-      ' × ' + esc(fmtShares(t.shares)), true);
+    let cells =
+      '<td class="mt-cell-name"><span class="mt-trade-name">' + esc(t.name || t.symbol) + '</span>' +
+        (badges.length ? '<span class="mt-trade-badges">' + badges.join('') + '</span>' : '') + '</td>' +
+      '<td class="mt-trade-symbol">' + esc(t.symbol) + '</td>' +
+      '<td>' + esc(t.buy_date) + '</td>' +
+      '<td>' + esc(fmtPrice(t.buy_price)) + '</td>';
     if (t.error) {
-      cols += '<div class="mt-trade-col mt-trade-error">指标计算失败：' + esc(t.error) + '</div>';
+      cells += '<td>—</td>' +
+        '<td>' + esc(fmtShares(t.shares)) + '</td>' +
+        '<td colspan="7"><span class="mt-trade-error">指标计算失败：' + esc(t.error) + '</span></td>';
     } else if (closed) {
-      cols += tradeCol('清仓', esc(t.sell_date) + ' @ ' + esc(fmtPrice(t.sell_price)), true);
-      cols += tradeCol('实际盈亏', '<span class="' + pctClass(t.realized_pnl) + '">' +
-        esc(fmtPct(t.realized_pnl_pct)) + '（' + esc(fmtMoney(t.realized_pnl)) + '）</span>', true);
-      cols += tradeCol('最大浮盈', '<span class="' + pctClass(holding.max_gain_pct) + '">' +
-        esc(fmtPct(holding.max_gain_pct)) + '</span>');
-      cols += tradeCol('最大回撤', '<span class="' + pctClass(holding.max_drawdown) + '">' +
-        esc(fmtPct(holding.max_drawdown)) + '</span>');
+      cells +=
+        '<td>' + esc(fmtPrice(t.sell_price)) + '</td>' +
+        '<td>' + esc(fmtShares(t.shares)) + '</td>' +
+        '<td>—</td>' +
+        '<td><span class="' + pctClass(t.realized_pnl) + '">' + esc(fmtPct(t.realized_pnl_pct)) +
+          '（' + esc(fmtMoney(t.realized_pnl)) + '）</span></td>' +
+        '<td><span class="' + pctClass(holding.max_gain_pct) + '">' + esc(fmtPct(holding.max_gain_pct)) + '</span></td>' +
+        '<td><span class="' + pctClass(holding.max_drawdown) + '">' + esc(fmtPct(holding.max_drawdown)) + '</span></td>' +
+        '<td>—</td>' +
+        '<td>—</td>' +
+        '<td>' + holdDaysCell(holding) + '</td>';
     } else {
       const stops = t.stops || {};
-      cols += tradeCol('持仓金额', esc(fmtMoney(t.position_value).replace(/^\+/, '')));
-      cols += tradeCol('现价', esc(fmtPrice(t.latest_price)));
-      cols += tradeCol('盈亏', '<span class="' + pctClass(holding.pnl_pct) + '">' +
-        esc(fmtPct(holding.pnl_pct)) + '（' + esc(fmtMoney(t.pnl_amount)) + '）</span>', true);
-      cols += tradeCol('最大浮盈', '<span class="' + pctClass(holding.max_gain_pct) + '">' +
-        esc(fmtPct(holding.max_gain_pct)) + '</span>');
-      cols += tradeCol('最大回撤', '<span class="' + pctClass(holding.max_drawdown) + '">' +
-        esc(fmtPct(holding.max_drawdown)) + '</span>');
-      cols += tradeCol('距硬止损', '<span class="' + pctClass(stops.hard_stop_distance_pct) + '">' +
-        esc(fmtPct(stops.hard_stop_distance_pct)) + '</span>');
-      cols += tradeCol('距吊灯止损', '<span class="' + pctClass(stops.chandelier_stop_distance_pct) + '">' +
-        esc(fmtPct(stops.chandelier_stop_distance_pct)) + '</span>');
+      const hardPrice = Number(stops.hard_stop_price);
+      const chandPrice = Number(stops.chandelier_stop_price);
+      const hardDominant = isFinite(hardPrice) && (!isFinite(chandPrice) || hardPrice >= chandPrice);
+      const chandDominant = isFinite(chandPrice) && (!isFinite(hardPrice) || chandPrice >= hardPrice);
+      cells +=
+        '<td>' + esc(fmtPrice(t.latest_price)) + '</td>' +
+        '<td>' + esc(fmtShares(t.shares)) + '</td>' +
+        '<td>' + esc(fmtMoney(t.position_value).replace(/^\+/, '')) + '</td>' +
+        '<td><span class="' + pctClass(holding.pnl_pct) + '">' + esc(fmtPct(holding.pnl_pct)) +
+          '（' + esc(fmtMoney(t.pnl_amount)) + '）</span></td>' +
+        '<td><span class="' + pctClass(holding.max_gain_pct) + '">' + esc(fmtPct(holding.max_gain_pct)) + '</span></td>' +
+        '<td><span class="' + pctClass(holding.max_drawdown) + '">' + esc(fmtPct(holding.max_drawdown)) + '</span></td>' +
+        '<td>' + stopCellHtml(stops.hard_stop_price, stops.hard_stop_distance_pct, hardDominant) + '</td>' +
+        '<td>' + stopCellHtml(stops.chandelier_stop_price, stops.chandelier_stop_distance_pct, chandDominant) + '</td>' +
+        '<td>' + holdDaysCell(holding) + '</td>';
     }
-
-    const actions = '<div class="mt-trade-actions">' +
-      (t.error ? '' : '<button type="button" class="mt-btn-sm mt-expand-btn">详情</button>') +
-      (closed ? '' : '<button type="button" class="mt-btn-sm mt-btn-danger mt-close-btn">清仓</button>') +
-      '</div>';
-
-    return '<div class="mt-trade' + (closed ? ' is-closed' : '') + '" data-id="' + esc(t.id) + '">' +
-      '<div class="mt-trade-row">' +
-        '<div class="mt-trade-main">' +
-          '<span class="mt-trade-name">' + esc(t.name || t.symbol) + '</span>' +
-          '<span class="mt-trade-symbol">' + esc(t.symbol) + '</span>' +
-        '</div>' +
-        '<div class="mt-trade-cols">' + cols + '</div>' +
-        '<div class="mt-trade-badges">' + badges.join('') + '</div>' +
-        actions +
-      '</div>' +
-      '<div class="mt-trade-detail" hidden></div>' +
-      '</div>';
+    cells += '<td class="mt-cell-actions">' +
+      (closed || t.error ? '' : '<button type="button" class="mt-btn-sm mt-btn-danger mt-close-btn">清仓</button>') +
+      '</td>';
+    return '<tr data-id="' + esc(t.id) + '"' + (closed ? ' class="is-closed"' : '') + '>' + cells + '</tr>';
   }
 
-  function renderTradeList(data) {
-    recordsSubEl.textContent = data.viewing && data.viewing.username !== auth.username
-      ? '— 正在查看 ' + data.viewing.username + ' 的记录'
-      : '';
+  function renderTradeList() {
     tradeEmptyEl.hidden = currentTrades.length > 0;
-    tradeListEl.innerHTML = currentTrades.map(renderTradeRow).join('');
-  }
-
-  function toggleTradeDetail(rowEl, trade) {
-    const detailEl = rowEl.querySelector('.mt-trade-detail');
-    const btn = rowEl.querySelector('.mt-expand-btn');
-    if (!detailEl.hidden) {
-      detailEl.hidden = true;
-      btn.textContent = '详情';
+    if (!currentTrades.length) {
+      tradeListEl.innerHTML = '';
       return;
     }
-    if (!detailEl.dataset.rendered) {
-      let html = '';
-      if (trade.status !== 'closed' && trade.stops) {
-        const intradayTime = trade.intraday_ts ? String(trade.intraday_ts).slice(11, 16) : '';
-        html += '<div class="mt-trade-detail-note">' +
-          (trade.is_intraday ? '含今日盘中实时数据 ' + esc(intradayTime) : '日K收盘口径') + '</div>';
-        html += '<div class="mt-stop-grid"></div>';
-      }
-      html += '<div class="mt-stat-grid"></div>';
-      detailEl.innerHTML = html;
-      if (trade.status !== 'closed' && trade.stops) {
-        renderStopStats(detailEl.querySelector('.mt-stop-grid'), trade.stops);
-      }
-      renderStats(detailEl.querySelector('.mt-stat-grid'), holdingStatItems(trade));
-      detailEl.dataset.rendered = '1';
-    }
-    detailEl.hidden = false;
-    btn.textContent = '收起';
+    tradeListEl.innerHTML = '<div class="mt-trade-table-wrap"><table class="mt-trade-table"><thead><tr>' +
+      TRADE_TABLE_HEADERS.map(function(h) { return '<th>' + esc(h) + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + currentTrades.map(renderTradeRow).join('') +
+      '</tbody></table></div>';
   }
 
   // ── 录入弹窗 ───────────────────────────────────────────
@@ -794,7 +753,6 @@
   });
   openEnterBtn.addEventListener('click', openEnterModal);
   refreshBtn.addEventListener('click', loadTrades);
-  userSwitchEl.addEventListener('change', loadTrades);
 
   enterConfirmBtn.addEventListener('click', confirmEnter);
   enterCancelBtn.addEventListener('click', function() {
@@ -815,11 +773,10 @@
   tradeListEl.addEventListener('click', function(ev) {
     const btn = ev.target.closest('button');
     if (!btn) return;
-    const rowEl = btn.closest('.mt-trade');
+    const rowEl = btn.closest('tr[data-id]');
     if (!rowEl) return;
     const trade = currentTrades.find(function(t) { return t.id === Number(rowEl.dataset.id); });
     if (!trade) return;
-    if (btn.classList.contains('mt-expand-btn')) toggleTradeDetail(rowEl, trade);
     if (btn.classList.contains('mt-close-btn')) openCloseModal(trade);
   });
 

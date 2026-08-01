@@ -81,7 +81,7 @@ class TestTradeCreateListApi:
         resp = client.post("/manual-trade/api/trades/list", json=ALICE)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["viewing"]["username"] == "alice"
+        assert data["user"]["username"] == "alice"
         assert len(data["trades"]) == 1
         item = data["trades"][0]
         assert item["id"] == trade["id"]
@@ -123,27 +123,6 @@ class TestTradeCreateListApi:
         resp = client.post("/manual-trade/api/trades/list", json=BOB)
         assert resp.status_code == 200
         assert resp.json()["trades"] == []
-
-    def test_non_admin_cannot_view_others_403(self, client, populated_db) -> None:
-        _, _, alice, *_ = populated_db
-        resp = client.post(
-            "/manual-trade/api/trades/list", json={**BOB, "user_id": alice["id"]}
-        )
-        assert resp.status_code == 403
-
-    def test_admin_can_view_others(self, client, populated_db) -> None:
-        _, bars, alice, *_ = populated_db
-        client.post(
-            "/manual-trade/api/trades/create",
-            json={**ALICE, **_buy_point(bars), "shares": 100},
-        )
-        resp = client.post(
-            "/manual-trade/api/trades/list", json={**ADMIN, "user_id": alice["id"]}
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["viewing"]["username"] == "alice"
-        assert len(data["trades"]) == 1
 
 
 class TestTradeCloseApi:
@@ -223,16 +202,3 @@ class TestTradeCloseApi:
         )
         assert resp.status_code == 400
         assert "当日价格区间" in resp.json()["detail"]
-
-
-class TestUsersListApi:
-    def test_admin_gets_user_list(self, client, populated_db) -> None:
-        resp = client.post("/manual-trade/api/users/list", json=ADMIN)
-        assert resp.status_code == 200
-        names = {u["username"] for u in resp.json()}
-        assert names == {"alice", "bob", "admin"}
-        assert all("password" not in u for u in resp.json())
-
-    def test_non_admin_403(self, client, populated_db) -> None:
-        resp = client.post("/manual-trade/api/users/list", json=ALICE)
-        assert resp.status_code == 403

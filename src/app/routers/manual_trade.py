@@ -28,10 +28,6 @@ class Credentials(BaseModel):
     password: str = Field(..., min_length=1)
 
 
-class TradeListRequest(Credentials):
-    user_id: int | None = Field(default=None, description="仅 admin 可指定查看的用户")
-
-
 class TradeCreateRequest(Credentials):
     symbol: str = Field(..., min_length=1)
     buy_date: date
@@ -82,20 +78,12 @@ async def login(payload: Credentials) -> dict:
     )
 
 
-@router.post("/api/users/list")
-async def list_users(payload: Credentials) -> list[dict]:
-    return _call_trade_api(
-        tr.list_users, username=payload.username, password=payload.password
-    )
-
-
 @router.post("/api/trades/list")
-async def list_trades(payload: TradeListRequest) -> dict:
+async def list_trades(payload: Credentials) -> dict:
     return _call_trade_api(
         tr.list_trades,
         username=payload.username,
         password=payload.password,
-        user_id=payload.user_id,
     )
 
 

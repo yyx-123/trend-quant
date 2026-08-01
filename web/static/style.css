@@ -3829,47 +3829,62 @@ details > summary::marker {
 }
 
 /* ── 手工交易：紧凑交易卡片列表 ───────────────────────────── */
-.mt-trade-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.mt-trade-table-wrap {
+  overflow-x: auto;
 }
 
-.mt-trade {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--panel-soft);
-  transition: box-shadow 0.15s ease;
+/* 统一表格展示：样式对齐标的详情页的多策略结果表 .backtest-metrics-table */
+.mt-trade-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
 }
 
-.mt-trade:hover {
-  box-shadow: var(--shadow-sm);
+.mt-trade-table th,
+.mt-trade-table td {
+  padding: 8px 10px;
+  text-align: right;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.82);
 }
 
-.mt-trade.is-closed {
-  background: transparent;
-  opacity: 0.75;
+.mt-trade-table thead th {
+  background: rgba(20, 41, 51, 0.04);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
 }
 
-.mt-trade-row {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  flex-wrap: wrap;
-  padding: 10px 14px;
+.mt-trade-table tbody td {
+  border-top: 1px solid var(--line);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
 }
 
-.mt-trade-main {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  min-width: 200px;
+/* 标的 / 标的代码两列左对齐，其余数值列右对齐 */
+.mt-trade-table th:first-child,
+.mt-trade-table td:first-child,
+.mt-trade-table th:nth-child(2),
+.mt-trade-table td:nth-child(2) {
+  text-align: left;
+}
+
+.mt-trade-table tbody tr {
+  transition: background 0.15s;
+}
+
+.mt-trade-table tbody tr:hover td {
+  background: rgba(13, 122, 113, 0.06);
+}
+
+.mt-trade-table tbody tr.is-closed {
+  opacity: 0.7;
 }
 
 .mt-trade-name {
   color: var(--text);
-  font-size: 14.5px;
+  font-size: 13.5px;
   font-weight: 800;
 }
 
@@ -3879,83 +3894,27 @@ details > summary::marker {
   font-variant-numeric: tabular-nums;
 }
 
-.mt-trade-cols {
-  display: flex;
-  gap: 8px 20px;
+.mt-trade-badges {
+  display: inline-flex;
+  gap: 6px;
   align-items: center;
-  flex: 1;
   flex-wrap: wrap;
+  margin-left: 6px;
+  vertical-align: middle;
 }
 
-.mt-trade-col {
-  display: flex;
-  flex: 0 0 108px;  /* 固定列宽：跨行对齐各信息列 */
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.mt-trade-col-wide {
-  flex-basis: 196px;  /* 买入 / 盈亏（含金额）等长内容列 */
-}
-
-.mt-trade-col-label {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.mt-trade-col-value {
-  color: var(--text);
-  font-size: 13.5px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.mt-trade-col-value .metric-positive,
 .mt-trade-error {
   color: var(--danger);
-}
-
-.mt-trade-col-value .metric-negative {
-  color: var(--success);
-}
-
-.mt-trade-error {
   font-size: 12px;
   font-weight: 400;
 }
 
-.mt-trade-actions {
-  display: flex;
-  gap: 8px;
-  margin-left: auto;
-}
-
-.mt-trade-badges {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  min-width: 150px;  /* 预留徽标位，保证各行的列与按钮位置一致 */
-}
-
-.mt-trade-detail {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border-top: 1px dashed var(--line);
-}
-
-.mt-trade-detail[hidden] {
-  display: none;
-}
-
-.mt-trade-detail-note {
-  color: var(--muted);
-  font-size: 12px;
+/* 两个止损价中较高者（更紧、先触发，应以其为准）：价格加下划线提示 */
+.mt-stop-dominant {
+  font-weight: 800;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
 }
 
 /* ── 手工交易：清仓弹窗 ───────────────────────────────────── */
@@ -3985,21 +3944,6 @@ details > summary::marker {
 
 .mt-modal-box h3 {
   margin: 0 0 14px;
-}
-
-@media (max-width: 720px) {
-  .mt-trade-row {
-    gap: 10px;
-  }
-
-  .mt-trade-cols {
-    gap: 12px;
-  }
-
-  .mt-trade-actions {
-    margin-left: 0;
-    width: 100%;
-  }
 }
 
 /* ── 批量回测页 ─────────────────────────────────────────── */

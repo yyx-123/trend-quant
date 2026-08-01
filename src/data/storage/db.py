@@ -952,11 +952,6 @@ class Database:
             ).fetchone()
         return self._user_row(row) if row else None
 
-    def list_users(self) -> list[dict]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
-        return [self._user_row(row) for row in rows]
-
     @staticmethod
     def _user_row(row: sqlite3.Row) -> dict:
         d = dict(row)
