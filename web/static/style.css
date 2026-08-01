@@ -3882,6 +3882,28 @@ details > summary::marker {
   opacity: 0.7;
 }
 
+/* 可排序表头：点击循环 降序 → 升序 → 原始顺序 */
+.mt-trade-table th.mt-th-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.mt-trade-table th.mt-th-sortable:hover {
+  background: rgba(20, 41, 51, 0.09);
+  color: var(--text);
+}
+
+.mt-trade-table th.mt-th-sortable.is-sorted {
+  color: var(--accent);
+}
+
+.mt-trade-table .mt-sort-arrow {
+  display: inline-block;
+  margin-left: 2px;
+  font-size: 10px;
+  line-height: 1;
+}
+
 .mt-trade-name {
   color: var(--text);
   font-size: 13.5px;

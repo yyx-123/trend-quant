@@ -160,6 +160,8 @@
   let closeRangeSeq = 0;
   let enterRange = null;       // 录入弹窗：当日价格区间缓存
   let enterRangeSeq = 0;
+  // 表格排序：dir 0=原始顺序，-1=降序，1=升序；点击同一列循环 降序→升序→原始
+  let sortState = {key: null, dir: 0};
 
   // ── 工具 ────────────────────────────────────────────────
   function esc(text) {
@@ -460,6 +462,7 @@
   function onLogout() {
     auth = null;
     currentTrades = [];
+    sortState = {key: null, dir: 0};
     passwordEl.value = '';
     loginFormEl.hidden = false;
     recordsPanelEl.hidden = true;
@@ -508,6 +511,73 @@
   // 统一表格展示：各值的格式与原卡片保持一致，持有天数挪到外层后无需再展开详情
   const TRADE_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '买价', '现价', '份数', '持仓金额',
     '盈亏', '最大浮盈', '最大回撤', '硬止损价', '吊灯止损价', '持有天数', '操作'];
+
+  function numOrNull(v) {
+    const n = Number(v);
+    return isFinite(n) ? n : null;
+  }
+
+  // 可排序列 → 排序键取值；与单元格展示口径一致（已清仓现价取卖出价、盈亏取已实现盈亏），
+  // 无法取值的行（计算失败/已清仓的持仓金额）恒排在最后。盈亏按绝对金额而非百分比比较。
+  const SORTABLE_COLUMNS = {
+    '买入日期': function(t) { return t.buy_date || null; },  // ISO 日期字符串，字典序即时间序，越新越大
+    '买价': function(t) { return numOrNull(t.buy_price); },
+    '现价': function(t) {
+      if (t.error) return null;
+      return numOrNull(t.status === 'closed' ? t.sell_price : t.latest_price);
+    },
+    '持仓金额': function(t) {
+      if (t.error || t.status === 'closed') return null;
+      return numOrNull(t.position_value);
+    },
+    '盈亏': function(t) {
+      if (t.error) return null;
+      return numOrNull(t.status === 'closed' ? t.realized_pnl : t.pnl_amount);
+    },
+    '持有天数': function(t) {
+      if (t.error) return null;
+      return numOrNull((t.holding || {}).hold_days);
+    },
+  };
+
+  function tradeHeaderHtml(h) {
+    if (!SORTABLE_COLUMNS.hasOwnProperty(h)) return '<th>' + esc(h) + '</th>';
+    const active = sortState.key === h && sortState.dir !== 0;
+    const arrow = active ? (sortState.dir === -1 ? '⬇️' : '⬆️') : '';
+    return '<th class="mt-th-sortable' + (active ? ' is-sorted' : '') + '" data-sort-key="' + esc(h) +
+      '" title="点击排序：降序 → 升序 → 原始顺序">' + esc(h) +
+      '<span class="mt-sort-arrow">' + arrow + '</span></th>';
+  }
+
+  // 按 sortState 排序；值相同或均缺失时保持原始相对顺序（稳定），缺失值恒排最后
+  function sortedTrades() {
+    if (!sortState.key || sortState.dir === 0) return currentTrades;
+    const getter = SORTABLE_COLUMNS[sortState.key];
+    if (!getter) return currentTrades;
+    return currentTrades.map(function(t, i) {
+      return {t: t, i: i, v: getter(t)};
+    }).sort(function(a, b) {
+      if (a.v == null && b.v == null) return a.i - b.i;
+      if (a.v == null) return 1;
+      if (b.v == null) return -1;
+      let cmp;
+      if (typeof a.v === 'string') cmp = a.v < b.v ? -1 : (a.v > b.v ? 1 : 0);
+      else cmp = a.v - b.v;
+      if (cmp === 0) return a.i - b.i;
+      return sortState.dir === -1 ? -cmp : cmp;
+    }).map(function(x) { return x.t; });
+  }
+
+  function toggleSort(key) {
+    if (sortState.key !== key) {
+      sortState = {key: key, dir: -1};   // 首次点击：降序
+    } else if (sortState.dir === -1) {
+      sortState.dir = 1;                 // 再次点击：升序
+    } else {
+      sortState = {key: null, dir: 0};   // 第三次点击：回归原始排列
+    }
+    renderTradeList();
+  }
 
   // 止损价单元格：329.0577（+20.35%）；两个止损价中较高者更紧、会先触发，价格加下划线提示以其为准
   function stopCellHtml(price, distPct, dominant) {
@@ -587,8 +657,8 @@
       return;
     }
     tradeListEl.innerHTML = '<div class="mt-trade-table-wrap"><table class="mt-trade-table"><thead><tr>' +
-      TRADE_TABLE_HEADERS.map(function(h) { return '<th>' + esc(h) + '</th>'; }).join('') +
-      '</tr></thead><tbody>' + currentTrades.map(renderTradeRow).join('') +
+      TRADE_TABLE_HEADERS.map(tradeHeaderHtml).join('') +
+      '</tr></thead><tbody>' + sortedTrades().map(renderTradeRow).join('') +
       '</tbody></table></div>';
   }
 
@@ -771,6 +841,12 @@
   });
 
   tradeListEl.addEventListener('click', function(ev) {
+    // 表头排序点击（事件委托：表头随每次渲染重建，需在容器上拦截）
+    const th = ev.target.closest('th[data-sort-key]');
+    if (th) {
+      toggleSort(th.dataset.sortKey);
+      return;
+    }
     const btn = ev.target.closest('button');
     if (!btn) return;
     const rowEl = btn.closest('tr[data-id]');
