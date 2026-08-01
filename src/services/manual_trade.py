@@ -113,6 +113,10 @@ def compute_manual_trade(
     # 吊灯止损：最新收盘价是否已跌破
     chandelier_stop_price = stops["chandelier_stop_price"]
     chandelier_stop_triggered = bool(latest_close <= chandelier_stop_price)
+    chandelier_stop_ratchet_price = stops.get("chandelier_stop_ratchet_price", 0.0)
+    chandelier_stop_ratchet_triggered = bool(
+        chandelier_stop_ratchet_price > 0 and latest_close <= chandelier_stop_ratchet_price
+    )
 
     hard_distance_pct = (
         round((latest_close / hard_stop_price - 1) * 100, 2) if hard_stop_price > 0 else 0.0
@@ -120,6 +124,11 @@ def compute_manual_trade(
     chandelier_distance_pct = (
         round((latest_close / chandelier_stop_price - 1) * 100, 2)
         if chandelier_stop_price > 0
+        else 0.0
+    )
+    chandelier_ratchet_distance_pct = (
+        round((latest_close / chandelier_stop_ratchet_price - 1) * 100, 2)
+        if chandelier_stop_ratchet_price > 0
         else 0.0
     )
 
@@ -139,8 +148,10 @@ def compute_manual_trade(
             "hard_stop_triggered": hard_stop_triggered,
             "hard_stop_trigger_date": hard_stop_trigger_date,
             "chandelier_stop_triggered": chandelier_stop_triggered,
+            "chandelier_stop_ratchet_triggered": chandelier_stop_ratchet_triggered,
             "hard_stop_distance_pct": hard_distance_pct,
             "chandelier_stop_distance_pct": chandelier_distance_pct,
+            "chandelier_stop_ratchet_distance_pct": chandelier_ratchet_distance_pct,
         },
         "holding": {
             "hold_days": len(daily_nav),

@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pandas as pd
 import pytest
 
@@ -43,6 +45,60 @@ def _buy_inputs(bars: pd.DataFrame, idx: int = -3) -> tuple[str, float]:
     return buy_date, buy_price
 
 
+def make_atr_expansion_bars() -> pd.DataFrame:
+    """25 个平静上涨日后接 5 个振幅剧增但不创新高的日子。
+
+    ATR 急剧扩张而最高价不变 —— 普通吊灯止损会被拉低，
+    棘轮版应保持历史最高候选值不变。
+    """
+    base = date(2025, 1, 6)  # Monday
+    records: list[dict] = []
+    price = 10.0
+    offset = 0
+    made = 0
+    while made < 30:
+        day = base + timedelta(days=offset)
+        offset += 1
+        if day.weekday() >= 5:
+            continue
+        made += 1
+        if made <= 25:
+            close = price * 1.01
+            high = close * 1.002
+            low = close * 0.998
+        else:
+            close = price * 0.95
+            high = price * 1.01  # 不创新高
+            low = price * 0.85
+        records.append(
+            {
+                "time": day.isoformat(),
+                "open": round(price, 4),
+                "high": round(float(high), 4),
+                "low": round(float(low), 4),
+                "close": round(float(close), 4),
+                "volume": 1_000_000,
+            }
+        )
+        price = close
+    return pd.DataFrame(records)
+
+
+def expected_ratchet(bars: pd.DataFrame, buy_date: str, atr_mul: float = 2.5) -> float:
+    """独立重算棘轮价：逐日 候选=截至当日最高价 − mul×当日ATR 的历史最大值。"""
+    atr_series = compute_live_series(bars, "atr")
+    atr_daily = atr_series.copy()
+    atr_daily.index = pd.DatetimeIndex(pd.to_datetime(atr_daily.index))
+    buy_ts = pd.Timestamp(buy_date)
+    since = bars[pd.to_datetime(bars["time"]) >= buy_ts]
+    dates = pd.DatetimeIndex(pd.to_datetime(since["time"]))
+    atr_aligned = atr_daily.reindex(dates).ffill()
+    running_high = pd.to_numeric(since["high"], errors="coerce").cummax()
+    candidates = running_high.to_numpy(dtype=float) - atr_mul * atr_aligned.to_numpy(dtype=float)
+    candidates = candidates[pd.notna(candidates)]
+    return round(float(candidates.max()), 4)
+
+
 class TestComputeStopLoss:
     def test_hard_stop_uses_buy_price_not_close(self, bull_db) -> None:
         db, bars = bull_db
@@ -74,6 +130,33 @@ class TestComputeStopLoss:
         assert out["chandelier_stop_price"] == pytest.approx(expected)
         assert out["chandelier_stop_atr_mul"] == 2.5
         assert out["highest_since_buy"] == pytest.approx(round(highest, 4))
+
+    def test_chandelier_stop_ratchet_matches_independent_recompute(self, bull_db) -> None:
+        """棘轮价 = 逐日候选值（截至当日最高价 − 2.5×当日ATR）的历史最大值，
+        且恒 ≥ 普通吊灯止损价。"""
+        db, bars = bull_db
+        buy_date, buy_price = _buy_inputs(bars)
+
+        out = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=db)
+
+        assert out["chandelier_stop_ratchet_price"] == pytest.approx(
+            expected_ratchet(bars, buy_date)
+        )
+        assert out["chandelier_stop_ratchet_price"] >= out["chandelier_stop_price"]
+
+    def test_chandelier_stop_ratchet_holds_when_atr_expands(self, test_db) -> None:
+        """ATR 急剧扩张而最高价不变：普通吊灯止损被拉低，棘轮版保持不动。"""
+        bars = make_atr_expansion_bars()
+        test_db.save_market_data("510300.SS", bars, price_mode="qfq")
+        buy_date, buy_price = _buy_inputs(bars, idx=4)
+
+        out = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=test_db)
+
+        assert out["chandelier_stop_ratchet_price"] == pytest.approx(
+            expected_ratchet(bars, buy_date)
+        )
+        # 判别性断言：两版本必须真的分叉（普通版被 ATR 扩张拉低）
+        assert out["chandelier_stop_ratchet_price"] > out["chandelier_stop_price"]
 
     def test_per_instrument_stop_atr_mul_override(self, bull_db) -> None:
         db, bars = bull_db

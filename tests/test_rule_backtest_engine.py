@@ -335,6 +335,59 @@ class RuleBacktestEngineTest(unittest.TestCase):
         self.assertEqual(101.0, sell["reference_price"])
         self.assertEqual(101.0, sell["exec_price"])
 
+    # 棘轮版吊灯止损的判别性场景（atr_period=1, atr_mul=1.0）：
+    #   Day0 买入 close=100，止损初始化为 101−TR(2)=99
+    #   Day1 新高 110、TR=10 → 候选 100，棘轮 max(99,100)=100（原版同为 100）
+    #   Day2 振幅剧增 TR=21 → 候选 111−21=90；原版下移到 90（不触发卖出），
+    #        棘轮保持 100，close=95 ≤ 100 → 以 100 卖出。
+    _RATCHET_BARS = dict(
+        closes=[100.0, 109.0, 95.0],
+        highs=[101.0, 110.0, 111.0],
+        lows=[99.0, 108.0, 90.0],
+    )
+
+    def _run_chandelier_variant(self, state_value_name: str) -> dict:
+        bars = make_bars(**self._RATCHET_BARS)
+        strategy = literal_entry_strategy(
+            {
+                "left": {"type": "price", "field": "close"},
+                "operator": "<=",
+                "right": {
+                    "type": "state_value",
+                    "name": state_value_name,
+                    "params": {"atr_period": 1, "atr_mul": 1.0},
+                },
+            }
+        )
+        return SingleSymbolAllInBacktestEngine().run(
+            RuleBacktestRequest(
+                strategy=strategy,
+                symbol="TEST",
+                bars=bars,
+                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+            )
+        )
+
+    def test_chandelier_stop_ratchet_never_moves_down(self) -> None:
+        result = self._run_chandelier_variant("chandelier_stop_ratchet")
+
+        sell = result["trades"][1]
+        self.assertEqual("SELL", sell["side"])
+        self.assertEqual("chandelier_stop_ratchet", sell["reason"])
+        # 棘轮价保持 Day1 的 100，而非随 ATR 扩张下移到 90
+        self.assertEqual(100.0, sell["reference_price"])
+        self.assertEqual(100.0, sell["exec_price"])
+        self.assertEqual("stop_price", sell["reference_price_source"])
+
+    def test_chandelier_stop_plain_moves_down_and_does_not_sell(self) -> None:
+        """同一份行情下原版吊灯止损会随 ATR 扩张下移 —— 证明棘轮语义不同，
+        且原版行为未被新功能改变。"""
+        result = self._run_chandelier_variant("chandelier_stop")
+
+        # 原版 Day2 下移到 90，close=95 未跌破 → 只有买入一笔
+        self.assertEqual(1, len(result["trades"]))
+        self.assertEqual("BUY", result["trades"][0]["side"])
+
     def test_stock_sell_charges_stamp_tax_and_slippage(self) -> None:
         bars = make_bars([100.0, 90.0], highs=[101.0, 91.0], lows=[99.0, 89.0])
         strategy = literal_entry_strategy(

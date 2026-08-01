@@ -8,6 +8,7 @@
 - 硬止损 = 买入价 − ATR(20, 买入日) × hard_stop_atr_mul（默认 1.5，
   支持 per-instrument ``stop_atr_mul`` 覆盖）
 - 吊灯止损 = 买入以来最高价 − ATR(20, 最新) × chandelier_stop_atr_mul（默认 2.5）
+- 棘轮吊灯止损 = 同公式逐日候选值的历史最大值（只上移不下移）
 
 盘中实时叠加（``intraday=True`` 且处于交易时段 9:30-15:00，含午间休盘）：
 - 用实时报价合成当日K线，计入「买入以来最高价」「最新价」「止损触发判断」，
@@ -206,6 +207,22 @@ def compute_stop_loss(
     hard_stop_price = round(buy_price - hard_stop_mul * atr_at_buy, 4)
     chandelier_stop_price = round(highest_since_buy - chandelier_mul * current_atr, 4)
 
+    # 棘轮版吊灯止损：与原版同公式，但只上移不下移 —— 无状态逐日回放，
+    # 候选值 = 截至当日最高价 − mul × 当日 ATR，取买入以来历史最大值
+    # （等价于逐日 max(前一日棘轮价, 当日候选值)）。
+    # 盘中当日无完整K线 ATR，按本模块既有约定沿用最近历史 ATR（ffill）。
+    chandelier_stop_ratchet_price = chandelier_stop_price
+    if mask_since.any():
+        since_dates = pd.DatetimeIndex(df.loc[mask_since, "time"].dt.normalize())
+        atr_daily = atr_series.copy()
+        atr_daily.index = pd.DatetimeIndex(pd.to_datetime(atr_daily.index))
+        atr_aligned = atr_daily.reindex(since_dates).ffill()
+        running_high = highs[mask_since].cummax()
+        candidates = running_high.to_numpy(dtype=float) - chandelier_mul * atr_aligned.to_numpy(dtype=float)
+        candidates = candidates[pd.notna(candidates)]
+        if len(candidates):
+            chandelier_stop_ratchet_price = round(float(candidates.max()), 4)
+
     hard_stop_pct = round((hard_stop_price / buy_price - 1) * 100, 2)
     chandelier_pct = (
         round((chandelier_stop_price / highest_since_buy - 1) * 100, 2)
@@ -223,6 +240,7 @@ def compute_stop_loss(
         "chandelier_stop_price": chandelier_stop_price,
         "chandelier_stop_pct_from_high": chandelier_pct,
         "chandelier_stop_atr_mul": chandelier_mul,
+        "chandelier_stop_ratchet_price": chandelier_stop_ratchet_price,
         "atr_at_buy": round(atr_at_buy, 4),
         "current_atr": round(current_atr, 4),
         "highest_since_buy": round(highest_since_buy, 4),

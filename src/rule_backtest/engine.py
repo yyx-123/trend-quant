@@ -470,7 +470,7 @@ class SingleSymbolAllInBacktestEngine:
             "side": "SELL",
             "qty": int(qty),
             "reason": reason,
-            "reference_price_source": "stop_price" if reason in {"hard_stop", "chandelier_stop"} else "close",
+            "reference_price_source": "stop_price" if reason in {"hard_stop", "chandelier_stop", "chandelier_stop_ratchet"} else "close",
             "reference_price": float(reference_price),
             "slippage_rate": float(execution.slippage),
             "exec_price": float(exec_price),
@@ -504,7 +504,7 @@ class SingleSymbolAllInBacktestEngine:
                 value_trace = trace.get(key, {})
                 if not isinstance(value_trace, dict):
                     continue
-                if value_trace.get("type") == "state_value" and value_trace.get("name") in {"hard_stop", "chandelier_stop"}:
+                if value_trace.get("type") == "state_value" and value_trace.get("name") in {"hard_stop", "chandelier_stop", "chandelier_stop_ratchet"}:
                     name = str(value_trace.get("name"))
                     value = value_trace.get("value")
                     if value is not None and float(value) > 0:
@@ -513,6 +513,8 @@ class SingleSymbolAllInBacktestEngine:
             return "hard_stop", position.hard_stop
         if position.chandelier_stop > 0 and close_price <= position.chandelier_stop:
             return "chandelier_stop", position.chandelier_stop
+        if position.chandelier_stop_ratchet > 0 and close_price <= position.chandelier_stop_ratchet:
+            return "chandelier_stop_ratchet", position.chandelier_stop_ratchet
         return "exit_conditions_passed", close_price
 
     @staticmethod
@@ -546,6 +548,7 @@ class SingleSymbolAllInBacktestEngine:
             "hard_stop": float(position.hard_stop),
             "highest_high_since_entry": float(position.highest_high_since_entry),
             "chandelier_stop": float(position.chandelier_stop),
+            "chandelier_stop_ratchet": float(position.chandelier_stop_ratchet),
             "last_exit_bar_idx": position.last_exit_bar_idx,
         }
 

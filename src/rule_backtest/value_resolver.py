@@ -75,6 +75,8 @@ class ValueResolver:
             value = position.highest_high_since_entry if position.is_open else None
         elif name == "chandelier_stop":
             value = position.chandelier_stop if position.is_open else None
+        elif name == "chandelier_stop_ratchet":
+            value = position.chandelier_stop_ratchet if position.is_open else None
         elif name == "days_since_last_exit":
             # 离场冷却期：空仓也可解析（区别于上面四个持仓期状态值）。
             # 从未卖出 → None；condition_engine 对 `>=` 特判为通过

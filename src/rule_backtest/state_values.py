@@ -46,15 +46,21 @@ def update_position_state_for_day(
             spec = condition.get(side, {}) if isinstance(condition, dict) else {}
             if not isinstance(spec, dict) or spec.get("type") != "state_value":
                 continue
-            if spec.get("name") != "chandelier_stop":
+            name = spec.get("name")
+            if name not in ("chandelier_stop", "chandelier_stop_ratchet"):
                 continue
             params = spec.get("params", {}) if isinstance(spec.get("params", {}), dict) else {}
             atr_period = int(params.get("atr_period", 20))
             atr_mul = float(params.get("atr_mul", 2.5))
             atr_value, atr_trace = _atr_value(bars, atr_period, atr_at)
             if atr_value is not None and position.highest_high_since_entry > 0:
-                position.chandelier_stop = position.highest_high_since_entry - atr_mul * atr_value
-            trace["chandelier_stop"] = position.chandelier_stop
+                candidate = position.highest_high_since_entry - atr_mul * atr_value
+                if name == "chandelier_stop_ratchet":
+                    # 棘轮版：只上移不下移，与前一日止损价取 max。
+                    position.chandelier_stop_ratchet = max(position.chandelier_stop_ratchet, candidate)
+                else:
+                    position.chandelier_stop = candidate
+            trace[name] = getattr(position, name)
             trace["chandelier_atr"] = atr_trace
     return trace
 
@@ -89,12 +95,13 @@ def initialize_stop_state(
                 position.hard_stop = entry_price - atr_mul * position.atr_at_entry if atr_value is not None else 0.0
                 trace["hard_stop"] = position.hard_stop
                 trace["hard_stop_atr"] = atr_trace
-            elif name == "chandelier_stop":
+            elif name in ("chandelier_stop", "chandelier_stop_ratchet"):
                 atr_period = int(params.get("atr_period", 20))
                 atr_mul = float(params.get("atr_mul", 2.5))
                 atr_value, atr_trace = _atr_value(bars, atr_period, atr_at)
                 if atr_value is not None:
-                    position.chandelier_stop = position.highest_high_since_entry - atr_mul * atr_value
-                trace["chandelier_stop"] = position.chandelier_stop
+                    # 买入当日无前值可比，棘轮版与原版同为直接赋值。
+                    setattr(position, name, position.highest_high_since_entry - atr_mul * atr_value)
+                trace[name] = getattr(position, name)
                 trace["chandelier_atr"] = atr_trace
     return trace

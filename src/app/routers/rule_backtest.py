@@ -99,11 +99,13 @@ async def get_rule_backtest_meta() -> dict:
             "hard_stop",
             "highest_high_since_entry",
             "chandelier_stop",
+            "chandelier_stop_ratchet",
             "days_since_last_exit",
         ],
         "stop_defaults": {
             "hard_stop": {"atr_period": 20, "atr_mul": 1.5},
             "chandelier_stop": {"atr_period": 20, "atr_mul": 2.5},
+            "chandelier_stop_ratchet": {"atr_period": 20, "atr_mul": 2.5},
         },
     }
 

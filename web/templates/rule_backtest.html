@@ -630,7 +630,7 @@ function renderStateParams(detail) {
   const name = detail.querySelector(".value-state").value;
   const target = detail.querySelector(".state-params");
   const defaults = STOP_DEFAULTS[name] || {};
-  if (name === "hard_stop" || name === "chandelier_stop") {
+  if (name === "hard_stop" || name === "chandelier_stop" || name === "chandelier_stop_ratchet") {
     target.innerHTML = `
       <label>ATR <input data-param="atr_period" type="number" value="${defaults.atr_period ?? 20}" min="1" step="1"></label>
       <label>倍数 <input data-param="atr_mul" type="number" value="${defaults.atr_mul ?? 2.5}" step="0.1"></label>

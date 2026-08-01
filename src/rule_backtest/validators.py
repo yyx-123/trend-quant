@@ -13,6 +13,7 @@ SUPPORTED_STATE_VALUES = {
     "hard_stop",
     "highest_high_since_entry",
     "chandelier_stop",
+    "chandelier_stop_ratchet",
     "days_since_last_exit",
 }
 

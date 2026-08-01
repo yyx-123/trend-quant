@@ -252,6 +252,18 @@
   function renderStopStats(container, stops) {
     const hardTriggered = !!stops.hard_stop_triggered;
     const chandTriggered = !!stops.chandelier_stop_triggered;
+    const ratchetPrice = Number(stops.chandelier_stop_ratchet_price) || 0;
+    const ratchetTriggered = !!stops.chandelier_stop_ratchet_triggered;
+    const ratchetCard = ratchetPrice > 0 ?
+      '<div class="mt-stop-card mt-stop-chandelier">' +
+        '<div class="mt-stop-card-head">' +
+          '<span class="mt-stat-label">棘轮吊灯止损价</span>' +
+          stopPill(ratchetTriggered, '未跌破', '⚠ 已跌破') +
+        '</div>' +
+        '<span class="mt-stop-price">' + esc(fmtPrice(ratchetPrice)) + '</span>' +
+        '<span class="mt-stat-note">同吊灯公式但只上移不下移 · 现价距 ' +
+          esc(fmtPct(stops.chandelier_stop_ratchet_distance_pct)) + '</span>' +
+      '</div>' : '';
     container.innerHTML =
       '<div class="mt-stop-card mt-stop-hard">' +
         '<div class="mt-stop-card-head">' +
@@ -272,6 +284,7 @@
         '<span class="mt-stat-note">买入以来最高价 − ' + esc(stops.chandelier_stop_atr_mul) + '×ATR(最新) · 距最高价 ' +
           esc(fmtPct(stops.chandelier_stop_pct_from_high)) + '</span>' +
       '</div>' +
+      ratchetCard +
       '<div class="mt-stop-card mt-stop-dist">' +
         '<div class="mt-stop-card-head"><span class="mt-stat-label">现价距硬止损</span></div>' +
         '<span class="mt-stop-price ' + pctClass(stops.hard_stop_distance_pct) + '">' +

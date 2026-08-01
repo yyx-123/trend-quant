@@ -57,6 +57,9 @@ class PositionState:
     hard_stop: float = 0.0
     highest_high_since_entry: float = 0.0
     chandelier_stop: float = 0.0
+    # 棘轮版吊灯止损：与 chandelier_stop 同公式（买入以来最高价 − ATR×倍数），
+    # 但只上移不下移 —— 每日取 max(前一日棘轮止损价, 当日候选值)。
+    chandelier_stop_ratchet: float = 0.0
     # 上次卖出所在的 bar 下标（all_bars 坐标系），供 days_since_last_exit
     # 状态值做「离场冷却期」判断。与止损状态不同：它属于账户级历史，
     # 跨持仓周期存活，reset() 刻意不清除；None 表示本轮回测从未卖出。
@@ -75,4 +78,5 @@ class PositionState:
         self.hard_stop = 0.0
         self.highest_high_since_entry = 0.0
         self.chandelier_stop = 0.0
+        self.chandelier_stop_ratchet = 0.0
         # last_exit_bar_idx 不在此清除 —— 见字段注释。

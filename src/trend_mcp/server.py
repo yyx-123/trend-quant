@@ -296,6 +296,7 @@ def calc_stop_loss(symbol: str, buy_date: str, buy_price: float) -> dict:
 
     硬止损公式: 买入价 − 买入当日 ATR(20) × hard_stop_atr_mul (默认 1.5)
     吊灯止损公式: 买入以来最高价 − 最新 ATR(20) × chandelier_stop_atr_mul (默认 2.5)
+    棘轮吊灯止损: 同公式但只上移不下移（chandelier_stop_ratchet_price）
 
     交易时段（9:30-15:00，含午间休盘）内自动叠加实时报价合成的当日K线：
     最高价 / 最新价 / 止损触发判断均含今日盘中数据（is_intraday=True 标记）；
@@ -502,6 +503,8 @@ def open_positions(username: str, password: str) -> dict:
                 "hard_stop_triggered": stops.get("hard_stop_triggered"),
                 "chandelier_stop_price": stops.get("chandelier_stop_price"),
                 "chandelier_stop_triggered": stops.get("chandelier_stop_triggered"),
+                "chandelier_stop_ratchet_price": stops.get("chandelier_stop_ratchet_price"),
+                "chandelier_stop_ratchet_triggered": stops.get("chandelier_stop_ratchet_triggered"),
             }
         )
         total_value += float(t.get("position_value") or 0.0)
