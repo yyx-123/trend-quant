@@ -195,7 +195,7 @@
   }
 
   function fmtPrice(v) {
-    return Number(v).toFixed(4).replace(/0+$/, '').replace(/\.$/, '.0');
+    return Number(v).toFixed(2);
   }
 
   function fmtPct(v) {
@@ -206,14 +206,11 @@
   function fmtMoney(v) {
     const n = Number(v);
     const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
-    return sign + '¥' + Math.abs(n).toLocaleString('zh-CN', {
-      minimumFractionDigits: 2, maximumFractionDigits: 2,
-    });
+    return sign + '¥' + Math.abs(n).toFixed(2);
   }
 
   function fmtShares(v) {
-    const n = Number(v);
-    return Number.isInteger(n) ? n.toLocaleString('zh-CN') : String(n);
+    return String(Number(v));
   }
 
   function pctClass(v) {

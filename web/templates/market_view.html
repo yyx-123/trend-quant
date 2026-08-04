@@ -342,7 +342,7 @@
     setBacktestProgress(
       pct * 100,
       'running',
-      `${(pct * 100).toFixed(1)}%（已计算 ${cur.toLocaleString()}/${tot.toLocaleString()} 根K线）`,
+      `${(pct * 100).toFixed(1)}%（已计算 ${cur}/${tot} 根K线）`,
     );
   }
 
@@ -1503,7 +1503,7 @@
     const afterClose = intradayTs && !Number.isNaN(intradayTs.getTime()) && intradayTs.getHours() >= 15;
     const intradayLabel = afterClose ? '收盘估算' : '盘中实时';
     chartTitleEl.innerHTML = `${payload.display_label || payload.display_name || payload.symbol || ''} 日 K${payload.meta?.is_intraday ? ` <span class="intraday-badge"><span class="intraday-dot" style="animation:intraday-pulse 1.6s ease-in-out infinite"></span>${intradayLabel}</span>` : ''}`;
-    rangeMetaEl.textContent = `${payload.meta?.start || '-'} ~ ${payload.meta?.end || '-'} | ${Number(payload.meta?.rows || 0).toLocaleString()} 根${payload.meta?.is_intraday ? ` · 含${intradayLabel}数据` : ''}`;
+    rangeMetaEl.textContent = `${payload.meta?.start || '-'} ~ ${payload.meta?.end || '-'} | ${Number(payload.meta?.rows || 0)} 根${payload.meta?.is_intraday ? ` · 含${intradayLabel}数据` : ''}`;
     renderPrice(payload, zoom);
     renderTrend(payload, zoom);
     renderVolume(payload, zoom);

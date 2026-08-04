@@ -3853,6 +3853,7 @@ details > summary::marker {
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
+  text-align: center;
 }
 
 .mt-trade-table tbody td {
@@ -3862,10 +3863,8 @@ details > summary::marker {
   font-weight: 600;
 }
 
-/* 标的 / 标的代码两列左对齐，其余数值列右对齐 */
-.mt-trade-table th:first-child,
+/* 标的 / 标的代码两列内容左对齐，其余数值列右对齐；表头统一居中 */
 .mt-trade-table td:first-child,
-.mt-trade-table th:nth-child(2),
 .mt-trade-table td:nth-child(2) {
   text-align: left;
 }

@@ -215,7 +215,7 @@
     if (s.sizer_type === "fixed_pct") {
       parts.push("买入比例 " + fmtPct(params.pct));
     } else if (s.sizer_type === "risk_budget") {
-      parts.push(params.mode === "equity_pct" ? "预算 权益的" + fmtPct(params.value) : "预算 " + Number(params.value).toLocaleString() + " 元");
+      parts.push(params.mode === "equity_pct" ? "预算 权益的" + fmtPct(params.value) : "预算 " + Number(params.value) + " 元");
       parts.push("ATR(" + params.atr_period + ")×" + params.atr_mul);
     } else if (s.sizer_type === "kelly") {
       parts.push("近 " + params.lookback + " 笔");

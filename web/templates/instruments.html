@@ -573,7 +573,7 @@
           title="${esc(`${section.l1} - ${section.l2}`)}"
         >
           <span>${esc(section.l2)}</span>
-          <em>${Number(section.count || 0).toLocaleString()}</em>
+          <em>${Number(section.count || 0)}</em>
         </button>
       `);
     }
@@ -706,7 +706,7 @@
     const upToDate = Number(summary?.up_to_date || 0);
     const noData = Number(summary?.no_data || 0);
     const addedRows = Number(summary?.added_rows || 0);
-    return `共 ${total} 个标的，已最新 ${upToDate} 个，未获取到数据 ${noData} 个，失败 ${failed} 个，新增 ${addedRows.toLocaleString()} 行。`;
+    return `共 ${total} 个标的，已最新 ${upToDate} 个，未获取到数据 ${noData} 个，失败 ${failed} 个，新增 ${addedRows} 行。`;
   }
 
   function dismissedCompletionJobId() {
@@ -748,7 +748,7 @@
     const summary = job.summary || {};
     const text = job.status === 'failed'
       ? `新增标的任务失败：${job.error || '请查看日志。'}`
-      : `新增标的完成：${summary.symbol || ''} ${summary.name || ''}，新增 ${Number(summary.added_rows || 0).toLocaleString()} 行。`;
+      : `新增标的完成：${summary.symbol || ''} ${summary.name || ''}，新增 ${Number(summary.added_rows || 0)} 行。`;
     completionTextEl.textContent = text;
     completionNoticeEl.hidden = false;
   }

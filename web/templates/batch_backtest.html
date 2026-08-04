@@ -753,7 +753,7 @@
         formatter: function (p) {
           var d = p.data;
           return esc(d[2]) + ' ' + esc(d[3] || '') + '<br>x: ' +
-            (Math.abs(d[0]) < 10 ? d[0].toFixed(3) : d[0].toLocaleString()) +
+            (Math.abs(d[0]) < 10 ? d[0].toFixed(3) : d[0]) +
             '<br>y: ' + (d[1] * 100).toFixed(1) + '%';
         }
       },
