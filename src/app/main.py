@@ -39,8 +39,24 @@ setup_logging(settings.logging.level)
 logger = get_logger(__name__)
 
 
+def _background_tasks_disabled() -> bool:
+    return str(os.getenv("TREND_QUANT_DISABLE_SCHEDULER", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """应用生命周期。
+
+    注意：本模块及 routers/services 必须在任何测试补丁生效前完成顶层导入
+    （见 tests/api/conftest.py）——服务模块顶层 `from data.storage.db import
+    get_db` 的值绑定会固化导入瞬间的对象，若首次导入发生在 monkeypatch
+    窗口内，会把某个测试的临时 lambda 永久绑进服务命名空间。
+    """
     Path("data").mkdir(exist_ok=True)
     db = db_module.init_db()
 
@@ -76,7 +92,11 @@ async def lifespan(app: FastAPI):
         # never leaves a stale warmed payload behind.
         _warm_dashboard()
 
-    threading.Thread(target=_rebuild_check, daemon=True).start()
+    # 测试环境（TREND_QUANT_DISABLE_SCHEDULER=1）不启动该线程：它是 daemon
+    # 线程且不被 shutdown 回收，会逃出单测的 DB 补丁窗口，污染后续测试的
+    # 临时库，甚至在补丁撤销后触达默认路径的生产库。
+    if not _background_tasks_disabled():
+        threading.Thread(target=_rebuild_check, daemon=True).start()
 
     scheduler_manager = SchedulerManager(settings=settings)
 
@@ -116,12 +136,7 @@ async def lifespan(app: FastAPI):
         # next user request does not pay the cold-rebuild cost.
         threading.Thread(target=_warm_dashboard, daemon=True).start()
 
-    disable_scheduler = str(os.getenv("TREND_QUANT_DISABLE_SCHEDULER", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    disable_scheduler = _background_tasks_disabled()
     if disable_scheduler:
         logger.warning("Scheduler disabled by TREND_QUANT_DISABLE_SCHEDULER")
     else:

@@ -40,9 +40,14 @@ class Database:
         finally:
             conn.close()
 
-    def backup_to(self, backup_dir: str | Path = "data/backups", keep: int = 3) -> Path:
-        """Online backup via VACUUM INTO (WAL-safe), keeping the newest ``keep`` files."""
-        target_dir = Path(backup_dir)
+    def backup_to(self, backup_dir: str | Path | None = None, keep: int = 3) -> Path:
+        """Online backup via VACUUM INTO (WAL-safe), keeping the newest ``keep`` files.
+
+        默认备份目录是 **DB 文件所在目录下的 backups/**（生产库 → data/backups，
+        行为不变），而不是 CWD 相对的固定路径——否则从项目根目录跑的测试会把
+        临时库的快照写进生产备份目录，并触发 keep 修剪挤掉真实备份。
+        """
+        target_dir = Path(backup_dir) if backup_dir is not None else self.db_path.parent / "backups"
         target_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         dest = target_dir / f"trend_quant-{stamp}.db"
