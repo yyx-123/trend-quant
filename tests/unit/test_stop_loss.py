@@ -170,6 +170,51 @@ class TestComputeStopLoss:
         assert out["hard_stop_atr_mul"] == 2.0
         assert out["hard_stop_price"] == pytest.approx(round(buy_price - 2.0 * atr_at_buy, 4))
 
+    def test_chandelier_first_trigger_none_in_uptrend(self, bull_db) -> None:
+        """持续上涨：收盘价从未跌破当日口径吊灯止损，历史触发字段为空。"""
+        db, bars = bull_db
+        buy_date, buy_price = _buy_inputs(bars)
+
+        out = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=db)
+
+        assert out["chandelier_first_trigger_date"] is None
+        assert out["chandelier_first_trigger_close"] is None
+        assert out["chandelier_first_trigger_stop"] is None
+
+    def test_chandelier_first_trigger_matches_independent_recompute(self, test_db) -> None:
+        """持续阴跌：历史首次跌破日与独立逐日重算（收盘 ≤ 当日最高价−2.5×当日ATR）一致。"""
+        from conftest import make_bear_bars
+
+        bars = make_bear_bars(40)
+        test_db.save_market_data("510500.SS", bars, price_mode="qfq")
+        buy_date = str(bars.iloc[0]["time"])[:10]
+        buy_price = float(bars.iloc[0]["close"])
+
+        out = sl.compute_stop_loss("510500.SS", buy_date, buy_price, db=test_db)
+
+        date = out["chandelier_first_trigger_date"]
+        assert date is not None
+        # 明细与当日K线一致，且收盘价确实 ≤ 当日口径吊灯止损价
+        day = bars[pd.to_datetime(bars["time"]).dt.date.astype(str) == date].iloc[0]
+        assert out["chandelier_first_trigger_close"] == pytest.approx(round(float(day["close"]), 4))
+        assert out["chandelier_first_trigger_close"] <= out["chandelier_first_trigger_stop"]
+
+        # 独立重算首次触发日
+        atr_daily = compute_live_series(bars, "atr")
+        atr_daily.index = pd.DatetimeIndex(pd.to_datetime(atr_daily.index))
+        since = bars[pd.to_datetime(bars["time"]) >= pd.Timestamp(buy_date)]
+        dates = pd.DatetimeIndex(pd.to_datetime(since["time"]))
+        atr_aligned = atr_daily.reindex(dates).ffill()
+        running_high = pd.to_numeric(since["high"], errors="coerce").cummax()
+        daily_ch = running_high.to_numpy(dtype=float) - 2.5 * atr_aligned.to_numpy(dtype=float)
+        closes = pd.to_numeric(since["close"], errors="coerce").to_numpy(dtype=float)
+        below = closes <= daily_ch
+        assert below.any()
+        assert date == str(dates[int(below.argmax())].date())
+        assert out["chandelier_first_trigger_stop"] == pytest.approx(
+            round(float(daily_ch[int(below.argmax())]), 4)
+        )
+
     def test_non_trading_day_buy_date_uses_lookback_atr(self, bull_db) -> None:
         db, bars = bull_db
         # 取一个交易日，顺延到周日（非交易日）买入
@@ -224,6 +269,59 @@ class TestComputeStopLoss:
         for price in (float(row["low"]), float(row["high"])):
             out = sl.compute_stop_loss("510300.SS", buy_date, round(price, 4), db=db)
             assert out["buy_price"] == pytest.approx(round(price, 4))
+
+
+class TestStopMode:
+    """止损松紧档位：tight 紧止损固定 1×ATR / 2×ATR，默认 loose 沿用既有口径。"""
+
+    def test_default_is_loose(self, bull_db) -> None:
+        db, bars = bull_db
+        buy_date, buy_price = _buy_inputs(bars)
+
+        out = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=db)
+
+        assert out["stop_mode"] == "loose"
+        assert out["hard_stop_atr_mul"] == 1.5
+        assert out["chandelier_stop_atr_mul"] == 2.5
+
+    def test_tight_mode_multipliers(self, bull_db) -> None:
+        db, bars = bull_db
+        buy_date, buy_price = _buy_inputs(bars)
+
+        out = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=db, stop_mode="tight")
+
+        atr_series = compute_live_series(bars, "atr")
+        atr_at_buy = float(atr_series[atr_series.index <= pd.Timestamp(buy_date)].iloc[-1])
+        current_atr = float(atr_series.iloc[-1])
+        highest = float(bars[pd.to_datetime(bars["time"]) >= pd.Timestamp(buy_date)]["high"].max())
+        assert out["stop_mode"] == "tight"
+        assert out["hard_stop_atr_mul"] == 1.0
+        assert out["chandelier_stop_atr_mul"] == 2.0
+        assert out["hard_stop_price"] == pytest.approx(round(buy_price - 1.0 * atr_at_buy, 4))
+        assert out["chandelier_stop_price"] == pytest.approx(round(highest - 2.0 * current_atr, 4))
+
+    def test_tight_mode_ignores_per_instrument_override(self, bull_db) -> None:
+        """紧止损为固定 1×ATR，标的级 stop_atr_mul 覆盖只在松止损下生效。"""
+        db, bars = bull_db
+        db.save_instrument_metadata([{"symbol": "510300.SS", "name": "沪深300ETF", "stop_atr_mul": 2.0}])
+        buy_date, buy_price = _buy_inputs(bars)
+
+        loose = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=db)
+        tight = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=db, stop_mode="tight")
+
+        assert loose["hard_stop_atr_mul"] == 2.0
+        assert tight["hard_stop_atr_mul"] == 1.0
+
+    def test_tight_stop_is_higher_than_loose(self, bull_db) -> None:
+        """紧止损的两个止损价都应高于松止损（更贴近现价、更易触发）。"""
+        db, bars = bull_db
+        buy_date, buy_price = _buy_inputs(bars)
+
+        loose = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=db)
+        tight = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=db, stop_mode="tight")
+
+        assert tight["hard_stop_price"] > loose["hard_stop_price"]
+        assert tight["chandelier_stop_price"] > loose["chandelier_stop_price"]
 
 
 class TestComputeStopLossIntraday:

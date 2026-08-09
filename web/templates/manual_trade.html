@@ -45,17 +45,48 @@
     <div id="mtLoginMessage" class="instrument-form-message" hidden></div>
   </div>
 
-  <!-- ③ 交易记录区：登录后可见 -->
+  <!-- ③ 持仓记录区：登录后可见 -->
   <div class="viz-panel" id="mtRecordsPanel" hidden>
     <div class="mt-records-head">
-      <h3>交易记录</h3>
+      <h3>持仓记录</h3>
+      <div class="mt-seg" id="mtTimeFilter" role="group" aria-label="时间筛选"
+        title="按买入日期的自然日筛选：过去一周=7 天前至今，过去一月=上月同日至今，今年来=1 月 1 日至今">
+        <span class="mt-seg-label">时间</span>
+        <button type="button" data-range="all" class="is-active">全部</button>
+        <button type="button" data-range="week">过去一周</button>
+        <button type="button" data-range="month">过去一月</button>
+        <button type="button" data-range="ytd">今年来</button>
+      </div>
       <div class="mt-records-controls">
+        <div class="mt-seg" id="mtStopModeToggle" role="group" aria-label="止损松紧"
+          title="紧止损：硬止损 1×ATR、吊灯止损 2×ATR；松止损：硬止损 1.5×ATR、吊灯止损 2.5×ATR。切换后持仓记录与试算同步生效">
+          <span class="mt-seg-label">止损</span>
+          <button type="button" data-mode="tight" class="is-active">紧止损</button>
+          <button type="button" data-mode="loose">松止损</button>
+        </div>
         <button id="mtOpenEnterBtn" type="button" class="mt-btn-sm">+ 录入</button>
         <button id="mtRefreshBtn" type="button" class="mt-btn-sm">刷新</button>
       </div>
     </div>
     <div class="mt-trade-list" id="mtTradeList"></div>
-    <div id="mtTradeEmpty" class="manual-trade-note" hidden>暂无交易记录，点击右上角「录入」添加第一笔。</div>
+    <div id="mtTradeEmpty" class="manual-trade-note" hidden>暂无持仓记录，点击右上角「录入」添加第一笔。</div>
+  </div>
+
+  <!-- ④ 清仓交易区：登录后可见，展示已清仓交易的完整结果 -->
+  <div class="viz-panel" id="mtClosedPanel" hidden>
+    <div class="mt-records-head">
+      <h3>清仓交易</h3>
+      <div class="mt-seg" id="mtClosedTimeFilter" role="group" aria-label="时间筛选"
+        title="按清仓日期（卖出日期）的自然日筛选：过去一周=7 天前至今，过去一月=上月同日至今，今年来=1 月 1 日至今">
+        <span class="mt-seg-label">时间</span>
+        <button type="button" data-range="all" class="is-active">全部</button>
+        <button type="button" data-range="week">过去一周</button>
+        <button type="button" data-range="month">过去一月</button>
+        <button type="button" data-range="ytd">今年来</button>
+      </div>
+    </div>
+    <div class="mt-trade-list" id="mtClosedList"></div>
+    <div id="mtClosedEmpty" class="manual-trade-note" hidden>暂无清仓交易。</div>
   </div>
 
   <!-- 录入弹窗 -->
@@ -129,6 +160,12 @@
   const refreshBtn = document.getElementById('mtRefreshBtn');
   const tradeListEl = document.getElementById('mtTradeList');
   const tradeEmptyEl = document.getElementById('mtTradeEmpty');
+  const stopModeToggleEl = document.getElementById('mtStopModeToggle');
+  const timeFilterEl = document.getElementById('mtTimeFilter');
+  const closedPanelEl = document.getElementById('mtClosedPanel');
+  const closedListEl = document.getElementById('mtClosedList');
+  const closedEmptyEl = document.getElementById('mtClosedEmpty');
+  const closedTimeFilterEl = document.getElementById('mtClosedTimeFilter');
 
   const enterModalEl = document.getElementById('mtEnterModal');
   const enterSymbolEl = document.getElementById('mtEnterSymbol');
@@ -161,7 +198,16 @@
   let enterRange = null;       // 录入弹窗：当日价格区间缓存
   let enterRangeSeq = 0;
   // 表格排序：dir 0=原始顺序，-1=降序，1=升序；点击同一列循环 降序→升序→原始
+  // 持仓表与清仓表各自维护一份排序状态
   let sortState = {key: null, dir: 0};
+  let closedSortState = {key: null, dir: 0};
+  // 止损松紧档位：tight 紧止损（硬 1×ATR / 吊灯 2×ATR），loose 松止损（1.5×/2.5×ATR）
+  // 默认紧止损，试算与交易记录共用
+  let stopMode = 'tight';
+  // 时间筛选：all 全部 / week 过去一周 / month 过去一月 / ytd 今年来，默认全部
+  // 持仓记录按买入日期、清仓交易按清仓日期（卖出日期），两个面板各自独立筛选
+  let timeFilter = 'all';
+  let closedTimeFilter = 'all';
 
   // ── 工具 ────────────────────────────────────────────────
   function esc(text) {
@@ -221,6 +267,39 @@
     return new Date().toISOString().slice(0, 10);
   }
 
+  // 本地日期 → 'YYYY-MM-DD'（不用 toISOString，避免时区把今天变成昨天）
+  function localIso(d) {
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + mm + '-' + dd;
+  }
+
+  // 时间筛选起点（含）：week=7 天前，month=上月同日，ytd=今年 1 月 1 日，all=null 不过滤
+  // 纯自然日口径，不考虑交易日数量与当月天数
+  function timeFilterStart(kind) {
+    const now = new Date();
+    if (kind === 'week') {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 7);
+      return localIso(d);
+    }
+    if (kind === 'month') {
+      const d = new Date(now);
+      d.setMonth(d.getMonth() - 1);
+      return localIso(d);
+    }
+    if (kind === 'ytd') {
+      return now.getFullYear() + '-01-01';
+    }
+    return null;
+  }
+
+  // ISO 日期字符串字典序即时间序
+  function passTimeFilter(dateStr, kind) {
+    const start = timeFilterStart(kind);
+    return !start || (!!dateStr && dateStr >= start);
+  }
+
   function renderStats(container, stats) {
     container.innerHTML = stats.map(function(stat) {
       const cls = ['mt-stat'];
@@ -266,7 +345,12 @@
         '<span class="mt-stop-price">' + esc(fmtPrice(stops.hard_stop_price)) + '</span>' +
         '<span class="mt-stat-note">买入价 − ' + esc(stops.hard_stop_atr_mul) + '×ATR(买入日) · 距买入价 ' +
           esc(fmtPct(stops.hard_stop_pct)) +
-          (hardTriggered ? ' · 于 ' + esc(stops.hard_stop_trigger_date) + ' 被击穿' : '') + '</span>' +
+          (hardTriggered ? ' · 于 ' + esc(stops.hard_stop_trigger_date) + ' 被击穿' +
+            (stops.hard_stop_trigger_low != null
+              ? '（当日最低 ' + esc(fmtPrice(stops.hard_stop_trigger_low)) +
+                (stops.hard_stop_trigger_close != null ? '、收盘 ' + esc(fmtPrice(stops.hard_stop_trigger_close)) : '') + '）'
+              : '')
+            : '') + '</span>' +
       '</div>' +
       '<div class="mt-stop-card mt-stop-chandelier">' +
         '<div class="mt-stop-card-head">' +
@@ -420,7 +504,8 @@
     evaluateBtn.disabled = true;
     showMessage('计算中…', false);
     try {
-      const data = await postJson('/manual-trade/api/evaluate', form);
+      const data = await postJson('/manual-trade/api/evaluate',
+        Object.assign({}, form, {stop_mode: stopMode}));
       renderResult(data);
       showMessage('', false);
     } catch (err) {
@@ -452,6 +537,7 @@
   function onLogin() {
     loginFormEl.hidden = true;
     recordsPanelEl.hidden = false;
+    closedPanelEl.hidden = false;
     showLoginMessage('已登录：' + auth.username + (auth.is_admin ? '（admin）' : ''), false);
     loadTrades();
   }
@@ -460,10 +546,13 @@
     auth = null;
     currentTrades = [];
     sortState = {key: null, dir: 0};
+    closedSortState = {key: null, dir: 0};
     passwordEl.value = '';
     loginFormEl.hidden = false;
     recordsPanelEl.hidden = true;
+    closedPanelEl.hidden = true;
     tradeListEl.innerHTML = '';
+    closedListEl.innerHTML = '';
     closeModalEl.hidden = true;
     enterModalEl.hidden = true;
   }
@@ -489,10 +578,11 @@
     if (!auth) return;
     refreshBtn.disabled = true;
     try {
-      const body = {username: auth.username, password: auth.password};
+      const body = {username: auth.username, password: auth.password, stop_mode: stopMode};
       const data = await postJson('/manual-trade/api/trades/list', body);
       currentTrades = data.trades || [];
       renderTradeList();
+      renderClosedList();
     } catch (err) {
       if (err.message && err.message.indexOf('用户名或密码') >= 0) {
         onLogout();
@@ -509,27 +599,31 @@
   const TRADE_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '买价', '现价', '份数', '持仓金额',
     '盈亏', '最大浮盈', '最大回撤', '硬止损价', '吊灯止损价', '持有天数', '操作'];
 
+  // 清仓交易表：体现一笔完整交易的结果（收益金额与收益率分列），不展示现价/持仓金额/止损价/操作
+  const CLOSED_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '卖出日期', '买价', '卖价', '份数',
+    '买入金额', '收益', '收益率', '最大浮盈', '最大回撤', '持有天数'];
+
   function numOrNull(v) {
     const n = Number(v);
     return isFinite(n) ? n : null;
   }
 
-  // 可排序列 → 排序键取值；与单元格展示口径一致（已清仓现价取卖出价、盈亏取已实现盈亏），
-  // 无法取值的行（计算失败/已清仓的持仓金额）恒排在最后。盈亏按绝对金额而非百分比比较。
+  // 可排序列 → 排序键取值；与单元格展示口径一致，
+  // 无法取值的行（计算失败）恒排在最后。盈亏按绝对金额而非百分比比较。
   const SORTABLE_COLUMNS = {
     '买入日期': function(t) { return t.buy_date || null; },  // ISO 日期字符串，字典序即时间序，越新越大
     '买价': function(t) { return numOrNull(t.buy_price); },
     '现价': function(t) {
       if (t.error) return null;
-      return numOrNull(t.status === 'closed' ? t.sell_price : t.latest_price);
+      return numOrNull(t.latest_price);
     },
     '持仓金额': function(t) {
-      if (t.error || t.status === 'closed') return null;
+      if (t.error) return null;
       return numOrNull(t.position_value);
     },
     '盈亏': function(t) {
       if (t.error) return null;
-      return numOrNull(t.status === 'closed' ? t.realized_pnl : t.pnl_amount);
+      return numOrNull(t.pnl_amount);
     },
     '持有天数': function(t) {
       if (t.error) return null;
@@ -537,21 +631,44 @@
     },
   };
 
-  function tradeHeaderHtml(h) {
-    if (!SORTABLE_COLUMNS.hasOwnProperty(h)) return '<th>' + esc(h) + '</th>';
-    const active = sortState.key === h && sortState.dir !== 0;
-    const arrow = active ? (sortState.dir === -1 ? '⬇️' : '⬆️') : '';
+  const CLOSED_SORTABLE_COLUMNS = {
+    '买入日期': function(t) { return t.buy_date || null; },
+    '卖出日期': function(t) { return t.sell_date || null; },
+    '买价': function(t) { return numOrNull(t.buy_price); },
+    '卖价': function(t) { return numOrNull(t.sell_price); },
+    '买入金额': function(t) {
+      if (t.error) return null;
+      return numOrNull(Number(t.buy_price) * Number(t.shares));
+    },
+    '收益': function(t) {
+      if (t.error) return null;
+      return numOrNull(t.realized_pnl);
+    },
+    '收益率': function(t) {
+      if (t.error) return null;
+      return numOrNull(t.realized_pnl_pct);
+    },
+    '持有天数': function(t) {
+      if (t.error) return null;
+      return numOrNull((t.holding || {}).hold_days);
+    },
+  };
+
+  function tradeHeaderHtml(h, state, columns) {
+    if (!columns.hasOwnProperty(h)) return '<th>' + esc(h) + '</th>';
+    const active = state.key === h && state.dir !== 0;
+    const arrow = active ? (state.dir === -1 ? '⬇️' : '⬆️') : '';
     return '<th class="mt-th-sortable' + (active ? ' is-sorted' : '') + '" data-sort-key="' + esc(h) +
       '" title="点击排序：降序 → 升序 → 原始顺序">' + esc(h) +
       '<span class="mt-sort-arrow">' + arrow + '</span></th>';
   }
 
-  // 按 sortState 排序；值相同或均缺失时保持原始相对顺序（稳定），缺失值恒排最后
-  function sortedTrades() {
-    if (!sortState.key || sortState.dir === 0) return currentTrades;
-    const getter = SORTABLE_COLUMNS[sortState.key];
-    if (!getter) return currentTrades;
-    return currentTrades.map(function(t, i) {
+  // 按排序状态排序；值相同或均缺失时保持原始相对顺序（稳定），缺失值恒排最后
+  function sortedWith(trades, state, columns) {
+    if (!state.key || state.dir === 0) return trades;
+    const getter = columns[state.key];
+    if (!getter) return trades;
+    return trades.map(function(t, i) {
       return {t: t, i: i, v: getter(t)};
     }).sort(function(a, b) {
       if (a.v == null && b.v == null) return a.i - b.i;
@@ -561,45 +678,106 @@
       if (typeof a.v === 'string') cmp = a.v < b.v ? -1 : (a.v > b.v ? 1 : 0);
       else cmp = a.v - b.v;
       if (cmp === 0) return a.i - b.i;
-      return sortState.dir === -1 ? -cmp : cmp;
+      return state.dir === -1 ? -cmp : cmp;
     }).map(function(x) { return x.t; });
   }
 
-  function toggleSort(key) {
-    if (sortState.key !== key) {
-      sortState = {key: key, dir: -1};   // 首次点击：降序
-    } else if (sortState.dir === -1) {
-      sortState.dir = 1;                 // 再次点击：升序
-    } else {
-      sortState = {key: null, dir: 0};   // 第三次点击：回归原始排列
-    }
-    renderTradeList();
+  // 点击同一列循环：降序 → 升序 → 原始顺序
+  function cycleSortState(state, key) {
+    if (state.key !== key) return {key: key, dir: -1};
+    if (state.dir === -1) return {key: key, dir: 1};
+    return {key: null, dir: 0};
   }
 
-  // 止损价单元格：329.0577（+20.35%）；两个止损价中较高者更紧、会先触发，价格加下划线提示以其为准
-  function stopCellHtml(price, distPct, dominant) {
+  // 止损价单元格：329.06（+20.35%）；两个止损价中较高者更紧、会先触发，价格加下划线提示以其为准。
+  // 悬停展示该价格的计算过程（数据来自当前松紧口径的后端响应，切换后自动更新）。
+  function stopCellHtml(price, distPct, dominant, tip) {
     if (price == null || !isFinite(Number(price))) return '—';
     const pctHtml = '<span class="' + pctClass(distPct) + '">' + esc(fmtPct(distPct)) + '</span>';
     const priceHtml = dominant
       ? '<span class="mt-stop-dominant">' + esc(fmtPrice(price)) + '</span>'
       : esc(fmtPrice(price));
-    return priceHtml + '（' + pctHtml + '）';
+    return '<span class="mt-stop-cell"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' +
+      priceHtml + '（' + pctHtml + '）</span>';
+  }
+
+  function stopModeLabel(stops) {
+    return stops.stop_mode === 'tight' ? '紧止损' : '松止损';
+  }
+
+  // 硬止损价 = 买入价 − mul×ATR(买入日)
+  function hardStopTip(t, stops) {
+    if (stops.atr_at_buy == null) return '';
+    return '硬止损价（' + stopModeLabel(stops) + '口径）= 买入价 ' + fmtPrice(t.buy_price) +
+      ' − ' + stops.hard_stop_atr_mul + ' × ATR(买入日) ' + fmtPrice(stops.atr_at_buy) +
+      ' = ' + fmtPrice(stops.hard_stop_price);
+  }
+
+  // 吊灯止损价 = 买入以来最高价 − mul×ATR(最新)
+  function chandelierStopTip(t, stops) {
+    if (stops.highest_since_buy == null || stops.current_atr == null) return '';
+    return '吊灯止损价（' + stopModeLabel(stops) + '口径）= 买入以来最高价 ' +
+      fmtPrice(stops.highest_since_buy) + ' − ' + stops.chandelier_stop_atr_mul +
+      ' × ATR(最新) ' + fmtPrice(stops.current_atr) +
+      ' = ' + fmtPrice(stops.chandelier_stop_price);
   }
 
   function holdDaysCell(holding) {
     return holding.hold_days != null ? esc(String(holding.hold_days)) : '—';
   }
 
+  // 止损徽章：区分"已击穿"（现价仍在止损价下方，红色）与"曾击穿"（历史触发过但已收复，琥珀色）。
+  // 悬停提示展示首次击穿当日的价格明细（后端随 stops 下发）。
+  function stopBadge(text, level, tip) {
+    return '<span class="mt-badge ' + (level === 'danger' ? 'mt-badge-danger' : 'mt-badge-warn') + '"' +
+      (tip ? ' title="' + esc(tip) + '"' : '') + '>' + esc(text) + '</span>';
+  }
+
+  function hardTriggerTip(stops) {
+    if (!stops.hard_stop_trigger_date) return '';
+    let tip = '最早于 ' + stops.hard_stop_trigger_date + ' 击穿硬止损';
+    if (stops.hard_stop_trigger_low != null) {
+      tip += '：当日最低 ' + fmtPrice(stops.hard_stop_trigger_low) +
+        (stops.hard_stop_trigger_close != null ? '、收盘 ' + fmtPrice(stops.hard_stop_trigger_close) : '') +
+        '，硬止损价 ' + fmtPrice(stops.hard_stop_price);
+    }
+    return tip;
+  }
+
+  function chandelierTriggerTip(stops) {
+    if (!stops.chandelier_first_trigger_date) return '';
+    let tip = '最早于 ' + stops.chandelier_first_trigger_date + ' 跌破吊灯止损';
+    if (stops.chandelier_first_trigger_close != null) {
+      tip += '：当日收盘 ' + fmtPrice(stops.chandelier_first_trigger_close) +
+        '，吊灯止损价(当日口径) ' + fmtPrice(stops.chandelier_first_trigger_stop);
+    }
+    return tip;
+  }
+
+  function stopBadges(t) {
+    const stops = t.stops;
+    if (!stops) return [];
+    const badges = [];
+    const latest = Number(stops.latest_price);
+    const hardPrice = Number(stops.hard_stop_price);
+    if (isFinite(latest) && isFinite(hardPrice) && latest <= hardPrice) {
+      badges.push(stopBadge('⚠ 硬止损已击穿', 'danger', hardTriggerTip(stops)));
+    } else if (stops.hard_stop_triggered) {
+      badges.push(stopBadge('⚠ 硬止损曾击穿', 'warn', hardTriggerTip(stops)));
+    }
+    if (stops.chandelier_stop_triggered) {
+      badges.push(stopBadge('⚠ 吊灯已跌破', 'danger', chandelierTriggerTip(stops)));
+    } else if (stops.chandelier_first_trigger_date) {
+      badges.push(stopBadge('⚠ 吊灯曾跌破', 'warn', chandelierTriggerTip(stops)));
+    }
+    return badges;
+  }
+
   function renderTradeRow(t) {
-    const closed = t.status === 'closed';
     const holding = t.holding || {};
     const badges = [];
-    if (closed) badges.push('<span class="mt-badge">已清仓</span>');
     if (t.is_intraday) badges.push('<span class="mt-badge mt-badge-live">实时</span>');
-    if (!closed && t.stops) {
-      if (t.stops.hard_stop_triggered) badges.push('<span class="mt-badge mt-badge-danger">⚠ 硬止损击穿</span>');
-      if (t.stops.chandelier_stop_triggered) badges.push('<span class="mt-badge mt-badge-danger">⚠ 吊灯跌破</span>');
-    }
+    badges.push.apply(badges, stopBadges(t));
 
     let cells =
       '<td class="mt-cell-name"><span class="mt-trade-name">' + esc(t.name || t.symbol) + '</span>' +
@@ -611,18 +789,6 @@
       cells += '<td>—</td>' +
         '<td>' + esc(fmtShares(t.shares)) + '</td>' +
         '<td colspan="7"><span class="mt-trade-error">指标计算失败：' + esc(t.error) + '</span></td>';
-    } else if (closed) {
-      cells +=
-        '<td>' + esc(fmtPrice(t.sell_price)) + '</td>' +
-        '<td>' + esc(fmtShares(t.shares)) + '</td>' +
-        '<td>—</td>' +
-        '<td><span class="' + pctClass(t.realized_pnl) + '">' + esc(fmtPct(t.realized_pnl_pct)) +
-          '（' + esc(fmtMoney(t.realized_pnl)) + '）</span></td>' +
-        '<td><span class="' + pctClass(holding.max_gain_pct) + '">' + esc(fmtPct(holding.max_gain_pct)) + '</span></td>' +
-        '<td><span class="' + pctClass(holding.max_drawdown) + '">' + esc(fmtPct(holding.max_drawdown)) + '</span></td>' +
-        '<td>—</td>' +
-        '<td>—</td>' +
-        '<td>' + holdDaysCell(holding) + '</td>';
     } else {
       const stops = t.stops || {};
       const hardPrice = Number(stops.hard_stop_price);
@@ -637,25 +803,78 @@
           '（' + esc(fmtMoney(t.pnl_amount)) + '）</span></td>' +
         '<td><span class="' + pctClass(holding.max_gain_pct) + '">' + esc(fmtPct(holding.max_gain_pct)) + '</span></td>' +
         '<td><span class="' + pctClass(holding.max_drawdown) + '">' + esc(fmtPct(holding.max_drawdown)) + '</span></td>' +
-        '<td>' + stopCellHtml(stops.hard_stop_price, stops.hard_stop_distance_pct, hardDominant) + '</td>' +
-        '<td>' + stopCellHtml(stops.chandelier_stop_price, stops.chandelier_stop_distance_pct, chandDominant) + '</td>' +
+        '<td>' + stopCellHtml(stops.hard_stop_price, stops.hard_stop_distance_pct, hardDominant, hardStopTip(t, stops)) + '</td>' +
+        '<td>' + stopCellHtml(stops.chandelier_stop_price, stops.chandelier_stop_distance_pct, chandDominant, chandelierStopTip(t, stops)) + '</td>' +
         '<td>' + holdDaysCell(holding) + '</td>';
     }
     cells += '<td class="mt-cell-actions">' +
-      (closed || t.error ? '' : '<button type="button" class="mt-btn-sm mt-btn-danger mt-close-btn">清仓</button>') +
+      (t.error ? '' : '<button type="button" class="mt-btn-sm mt-btn-danger mt-close-btn">清仓</button>') +
       '</td>';
-    return '<tr data-id="' + esc(t.id) + '"' + (closed ? ' class="is-closed"' : '') + '>' + cells + '</tr>';
+    return '<tr data-id="' + esc(t.id) + '">' + cells + '</tr>';
+  }
+
+  // 清仓交易行：聚焦一笔完整交易的结果（买→卖→盈亏），无止损价与操作列
+  function renderClosedRow(t) {
+    const holding = t.holding || {};
+    let cells =
+      '<td class="mt-cell-name"><span class="mt-trade-name">' + esc(t.name || t.symbol) + '</span></td>' +
+      '<td class="mt-trade-symbol">' + esc(t.symbol) + '</td>' +
+      '<td>' + esc(t.buy_date) + '</td>' +
+      '<td>' + esc(t.sell_date || '—') + '</td>' +
+      '<td>' + esc(fmtPrice(t.buy_price)) + '</td>' +
+      '<td>' + (t.sell_price != null ? esc(fmtPrice(t.sell_price)) : '—') + '</td>' +
+      '<td>' + esc(fmtShares(t.shares)) + '</td>';
+    if (t.error) {
+      cells += '<td colspan="6"><span class="mt-trade-error">指标计算失败：' + esc(t.error) + '</span></td>';
+    } else {
+      const buyAmount = Number(t.buy_price) * Number(t.shares);
+      cells +=
+        '<td>' + esc(fmtMoney(buyAmount).replace(/^\+/, '')) + '</td>' +
+        '<td><span class="' + pctClass(t.realized_pnl) + '">' + esc(fmtMoney(t.realized_pnl)) + '</span></td>' +
+        '<td><span class="' + pctClass(t.realized_pnl_pct) + '">' + esc(fmtPct(t.realized_pnl_pct)) + '</span></td>' +
+        '<td><span class="' + pctClass(holding.max_gain_pct) + '">' + esc(fmtPct(holding.max_gain_pct)) + '</span></td>' +
+        '<td><span class="' + pctClass(holding.max_drawdown) + '">' + esc(fmtPct(holding.max_drawdown)) + '</span></td>' +
+        '<td>' + holdDaysCell(holding) + '</td>';
+    }
+    return '<tr data-id="' + esc(t.id) + '" class="is-closed">' + cells + '</tr>';
+  }
+
+  function openTrades() {
+    return currentTrades.filter(function(t) {
+      return t.status !== 'closed' && passTimeFilter(t.buy_date, timeFilter);
+    });
+  }
+
+  function closedTrades() {
+    return currentTrades.filter(function(t) {
+      // 清仓交易按清仓日期（卖出日期）过滤，缺失时回退买入日期
+      return t.status === 'closed' && passTimeFilter(t.sell_date || t.buy_date, closedTimeFilter);
+    });
   }
 
   function renderTradeList() {
-    tradeEmptyEl.hidden = currentTrades.length > 0;
-    if (!currentTrades.length) {
+    const trades = openTrades();
+    tradeEmptyEl.hidden = trades.length > 0;
+    if (!trades.length) {
       tradeListEl.innerHTML = '';
       return;
     }
     tradeListEl.innerHTML = '<div class="mt-trade-table-wrap"><table class="mt-trade-table"><thead><tr>' +
-      TRADE_TABLE_HEADERS.map(tradeHeaderHtml).join('') +
-      '</tr></thead><tbody>' + sortedTrades().map(renderTradeRow).join('') +
+      TRADE_TABLE_HEADERS.map(function(h) { return tradeHeaderHtml(h, sortState, SORTABLE_COLUMNS); }).join('') +
+      '</tr></thead><tbody>' + sortedWith(trades, sortState, SORTABLE_COLUMNS).map(renderTradeRow).join('') +
+      '</tbody></table></div>';
+  }
+
+  function renderClosedList() {
+    const trades = closedTrades();
+    closedEmptyEl.hidden = trades.length > 0;
+    if (!trades.length) {
+      closedListEl.innerHTML = '';
+      return;
+    }
+    closedListEl.innerHTML = '<div class="mt-trade-table-wrap"><table class="mt-trade-table"><thead><tr>' +
+      CLOSED_TABLE_HEADERS.map(function(h) { return tradeHeaderHtml(h, closedSortState, CLOSED_SORTABLE_COLUMNS); }).join('') +
+      '</tr></thead><tbody>' + sortedWith(trades, closedSortState, CLOSED_SORTABLE_COLUMNS).map(renderClosedRow).join('') +
       '</tbody></table></div>';
   }
 
@@ -841,7 +1060,8 @@
     // 表头排序点击（事件委托：表头随每次渲染重建，需在容器上拦截）
     const th = ev.target.closest('th[data-sort-key]');
     if (th) {
-      toggleSort(th.dataset.sortKey);
+      sortState = cycleSortState(sortState, th.dataset.sortKey);
+      renderTradeList();
       return;
     }
     const btn = ev.target.closest('button');
@@ -851,6 +1071,47 @@
     const trade = currentTrades.find(function(t) { return t.id === Number(rowEl.dataset.id); });
     if (!trade) return;
     if (btn.classList.contains('mt-close-btn')) openCloseModal(trade);
+  });
+
+  closedListEl.addEventListener('click', function(ev) {
+    const th = ev.target.closest('th[data-sort-key]');
+    if (th) {
+      closedSortState = cycleSortState(closedSortState, th.dataset.sortKey);
+      renderClosedList();
+    }
+  });
+
+  // 止损松紧切换：持仓记录止损价同步切换；试算结果已展示时按新口径重算
+  stopModeToggleEl.addEventListener('click', function(ev) {
+    const btn = ev.target.closest('button[data-mode]');
+    if (!btn || btn.dataset.mode === stopMode) return;
+    stopMode = btn.dataset.mode;
+    stopModeToggleEl.querySelectorAll('button[data-mode]').forEach(function(b) {
+      b.classList.toggle('is-active', b.dataset.mode === stopMode);
+    });
+    if (auth) loadTrades();
+    if (!resultEl.hidden) evaluate();
+  });
+
+  // 时间筛选：纯前端过滤，无需重新拉取；持仓按买入日期、清仓按清仓日期，各自独立
+  timeFilterEl.addEventListener('click', function(ev) {
+    const btn = ev.target.closest('button[data-range]');
+    if (!btn || btn.dataset.range === timeFilter) return;
+    timeFilter = btn.dataset.range;
+    timeFilterEl.querySelectorAll('button[data-range]').forEach(function(b) {
+      b.classList.toggle('is-active', b.dataset.range === timeFilter);
+    });
+    renderTradeList();
+  });
+
+  closedTimeFilterEl.addEventListener('click', function(ev) {
+    const btn = ev.target.closest('button[data-range]');
+    if (!btn || btn.dataset.range === closedTimeFilter) return;
+    closedTimeFilter = btn.dataset.range;
+    closedTimeFilterEl.querySelectorAll('button[data-range]').forEach(function(b) {
+      b.classList.toggle('is-active', b.dataset.range === closedTimeFilter);
+    });
+    renderClosedList();
   });
 
   closeConfirmBtn.addEventListener('click', confirmClose);

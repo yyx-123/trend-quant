@@ -79,6 +79,12 @@ class TestComputeManualTrade:
         # 持续阴跌：最低价必然击穿硬止损
         assert stops["hard_stop_triggered"] is True
         assert stops["hard_stop_trigger_date"] is not None
+        # 首次击穿日价格明细：最低价 ≤ 硬止损价，且与当日K线一致
+        assert stops["hard_stop_trigger_low"] is not None
+        assert stops["hard_stop_trigger_low"] <= stops["hard_stop_price"]
+        trigger_day = bars[pd.to_datetime(bars["time"]).dt.date.astype(str) == stops["hard_stop_trigger_date"]]
+        assert stops["hard_stop_trigger_low"] == pytest.approx(round(float(trigger_day.iloc[0]["low"]), 4))
+        assert stops["hard_stop_trigger_close"] == pytest.approx(round(float(trigger_day.iloc[0]["close"]), 4))
         assert out["holding"]["pnl_pct"] < 0
 
     def test_buy_date_after_latest_raises(self, bull_db) -> None:
@@ -122,5 +128,8 @@ class TestComputeManualTrade:
         assert out["holding"]["pnl_points"] == pytest.approx(round(synth_close - buy_price, 4))
         assert out["stops"]["hard_stop_triggered"] is True
         assert out["stops"]["hard_stop_trigger_date"] == "2025-03-03"
+        # 盘中击穿：明细取自合成K线
+        assert out["stops"]["hard_stop_trigger_low"] == pytest.approx(round(synth["low"], 4))
+        assert out["stops"]["hard_stop_trigger_close"] == pytest.approx(round(synth["close"], 4))
         # EOD 口径下尚未触发
         assert eod["stops"]["hard_stop_triggered"] is False

@@ -98,6 +98,25 @@ class TestTradeCreateListApi:
         )
         assert resp.status_code == 401
 
+    def test_list_stop_mode_tight(self, client, populated_db) -> None:
+        """列表接口支持 stop_mode：紧止损下持仓的止损倍数与价格同步切换。"""
+        _, bars, *_ = populated_db
+        client.post(
+            "/manual-trade/api/trades/create",
+            json={**ALICE, **_buy_point(bars), "shares": 100},
+        )
+
+        loose = client.post("/manual-trade/api/trades/list", json=ALICE).json()["trades"][0]
+        tight = client.post(
+            "/manual-trade/api/trades/list", json={**ALICE, "stop_mode": "tight"}
+        ).json()["trades"][0]
+
+        assert loose["stops"]["stop_mode"] == "loose"
+        assert tight["stops"]["stop_mode"] == "tight"
+        assert tight["stops"]["hard_stop_atr_mul"] == 1.0
+        assert tight["stops"]["chandelier_stop_atr_mul"] == 2.0
+        assert tight["stops"]["hard_stop_price"] > loose["stops"]["hard_stop_price"]
+
     def test_create_price_out_of_range_400(self, client, populated_db) -> None:
         _, bars, *_ = populated_db
         row = bars.iloc[-3]

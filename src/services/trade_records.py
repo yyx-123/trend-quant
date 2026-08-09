@@ -198,11 +198,13 @@ def list_trades(
     password: str,
     db=None,
     intraday: bool = True,
+    stop_mode: str | None = None,
 ) -> dict:
     """登录用户的全部交易记录 + 实时/截止口径指标。
 
     排序：未清仓按持仓金额（份数 × 最新价）降序在前；已清仓排最后，
     按清仓日倒序。单笔计算失败不拖垮整个列表，以 ``error`` 字段返回。
+    ``stop_mode`` 透传给止损计算（"tight" 紧止损 / None|"loose" 松止损）。
     """
     user = authenticate(username, password, db=db)
     db = db or get_db()
@@ -234,6 +236,7 @@ def list_trades(
                     intraday_bar=(
                         prefetched.get(row["symbol"]) if intraday else sl.UNSET_INTRADAY_BAR
                     ),
+                    stop_mode=stop_mode,
                 )
                 open_items.append(_open_item(row, result, name_map))
             else:
@@ -244,6 +247,7 @@ def list_trades(
                     db=db,
                     intraday=False,
                     end_date=row["sell_date"],
+                    stop_mode=stop_mode,
                 )
                 closed_items.append(_closed_item(row, result, name_map))
         except Exception as exc:

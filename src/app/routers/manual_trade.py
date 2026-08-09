@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -14,11 +15,16 @@ from services.stop_loss import StopLossError
 router = APIRouter(prefix="/manual-trade", tags=["manual-trade"])
 templates = Jinja2Templates(directory="web/templates")
 
+StopMode = Literal["tight", "loose"]
+
 
 class ManualTradeEvaluateRequest(BaseModel):
     symbol: str = Field(..., min_length=1, description="标的代码，如 510300 或 510300.SS")
     buy_date: date = Field(..., description="买入日期")
     buy_price: float = Field(..., gt=0, description="买入均价")
+    stop_mode: StopMode | None = Field(
+        None, description="止损松紧：tight 紧止损（1×/2×ATR），loose 松止损（1.5×/2.5×ATR）"
+    )
 
 
 class Credentials(BaseModel):
@@ -41,6 +47,10 @@ class TradeCloseRequest(Credentials):
     sell_price: float = Field(..., gt=0)
 
 
+class TradeListRequest(Credentials):
+    stop_mode: StopMode | None = Field(None, description="止损松紧：tight 紧止损 / loose 松止损")
+
+
 @router.get("", response_class=HTMLResponse)
 async def manual_trade_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -53,7 +63,10 @@ async def evaluate_manual_trade(payload: ManualTradeEvaluateRequest) -> dict:
     """试算（公开，无需登录，不落库）。"""
     try:
         return compute_manual_trade(
-            payload.symbol, payload.buy_date.isoformat(), payload.buy_price
+            payload.symbol,
+            payload.buy_date.isoformat(),
+            payload.buy_price,
+            stop_mode=payload.stop_mode,
         )
     except StopLossError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -79,11 +92,12 @@ async def login(payload: Credentials) -> dict:
 
 
 @router.post("/api/trades/list")
-async def list_trades(payload: Credentials) -> dict:
+async def list_trades(payload: TradeListRequest) -> dict:
     return _call_trade_api(
         tr.list_trades,
         username=payload.username,
         password=payload.password,
+        stop_mode=payload.stop_mode,
     )
 
 

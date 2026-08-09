@@ -3525,6 +3525,12 @@ details > summary::marker {
   margin-top: 16px;
 }
 
+/* section 全局规则的 overflow:hidden 会创建滚动容器，导致表头 position:sticky
+   相对视口吸顶失效；clip 同样裁剪圆角溢出，但不创建滚动容器，吸顶不受影响 */
+.manual-trade-page {
+  overflow: clip;
+}
+
 .manual-trade-note {
   color: var(--muted);
   font-size: 12px;
@@ -3793,6 +3799,13 @@ details > summary::marker {
   background: rgba(193, 91, 88, 0.14);
 }
 
+/* 曾击穿/曾跌破（历史触发过但已收复）：琥珀色警示，悬停展示首次触发日明细 */
+.mt-badge-warn {
+  color: var(--accent-warm);
+  background: rgba(199, 131, 76, 0.15);
+  cursor: help;
+}
+
 /* ── 手工交易：记录区头部 ─────────────────────────────────── */
 .mt-records-head {
   display: flex;
@@ -3811,6 +3824,7 @@ details > summary::marker {
   display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .mt-records-controls label {
@@ -3828,9 +3842,53 @@ details > summary::marker {
   font-size: 13px;
 }
 
+/* 分段切换控件（止损松紧 / 时间筛选共用样式） */
+.mt-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(20, 41, 51, 0.05);
+}
+
+.mt-seg-label {
+  padding: 0 6px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mt-seg button {
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.mt-seg button:hover {
+  color: var(--text);
+}
+
+.mt-seg button.is-active {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  color: #fff;
+  box-shadow: 0 4px 10px rgba(13, 122, 113, 0.28);
+}
+
 /* ── 手工交易：紧凑交易卡片列表 ───────────────────────────── */
+/* overflow-x 用 clip 而非 auto：clip 不创建滚动容器，
+   表头 position:sticky 才能相对视口吸顶（auto/hidden 都会把吸顶
+   限制在容器内部，页面滚动时表头就丢了）。窄屏表格横向裁剪不滚动 */
 .mt-trade-table-wrap {
-  overflow-x: auto;
+  overflow-x: clip;
 }
 
 /* 统一表格展示：样式对齐标的详情页的多策略结果表 .backtest-metrics-table */
@@ -3843,17 +3901,23 @@ details > summary::marker {
 .mt-trade-table th,
 .mt-trade-table td {
   padding: 8px 10px;
-  text-align: right;
+  text-align: center;
   white-space: nowrap;
   background: rgba(255, 255, 255, 0.82);
 }
 
+/* 表头吸顶：top 偏移站点头部实际高度（--site-header-h 由 base.html 脚本实时测量），
+   页面下滑时表头停在导航栏正下方。背景必须为不透明色，否则吸顶时与下方行文字叠影 */
 .mt-trade-table thead th {
-  background: rgba(20, 41, 51, 0.04);
+  position: sticky;
+  top: var(--site-header-h, 0px);
+  z-index: 2;
+  background: #eef2f0;
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   text-align: center;
+  box-shadow: 0 1px 0 var(--line);
 }
 
 .mt-trade-table tbody td {
@@ -3863,11 +3927,7 @@ details > summary::marker {
   font-weight: 600;
 }
 
-/* 标的 / 标的代码两列内容左对齐，其余数值列右对齐；表头统一居中 */
-.mt-trade-table td:first-child,
-.mt-trade-table td:nth-child(2) {
-  text-align: left;
-}
+/* 标的 / 标的代码两列与其余列一致：全部居中对齐 */
 
 .mt-trade-table tbody tr {
   transition: background 0.15s;
@@ -3888,7 +3948,7 @@ details > summary::marker {
 }
 
 .mt-trade-table th.mt-th-sortable:hover {
-  background: rgba(20, 41, 51, 0.09);
+  background: #e3e9e6;
   color: var(--text);
 }
 
@@ -3936,6 +3996,11 @@ details > summary::marker {
   text-decoration: underline;
   text-decoration-thickness: 2px;
   text-underline-offset: 3px;
+}
+
+/* 止损价单元格：悬停展示计算过程 */
+.mt-stop-cell {
+  cursor: help;
 }
 
 /* ── 手工交易：清仓弹窗 ───────────────────────────────────── */

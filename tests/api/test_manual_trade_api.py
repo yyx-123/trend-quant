@@ -65,6 +65,42 @@ class TestManualTradeEvaluateApi:
         assert resp.status_code == 400
         assert "未找到" in resp.json()["detail"]
 
+    def test_evaluate_stop_mode_tight(self, client, populated_db) -> None:
+        """stop_mode=tight：硬止损 1×ATR、吊灯止损 2×ATR，且止损价高于默认松止损。"""
+        _, bars = populated_db
+        row = bars.iloc[-3]
+        form = {
+            "symbol": "510300",
+            "buy_date": str(row["time"])[:10],
+            "buy_price": round(float(row["close"]), 4),
+        }
+
+        loose = client.post("/manual-trade/api/evaluate", json=form).json()
+        tight = client.post(
+            "/manual-trade/api/evaluate", json={**form, "stop_mode": "tight"}
+        ).json()
+
+        assert loose["stops"]["stop_mode"] == "loose"
+        assert tight["stops"]["stop_mode"] == "tight"
+        assert tight["stops"]["hard_stop_atr_mul"] == 1.0
+        assert tight["stops"]["chandelier_stop_atr_mul"] == 2.0
+        assert tight["stops"]["hard_stop_price"] > loose["stops"]["hard_stop_price"]
+        assert tight["stops"]["chandelier_stop_price"] > loose["stops"]["chandelier_stop_price"]
+
+    def test_evaluate_invalid_stop_mode_422(self, client, populated_db) -> None:
+        _, bars = populated_db
+        row = bars.iloc[-3]
+        resp = client.post(
+            "/manual-trade/api/evaluate",
+            json={
+                "symbol": "510300",
+                "buy_date": str(row["time"])[:10],
+                "buy_price": round(float(row["close"]), 4),
+                "stop_mode": "ultra",
+            },
+        )
+        assert resp.status_code == 422
+
     def test_evaluate_future_buy_date_400(self, client, populated_db) -> None:
         resp = client.post(
             "/manual-trade/api/evaluate",

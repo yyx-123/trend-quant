@@ -87,12 +87,17 @@ def compute_stop_loss(
     intraday: bool = True,
     end_date: str | None = None,
     intraday_bar: dict | None | object = UNSET_INTRADAY_BAR,
+    stop_mode: str | None = None,
 ) -> dict:
     """计算给定买入的硬止损价和吊灯止损价。
 
     硬止损公式: 买入价 − 买入当日 ATR(20) × hard_stop_atr_mul (默认 1.5)。
     注意以买入价而非买入当日收盘价为基准 —— 手工输入的买入价通常不是收盘价。
     吊灯止损公式: 买入以来最高价 − 最新 ATR(20) × chandelier_stop_atr_mul (默认 2.5)。
+
+    ``stop_mode`` 为止损松紧档位：``"tight"``（紧止损）固定硬止损 1×ATR、
+    吊灯止损 2×ATR，且忽略标的级 stop_atr_mul 覆盖；``"loose"`` 或 None
+    （松止损，默认）沿用既有口径（配置默认值 + 标的级覆盖）。
 
     ``intraday=True``（默认）时，交易时段内会把实时报价合成的当日K线计入
     最高价 / 最新价 / 止损触发判断；ATR 仍为历史完整K线口径（见模块 docstring）。
@@ -129,16 +134,21 @@ def compute_stop_loss(
     if df.empty:
         raise StopLossError(f"未找到 {symbol} 的数据")
 
-    strategy_cfg = get_strategy_config()
-    hard_stop_mul = float(strategy_cfg.get("hard_stop_atr_mul_default", 1.5))
-    chandelier_mul = float(strategy_cfg.get("chandelier_stop_atr_mul", 2.5))
+    if stop_mode == "tight":
+        # 紧止损：固定 1×ATR / 2×ATR，忽略标的级覆盖
+        hard_stop_mul = 1.0
+        chandelier_mul = 2.0
+    else:
+        strategy_cfg = get_strategy_config()
+        hard_stop_mul = float(strategy_cfg.get("hard_stop_atr_mul_default", 1.5))
+        chandelier_mul = float(strategy_cfg.get("chandelier_stop_atr_mul", 2.5))
 
-    # Per-instrument stop_atr_mul override (DB rows may carry NULL)
-    for item in _load_instrument_metadata(db):
-        if str(item.get("symbol", "")).strip().upper() == symbol:
-            if item.get("stop_atr_mul") is not None:
-                hard_stop_mul = float(item["stop_atr_mul"])
-            break
+        # Per-instrument stop_atr_mul override (DB rows may carry NULL)
+        for item in _load_instrument_metadata(db):
+            if str(item.get("symbol", "")).strip().upper() == symbol:
+                if item.get("stop_atr_mul") is not None:
+                    hard_stop_mul = float(item["stop_atr_mul"])
+                break
 
     # ATR from the precomputed cache (single source, D11); the store falls
     # back to a live full-history compute when the cache is stale/missing.
@@ -212,6 +222,9 @@ def compute_stop_loss(
     # （等价于逐日 max(前一日棘轮价, 当日候选值)）。
     # 盘中当日无完整K线 ATR，按本模块既有约定沿用最近历史 ATR（ffill）。
     chandelier_stop_ratchet_price = chandelier_stop_price
+    chandelier_first_trigger_date: str | None = None
+    chandelier_first_trigger_close: float | None = None
+    chandelier_first_trigger_stop: float | None = None
     if mask_since.any():
         since_dates = pd.DatetimeIndex(df.loc[mask_since, "time"].dt.normalize())
         atr_daily = atr_series.copy()
@@ -222,6 +235,20 @@ def compute_stop_loss(
         candidates = candidates[pd.notna(candidates)]
         if len(candidates):
             chandelier_stop_ratchet_price = round(float(candidates.max()), 4)
+
+        # 吊灯止损历史首次跌破：逐日 吊灯_t = 截至当日最高价 − mul×当日 ATR，
+        # 首个 收盘价 ≤ 吊灯_t 的交易日（供前端区分"曾跌破/已跌破"并展示悬停历史；
+        # NaN 参与比较恒为 False，ATR 缺失的早期日期自然跳过）
+        daily_chandelier = (
+            running_high.to_numpy(dtype=float) - chandelier_mul * atr_aligned.to_numpy(dtype=float)
+        )
+        closes_arr = pd.to_numeric(df.loc[mask_since, "close"], errors="coerce").to_numpy(dtype=float)
+        below = closes_arr <= daily_chandelier
+        if below.any():
+            first_idx = int(below.argmax())
+            chandelier_first_trigger_date = str(since_dates[first_idx].date())
+            chandelier_first_trigger_close = round(float(closes_arr[first_idx]), 4)
+            chandelier_first_trigger_stop = round(float(daily_chandelier[first_idx]), 4)
 
     hard_stop_pct = round((hard_stop_price / buy_price - 1) * 100, 2)
     chandelier_pct = (
@@ -241,11 +268,15 @@ def compute_stop_loss(
         "chandelier_stop_pct_from_high": chandelier_pct,
         "chandelier_stop_atr_mul": chandelier_mul,
         "chandelier_stop_ratchet_price": chandelier_stop_ratchet_price,
+        "chandelier_first_trigger_date": chandelier_first_trigger_date,
+        "chandelier_first_trigger_close": chandelier_first_trigger_close,
+        "chandelier_first_trigger_stop": chandelier_first_trigger_stop,
         "atr_at_buy": round(atr_at_buy, 4),
         "current_atr": round(current_atr, 4),
         "highest_since_buy": round(highest_since_buy, 4),
         "latest_price": round(latest_price, 4),
         "is_intraday": synth is not None,
+        "stop_mode": "tight" if stop_mode == "tight" else "loose",
     }
     if synth is not None:
         payload["intraday_ts"] = pd.Timestamp(synth["time"]).isoformat()

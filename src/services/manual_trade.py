@@ -31,6 +31,7 @@ def compute_manual_trade(
     intraday: bool = True,
     end_date: str | None = None,
     intraday_bar: dict | None | object = UNSET_INTRADAY_BAR,
+    stop_mode: str | None = None,
 ) -> dict:
     """止损价 + 持仓指标的一站式计算（手工交易页面的后端）。
 
@@ -44,7 +45,8 @@ def compute_manual_trade(
     （含 None）时跳过实时拉取，直接复用该值（列表接口同 symbol 去重）。
 
     ``end_date`` 用于已清仓交易：净值序列截断到该日（含），强制关闭
-    intraday，所有指标按截止日口径。
+    intraday，所有指标按截止日口径。``stop_mode`` 透传给止损计算
+    （"tight" 紧止损 / None|"loose" 松止损）。
 
     Raises:
         StopLossError: 标的无效、无数据（来自 ``compute_stop_loss``）。
@@ -58,6 +60,7 @@ def compute_manual_trade(
         intraday=intraday,
         end_date=end_date,
         intraday_bar=intraday_bar,
+        stop_mode=stop_mode,
     )
     symbol = stops["symbol"]
     buy_ts = pd.Timestamp(buy_date)
@@ -96,19 +99,27 @@ def compute_manual_trade(
     pnl_pct = round((latest_close / buy_price - 1) * 100, 2)
     max_gain_pct = round((stops["highest_since_buy"] / buy_price - 1) * 100, 2)
 
-    # 硬止损击穿检测：买入（含）以来最低价 ≤ 硬止损价
+    # 硬止损击穿检测：买入（含）以来最低价 ≤ 硬止损价。
+    # 记录首次击穿日的价格明细（最低/收盘），供前端徽章悬停提示展示历史。
     hard_stop_price = stops["hard_stop_price"]
     hard_stop_triggered = False
     hard_stop_trigger_date: str | None = None
+    hard_stop_trigger_low: float | None = None
+    hard_stop_trigger_close: float | None = None
     lows = pd.to_numeric(since["low"], errors="coerce")
-    for t, low in zip(since["time"], lows, strict=True):
+    closes_since = pd.to_numeric(since["close"], errors="coerce")
+    for t, low, close in zip(since["time"], lows, closes_since, strict=True):
         if pd.notna(low) and float(low) <= hard_stop_price:
             hard_stop_triggered = True
             hard_stop_trigger_date = str(t.date())
+            hard_stop_trigger_low = round(float(low), 4)
+            hard_stop_trigger_close = round(float(close), 4) if pd.notna(close) else None
             break
     if not hard_stop_triggered and intraday_bar and intraday_bar["low"] <= hard_stop_price:
         hard_stop_triggered = True
         hard_stop_trigger_date = intraday_bar["date"]
+        hard_stop_trigger_low = round(float(intraday_bar["low"]), 4)
+        hard_stop_trigger_close = round(float(intraday_bar["close"]), 4)
 
     # 吊灯止损：最新收盘价是否已跌破
     chandelier_stop_price = stops["chandelier_stop_price"]
@@ -147,6 +158,8 @@ def compute_manual_trade(
             **stops,
             "hard_stop_triggered": hard_stop_triggered,
             "hard_stop_trigger_date": hard_stop_trigger_date,
+            "hard_stop_trigger_low": hard_stop_trigger_low,
+            "hard_stop_trigger_close": hard_stop_trigger_close,
             "chandelier_stop_triggered": chandelier_stop_triggered,
             "chandelier_stop_ratchet_triggered": chandelier_stop_ratchet_triggered,
             "hard_stop_distance_pct": hard_distance_pct,
