@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import time
 import os
 from pathlib import Path
 import threading
@@ -100,8 +101,20 @@ async def lifespan(app: FastAPI):
 
     scheduler_manager = SchedulerManager(settings=settings)
 
-    def update_job() -> None:
-        payload = daily_market_update_job(settings)
+    # 防止定时触发与启动补偿并发重入（同一进程只允许一个更新任务）。
+    _update_job_lock = threading.Lock()
+
+    def update_job(force: bool = False) -> None:
+        if not _update_job_lock.acquire(blocking=False):
+            logger.info("Daily market data update already running; skipping duplicate trigger")
+            return
+        try:
+            _run_daily_update(force=force)
+        finally:
+            _update_job_lock.release()
+
+    def _run_daily_update(force: bool = False) -> None:
+        payload = daily_market_update_job(settings, force=force)
         logger.info(
             "Daily market data update (16:30): %s success, %s failed out of %s",
             payload.get("success", 0),
@@ -136,11 +149,54 @@ async def lifespan(app: FastAPI):
         # next user request does not pay the cold-rebuild cost.
         threading.Thread(target=_warm_dashboard, daemon=True).start()
 
+    def _daily_update_catchup() -> None:
+        """启动补偿：EOD 数据落后于「本应已持久化的最近交易日」时补跑一次。
+
+        覆盖三类漏更：服务在 16:30 不在线（内存 jobstore 无 misfire 持久化）、
+        上次运行整体失败、行情商延迟发布导致「成功但没拿到当日K线」。
+        补跑是幂等的（ensure_daily_history 增量补齐缺口）。
+        """
+        from datetime import timedelta as _td
+
+        from core.calendar import is_trading_day, market_now, previous_trading_day
+
+        now = market_now()
+        upd_h, upd_m = settings.app.update_time_after_close.split(":")
+        upd_time = time(int(upd_h), int(upd_m))
+        today = now.date()
+        if is_trading_day(today) and now.time() >= upd_time:
+            expected = today
+        else:
+            expected = previous_trading_day(today - _td(days=1))
+
+        run = db.get_latest_job_run("daily_update")
+        last_ok = ""
+        if run and str(run.get("status")) in ("completed", "partial"):
+            last_ok = str(run.get("run_date") or "")
+        behind_schedule = not last_ok or last_ok < expected.isoformat()
+
+        # 行情商延迟检查：任务「成功」但库里最新K线仍落后于 expected。
+        revision = db.get_market_dashboard_revision()
+        max_bar = str(revision[0])[:10] if revision and revision[0] else ""
+        data_behind = not max_bar or max_bar < expected.isoformat()
+
+        if not behind_schedule and not data_behind:
+            logger.info("Daily update catch-up check: up to date (expected %s)", expected)
+            return
+        logger.warning(
+            "Daily update catch-up triggered: expected=%s last_ok=%s max_bar=%s",
+            expected, last_ok or "none", max_bar or "none",
+        )
+        # force=True：补跑可能发生在周末/节假日（错过周五 16:30 周六才开机），
+        # 此时 daily_market_update_job 的非交易日跳过守卫必须放行。
+        update_job(force=True)
+
     disable_scheduler = _background_tasks_disabled()
     if disable_scheduler:
         logger.warning("Scheduler disabled by TREND_QUANT_DISABLE_SCHEDULER")
     else:
         scheduler_manager.start(update_job=update_job)
+        threading.Thread(target=_daily_update_catchup, daemon=True).start()
 
     app.state.settings = settings
     app.state.scheduler_manager = scheduler_manager

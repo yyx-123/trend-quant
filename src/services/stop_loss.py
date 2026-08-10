@@ -10,9 +10,10 @@
 - 吊灯止损 = 买入以来最高价 − ATR(20, 最新) × chandelier_stop_atr_mul（默认 2.5）
 - 棘轮吊灯止损 = 同公式逐日候选值的历史最大值（只上移不下移）
 
-盘中实时叠加（``intraday=True`` 且处于交易时段 9:30-15:00，含午间休盘）：
+盘中/盘后实时叠加（``intraday=True`` 且当日已过 9:30 开盘，``is_past_market_open``）：
 - 用实时报价合成当日K线，计入「买入以来最高价」「最新价」「止损触发判断」，
-  因此吊灯止损价在盘中会随新高实时上移；
+  因此吊灯止损价在盘中会随新高实时上移；收盘后到日K补库任务（默认 16:30）
+  落库前的窗口内，实时报价即为当日收盘快照，同样合成当日K线，避免现价滞后一天；
 - ATR 沿用历史完整K线的值（与实时看板 ``compute_intraday_trend_score``
   同一口径），避免当日不完整K线污染 ATR；
 - 非交易时段或报价获取失败时静默回退为纯日K（EOD）结果。
@@ -25,12 +26,12 @@ import sqlite3
 
 import pandas as pd
 
-from core.calendar import is_realtime_available
+from core.calendar import is_past_market_open
 from core.strategy_config import get_strategy_config
 from core.symbols import normalize_symbol
 from core.trend import safe_float
 from data.indicator_store import get_series
-from data.intraday_service import build_synthetic_bar
+from data.intraday_service import build_synthetic_bar, has_persisted_today_bar, is_quote_fresh
 from data.service import DataService
 from data.storage.db import get_db
 
@@ -54,8 +55,11 @@ def _load_instrument_metadata(db) -> list[dict]:
 
 
 def _synthesize_intraday_bar(symbol: str, df: pd.DataFrame, quote: dict | None) -> dict | None:
-    """由实时报价合成当日K线（单标的/批量两条路径共用）。报价无效返回 None。"""
+    """由实时报价合成当日K线（单标的/批量两条路径共用）。报价无效/陈旧返回 None。"""
     if not quote or quote.get("price") is None:
+        return None
+    if not is_quote_fresh(quote):
+        # 停牌/陈旧报价：trade date 不是今天，绝不能合成“当日”K线。
         return None
     volumes = pd.to_numeric(df["volume"], errors="coerce") if len(df) else pd.Series(dtype=float)
     prev_vol = safe_float(volumes.iloc[-1], 0.0) if len(volumes) else 0.0
@@ -63,16 +67,24 @@ def _synthesize_intraday_bar(symbol: str, df: pd.DataFrame, quote: dict | None) 
 
 
 def _fetch_intraday_bar(symbol: str, df: pd.DataFrame) -> dict | None:
-    """交易时段内（含午间休盘）用实时报价合成当日K线；否则/失败返回 None。
+    """当日已过开盘（含收盘后日K未落库的窗口）用实时报价合成当日K线；否则/失败返回 None。
 
     与 ``symbol_detail`` 的 intraday overlay 同一路径：
-    ``is_realtime_available`` 门控 + ``DataService.fetch_latest_quote``
+    ``is_past_market_open`` 门控 + 当日K线已落库时 DB 优先
+    （共享 ``has_persisted_today_bar``）+ ``DataService.fetch_latest_quote``
     + ``build_synthetic_bar``，任何失败都静默回退 EOD。
     """
-    if not is_realtime_available():
+    if not is_past_market_open():
+        return None
+    if has_persisted_today_bar(df):
+        # 当日K线已由盘后任务落库 —— 与图表 overlay 一致，DB 数据优先。
         return None
     try:
-        quote = DataService().fetch_latest_quote(symbol)
+        service = DataService()
+        try:
+            quote = service.fetch_latest_quote(symbol)
+        finally:
+            service.close()
         return _synthesize_intraday_bar(symbol, df, quote)
     except Exception as exc:
         logger.warning("Intraday quote failed for %s; falling back to EOD: %s", symbol, exc)
@@ -88,14 +100,23 @@ def fetch_intraday_bars(dfs: dict[str, pd.DataFrame]) -> dict[str, dict | None]:
     （对应值为 None）。
     """
     result: dict[str, dict | None] = dict.fromkeys(dfs, None)
-    if not dfs or not is_realtime_available():
+    if not dfs or not is_past_market_open():
+        return result
+    # 当日K线已落库的标的直接 DB 优先（与图表 overlay 口径一致），
+    # 无需再为其拉取报价；也避免用报价覆盖已确认的盘后数据。
+    pending = {s: df for s, df in dfs.items() if not has_persisted_today_bar(df)}
+    if not pending:
         return result
     try:
-        quotes = DataService().fetch_latest_quotes(list(dfs))
+        service = DataService()
+        try:
+            quotes = service.fetch_latest_quotes(list(pending))
+        finally:
+            service.close()
     except Exception as exc:
         logger.warning("Batch intraday quotes failed; falling back to EOD: %s", exc)
         return result
-    for symbol, df in dfs.items():
+    for symbol, df in pending.items():
         quote = quotes.get(symbol) or {}
         if quote.get("error"):
             continue

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from chinese_calendar import is_workday
 
@@ -29,17 +30,47 @@ _AFTERNOON_END = time(15, 0)
 # avoid flooding the logs.
 _warned_years: set[int] = set()
 
+# Cached market-local timezone (from app settings; Asia/Shanghai fallback).
+_market_tz: ZoneInfo | None = None
+
+
+def market_now() -> datetime:
+    """Current wall-clock time in the market timezone (tz-aware).
+
+    All session gates below are defined against Beijing time, so the
+    default "now" must come from the configured market timezone rather
+    than the host's local timezone (the two differ on non-CN hosts).
+    """
+    global _market_tz
+    if _market_tz is None:
+        tz_name = "Asia/Shanghai"
+        try:
+            from core.settings import load_settings
+
+            tz_name = load_settings().app.timezone or tz_name
+        except Exception:  # config unreadable — stick with the A-share default
+            pass
+        try:
+            _market_tz = ZoneInfo(tz_name)
+        except Exception:
+            _market_tz = ZoneInfo("Asia/Shanghai")
+    return datetime.now(_market_tz)
+
 
 def is_trading_day(day: date) -> bool:
     """Return True if *day* is a regular A-share trading day.
 
     Delegates to ``chinese_calendar.is_workday`` which accounts for
-    weekends, public holidays, *and* 调休 weekend workdays.
+    weekends, public holidays, *and* 调休 weekend workdays — but the
+    exchanges never open on a Saturday/Sunday even when it is an
+    official workday, so weekends are always excluded.
 
     For years beyond the library's supported range (currently
     2004–2026) we fall back to a plain weekday check and emit a
     one-time warning per calendar year.
     """
+    if day.weekday() >= 5:
+        return False
     try:
         return bool(is_workday(day))
     except NotImplementedError:
@@ -59,7 +90,7 @@ def is_trading_time(dt: datetime | None = None) -> bool:
     (9:30–11:30 or 13:00–15:00 Beijing time), excluding the
     pre-market call-auction period (9:15–9:25).
     """
-    now = dt or datetime.now()
+    now = dt or market_now()
     t = now.time()
     if _MORNING_START <= t <= _MORNING_END:
         return True
@@ -81,7 +112,7 @@ def is_realtime_available(dt: datetime | None = None) -> bool:
     ``is_trading_time`` where actual continuous-auction sessions
     matter.
     """
-    now = dt or datetime.now()
+    now = dt or market_now()
     if not is_trading_day(now.date()):
         return False
     t = now.time()
@@ -99,7 +130,7 @@ def is_past_market_open(dt: datetime | None = None) -> bool:
     Use this to gate "today's bar must be present" overlays; keep using
     ``is_realtime_available`` where only live-session quotes matter.
     """
-    now = dt or datetime.now()
+    now = dt or market_now()
     if not is_trading_day(now.date()):
         return False
     return now.time() >= _MORNING_START
@@ -136,14 +167,16 @@ def trading_session_status(now: datetime | None = None) -> dict:
     """Convenience helper for API endpoints.
 
     Returns a dict with keys:
-      is_trading_day, is_trading_time, is_realtime_available, next_session
+      is_trading_day, is_trading_time, is_realtime_available,
+      is_past_market_open, next_session
     where *next_session* is a human-readable string.
     """
-    dt = now or datetime.now()
+    dt = now or market_now()
     today = dt.date()
     trading_day = is_trading_day(today)
     trading_time = is_trading_time(dt) if trading_day else False
     realtime_available = is_realtime_available(dt)
+    past_market_open = is_past_market_open(dt)
 
     if trading_time:
         next_session = "in_session"
@@ -162,5 +195,6 @@ def trading_session_status(now: datetime | None = None) -> dict:
         "is_trading_day": trading_day,
         "is_trading_time": trading_time,
         "is_realtime_available": realtime_available,
+        "is_past_market_open": past_market_open,
         "next_session": next_session,
     }

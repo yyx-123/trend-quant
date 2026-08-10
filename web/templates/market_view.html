@@ -1499,8 +1499,10 @@
     // Intraday badge: "盘中实时" while the session is running, "收盘估算"
     // after 15:00 when the bar is synthesized from the closing snapshot
     // because the daily write job has not persisted today's bar yet.
+    // 优先用服务端 post_close 标志（浏览器时区解析 ts 会误判）。
     const intradayTs = payload.meta?.intraday_ts ? new Date(payload.meta.intraday_ts) : null;
-    const afterClose = intradayTs && !Number.isNaN(intradayTs.getTime()) && intradayTs.getHours() >= 15;
+    const afterClose = payload.meta?.post_close === true ||
+      (payload.meta?.post_close == null && intradayTs && !Number.isNaN(intradayTs.getTime()) && intradayTs.getHours() >= 15);
     const intradayLabel = afterClose ? '收盘估算' : '盘中实时';
     chartTitleEl.innerHTML = `${payload.display_label || payload.display_name || payload.symbol || ''} 日 K${payload.meta?.is_intraday ? ` <span class="intraday-badge"><span class="intraday-dot" style="animation:intraday-pulse 1.6s ease-in-out infinite"></span>${intradayLabel}</span>` : ''}`;
     rangeMetaEl.textContent = `${payload.meta?.start || '-'} ~ ${payload.meta?.end || '-'} | ${Number(payload.meta?.rows || 0)} 根${payload.meta?.is_intraday ? ` · 含${intradayLabel}数据` : ''}`;
@@ -1812,6 +1814,8 @@
     // charts not initialized – listeners skipped
   }
   refreshBtnEl.addEventListener('click', () => loadDaily());
+  // 盘后数据更新完成后自动重载当前图表（无选中标的时 loadDaily 内部安全返回）。
+  document.addEventListener('daily-update-done', () => loadDaily());
   runBacktestBtnEl.addEventListener('click', runRuleBacktest);
 
   // --- Strategy dropdown (checkbox panel) ---

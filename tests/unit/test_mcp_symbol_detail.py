@@ -56,7 +56,9 @@ FAKE_QUOTE = {
     "low": 1.8,
     "volume": 500000,
     "amount": 1000000,
-    "ts": "2026-07-22T15:00:00",
+    # ts 必须是“今天”——陈旧报价（如停牌股的上一交易日快照）会被
+    # is_quote_fresh 拒绝，不合成当日K线。
+    "ts": date.today().isoformat() + "T15:00:00",
 }
 
 FAKE_INTRADAY_RESULT = {
@@ -142,3 +144,23 @@ class TestSymbolDetailIntradayOverlay:
         assert len(payload["dates"]) == self.DAYS
         assert payload["dates"][-1] == date.today().isoformat()
         mock_ds_cls.assert_not_called()
+
+    def test_stale_quote_no_overlay(self) -> None:
+        """Rule 4: quote carries an old trade date (e.g. suspended symbol)
+        -> no synthetic bar, fall back to EOD even though the gate passed."""
+        df = _daily_bars_ending(date.today() - timedelta(days=1))
+        stale_quote = dict(FAKE_QUOTE, ts=(date.today() - timedelta(days=3)).isoformat() + "T15:00:00")
+
+        with (
+            patch.object(server, "get_db", return_value=_FakeDb(df)),
+            patch.object(intraday_service, "is_past_market_open", return_value=True),
+            patch.object(intraday_service, "DataService") as mock_ds_cls,
+            patch.object(intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT),
+            patch.object(server, "_config_name_map", return_value={}),
+            patch.object(server, "_load_instruments_raw", return_value=[]),
+        ):
+            mock_ds_cls.return_value.fetch_latest_quote.return_value = stale_quote
+            payload = server.symbol_detail("518850.SS", days=60, intraday=True)
+
+        assert payload["meta"]["is_intraday"] is False
+        assert len(payload["dates"]) == self.DAYS

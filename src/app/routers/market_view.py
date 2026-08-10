@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.instrument_display import format_symbol_display, load_instrument_name_map, strip_etf_suffix
+from core.calendar import market_now
 from core.symbols import normalize_symbol
 from data.intraday_service import build_intraday_overlay
 from data.storage.db import get_db
@@ -299,7 +300,7 @@ async def get_market_daily(
     # keeps this endpoint and the MCP symbol_detail tool on the exact same
     # code path: at/past the 9:30 open today's bar comes from the DB once
     # persisted, otherwise a synthetic bar is built from live quotes.
-    if intraday and (not end_date.strip() or end_ts.date() >= datetime.now().date()):
+    if intraday and (not end_date.strip() or end_ts.date() >= market_now().date()):
         overlay = build_intraday_overlay(normalized_symbol, df, trend_cfg)
         if overlay:
             bar = overlay["bar"]
@@ -341,5 +342,6 @@ async def get_market_daily(
             payload["indicators"] = indicators
             payload["meta"]["is_intraday"] = True
             payload["meta"]["intraday_ts"] = overlay["ts"]
+            payload["meta"]["post_close"] = bool(overlay.get("post_close"))
 
     return payload

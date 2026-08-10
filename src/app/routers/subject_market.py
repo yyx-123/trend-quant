@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from core.calendar import is_realtime_available, is_trading_day, trading_session_status
+from core.calendar import is_past_market_open, is_trading_day, trading_session_status
 from core.display import filter_fully_classified
 from data.intraday_service import build_intraday_dashboard
 from data.service import DataService
@@ -57,7 +57,7 @@ async def subject_market_dashboard() -> dict:
 
 _intraday_jobs: dict[str, dict[str, Any]] = {}
 _intraday_jobs_lock = threading.Lock()
-_INTRADAY_JOB_TTL_SECONDS = 300  # 5 minutes
+_INTRADAY_JOB_TTL_SECONDS = 900  # 15 minutes — 结果取件窗口别太紧
 
 
 def _cleanup_expired_jobs() -> None:
@@ -98,9 +98,10 @@ async def start_intraday_dashboard() -> dict:
     now = datetime.now()
     if not is_trading_day(now.date()):
         raise HTTPException(status_code=400, detail="今日非交易日")
-    # 午间休盘（11:30-13:00）也允许启动 —— 实时报价在休盘期间仍然有效。
-    if not is_realtime_available(now):
-        raise HTTPException(status_code=400, detail="当前非交易时段（9:30-15:00，含午间休盘）")
+    # 午间休盘（11:30-13:00）与收盘后（日K补库任务落库前）也允许启动 ——
+    # 实时报价在这些时段仍然有效：休盘时是上午快照，收盘后是当日收盘快照。
+    if not is_past_market_open(now):
+        raise HTTPException(status_code=400, detail="需交易日 9:30 开盘后才能计算实时看板")
 
     job_id = _create_intraday_job()
 

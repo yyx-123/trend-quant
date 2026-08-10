@@ -406,10 +406,12 @@
     return items;
   }
 
-  // 当日K线区间（买入提示 / 清仓提示共用）：无K线返回 null，请求失败抛错
+  // 当日K线区间（买入提示 / 清仓提示共用）：无K线返回 null，请求失败抛错。
+  // intraday=true：当日K线未落库时由实时报价合成（含盘后收盘快照），
+  // 否则当日买入/清仓在 16:30 补库前拿不到区间提示。
   async function fetchDayCandle(symbol, date) {
     const params = new URLSearchParams({
-      symbol: symbol, start_date: date, end_date: date, limit: '1', intraday: 'false',
+      symbol: symbol, start_date: date, end_date: date, limit: '1', intraday: 'true',
     });
     const resp = await fetch('/market-view/api/daily?' + params.toString());
     const data = await resp.json();
@@ -1039,6 +1041,8 @@
   });
   openEnterBtn.addEventListener('click', openEnterModal);
   refreshBtn.addEventListener('click', loadTrades);
+  // 盘后数据更新完成后自动刷新持仓（未登录时 loadTrades 内部直接返回）。
+  document.addEventListener('daily-update-done', function() { loadTrades(); });
 
   enterConfirmBtn.addEventListener('click', confirmEnter);
   enterCancelBtn.addEventListener('click', function() {

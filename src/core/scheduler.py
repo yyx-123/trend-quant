@@ -30,6 +30,10 @@ class SchedulerManager:
             trigger=CronTrigger(day_of_week="mon-fri", hour=int(upd_h), minute=int(upd_m)),
             id="daily_update",
             replace_existing=True,
+            # 允许 2 小时内的 misfire 补跑（执行器繁忙/进程短暂卡顿）；
+            # 进程完全离线造成的错过由 app.main 的启动补偿兜底。
+            misfire_grace_time=7200,
+            coalesce=True,
         )
 
         scheduler.start()

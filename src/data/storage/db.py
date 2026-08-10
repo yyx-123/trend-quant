@@ -182,6 +182,15 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_job_runs_type_id
                     ON job_runs(job_type, id);
 
+                -- 内容版本计数器：qfq 原位重写（除权重物化）不改变行数/最大
+                -- 日期，任何「按日期判断新鲜度」的机制都会失明；每次行情写
+                -- 入都把对应 name 的计数器 +1，让缓存/看板能感知价格口径变化。
+                -- 命名：<table>（表级）与 <table>:<symbol>（标的级）。
+                CREATE TABLE IF NOT EXISTS data_versions (
+                    name TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS app_config (
                     key TEXT PRIMARY KEY,
                     value TEXT,
@@ -339,20 +348,29 @@ class Database:
     # ------------------------------------------------------------------
     def _migrate_schema(self) -> None:
         """Idempotent column additions for existing databases."""
-        new_columns = {
+        metadata_columns = {
             "enabled": "INTEGER NOT NULL DEFAULT 1",
             "stop_atr_mul": "REAL",
             "risk_budget_pct": "REAL",
             "asset_type": "TEXT",
             "start_date": "TEXT",
         }
+        # 指标/趋势缓存记录构建时的行情内容版本（见 data_versions），
+        # 用于识别「日期没变但价格口径变了」的陈旧缓存。
+        cache_columns = {"data_version": "INTEGER NOT NULL DEFAULT 0"}
+        targets = {
+            "instrument_metadata": metadata_columns,
+            "indicator_daily": cache_columns,
+            "trend_daily": cache_columns,
+        }
         with self._connect() as conn:
-            existing = {
-                row["name"] for row in conn.execute("PRAGMA table_info(instrument_metadata)")
-            }
-            for name, ddl in new_columns.items():
-                if name not in existing:
-                    conn.execute(f"ALTER TABLE instrument_metadata ADD COLUMN {name} {ddl}")
+            for table, new_columns in targets.items():
+                existing = {
+                    row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+                }
+                for name, ddl in new_columns.items():
+                    if name not in existing:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     # ------------------------------------------------------------------
     # rule_strategies
@@ -682,8 +700,12 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_market_dashboard_revision(self) -> tuple[str, int, str]:
-        """Small revision token used to invalidate the in-process subject-board cache."""
+    def get_market_dashboard_revision(self) -> tuple[str, int, str, int]:
+        """Small revision token used to invalidate the in-process subject-board cache.
+
+        第 4 个元素是 qfq 表的内容版本（data_versions）：除权重物化会原位
+        改写价格而不改变行数/最大日期，必须把版本纳入 token 才能让缓存感知。
+        """
         with self._connect() as conn:
             market = conn.execute(
                 "SELECT MAX(time) AS latest_time, COUNT(*) AS row_count FROM market_data_qfq"
@@ -691,11 +713,18 @@ class Database:
             metadata = conn.execute(
                 "SELECT MAX(updated_at) AS latest_metadata FROM instrument_metadata"
             ).fetchone()
+            version = self._bump_free_version(conn, "market_data_qfq")
         return (
             str(market["latest_time"] or "") if market else "",
             int(market["row_count"] or 0) if market else 0,
             str(metadata["latest_metadata"] or "") if metadata else "",
+            version,
         )
+
+    @staticmethod
+    def _bump_free_version(conn, name: str) -> int:
+        row = conn.execute("SELECT version FROM data_versions WHERE name = ?", (name,)).fetchone()
+        return int(row["version"] or 0) if row else 0
 
     def save_instrument_categories(self, categories: list[dict[str, Any]]) -> int:
         records: list[tuple] = []
@@ -743,6 +772,29 @@ class Database:
                    ORDER BY level, parent_path IS NULL DESC, parent_path, priority IS NULL, priority, name"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # data_versions（行情内容版本）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _bump_data_version_conn(conn, name: str) -> int:
+        conn.execute(
+            """INSERT INTO data_versions (name, version) VALUES (?, 1)
+               ON CONFLICT(name) DO UPDATE SET version = version + 1""",
+            (name,),
+        )
+        row = conn.execute("SELECT version FROM data_versions WHERE name = ?", (name,)).fetchone()
+        return int(row["version"] or 0)
+
+    def get_data_version(self, name: str) -> int:
+        """Current content version for *name* (0 when never written)."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT version FROM data_versions WHERE name = ?", (name,)).fetchone()
+        return int(row["version"] or 0) if row else 0
+
+    @staticmethod
+    def market_data_version_name(symbol: str, price_mode: str = "qfq") -> str:
+        return f"{Database._market_table(price_mode)}:{symbol}"
 
     # ------------------------------------------------------------------
     # market_data
@@ -807,6 +859,8 @@ class Database:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 records,
             )
+            self._bump_data_version_conn(conn, table)
+            self._bump_data_version_conn(conn, f"{table}:{symbol}")
         self._market_symbols_cache.pop(table, None)
 
     def replace_market_data(self, symbol: str, df, price_mode: str = "qfq") -> int:
@@ -822,6 +876,10 @@ class Database:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     records,
                 )
+            # 原位重写也要推进版本：除权重物化后行数/日期不变，
+            # 只有版本号能让看板与指标缓存感知价格口径已变。
+            self._bump_data_version_conn(conn, table)
+            self._bump_data_version_conn(conn, f"{table}:{symbol}")
         self._market_symbols_cache.pop(table, None)
         return len(records)
 
@@ -873,6 +931,7 @@ class Database:
         table = self._market_table(price_mode)
         with self._connect() as conn:
             cur = conn.execute(f"DELETE FROM {table}")
+            self._bump_data_version_conn(conn, table)
             self._market_symbols_cache.pop(table, None)
             return int(cur.rowcount or 0)
 
@@ -1130,8 +1189,14 @@ class Database:
                 (param_set, params_json, 1 if is_default else 0, int(formula_version)),
             )
 
-    def save_indicator_daily(self, symbol: str, df, formula_version: int, price_mode: str = "qfq") -> int:
-        """Replace one symbol's cached indicator rows (full-symbol rebuild)."""
+    def save_indicator_daily(
+        self, symbol: str, df, formula_version: int, price_mode: str = "qfq", data_version: int = 0
+    ) -> int:
+        """Replace one symbol's cached indicator rows (full-symbol rebuild).
+
+        ``data_version`` 记录构建时的行情内容版本（data_versions），
+        供 ``indicator_cache_info`` / ``_cache_fresh`` 识别价格口径漂移。
+        """
         if df.empty:
             return 0
 
@@ -1149,7 +1214,7 @@ class Database:
         )
         values = [col(name) for name in columns]
         records = [
-            (symbol, times[i], *row_vals, price_mode, int(formula_version))
+            (symbol, times[i], *row_vals, price_mode, int(formula_version), int(data_version))
             for i, row_vals in enumerate(zip(*values))
         ]
         with self._connect() as conn:
@@ -1162,8 +1227,8 @@ class Database:
                     macd_dif, macd_dea, macd_hist,
                     boll_mid, boll_up, boll_dn,
                     rsi_avg_gain, rsi_avg_loss, macd_ema12, macd_ema26,
-                    price_mode, formula_version, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                    price_mode, formula_version, data_version, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                 records,
             )
         return len(records)
@@ -1179,7 +1244,10 @@ class Database:
             return pd.DataFrame()
         return pd.DataFrame([dict(r) for r in rows])
 
-    def save_trend_daily(self, symbol: str, df, formula_version: int, param_set: str = "default", price_mode: str = "qfq") -> int:
+    def save_trend_daily(
+        self, symbol: str, df, formula_version: int, param_set: str = "default",
+        price_mode: str = "qfq", data_version: int = 0
+    ) -> int:
         if df.empty:
             return 0
 
@@ -1190,7 +1258,7 @@ class Database:
         columns = ("trend_score", "trend_ma5", "trend_ma10", "price_direction", "confidence")
         values = [col(name) for name in columns]
         records = [
-            (symbol, times[i], param_set, *row_vals, price_mode, int(formula_version))
+            (symbol, times[i], param_set, *row_vals, price_mode, int(formula_version), int(data_version))
             for i, row_vals in enumerate(zip(*values))
         ]
         with self._connect() as conn:
@@ -1200,8 +1268,8 @@ class Database:
             conn.executemany(
                 """INSERT INTO trend_daily
                    (symbol, time, param_set, trend_score, trend_ma5, trend_ma10,
-                    price_direction, confidence, price_mode, formula_version, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                    price_direction, confidence, price_mode, formula_version, data_version, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                 records,
             )
         return len(records)
@@ -1254,20 +1322,22 @@ class Database:
         """Coverage/version info used for staleness checks."""
         with self._connect() as conn:
             ind = conn.execute(
-                "SELECT COUNT(*) AS n, MAX(time) AS last, MAX(formula_version) AS ver FROM indicator_daily WHERE symbol = ?",
+                "SELECT COUNT(*) AS n, MAX(time) AS last, MAX(formula_version) AS ver, MAX(data_version) AS dv FROM indicator_daily WHERE symbol = ?",
                 (symbol,),
             ).fetchone()
             trend = conn.execute(
-                "SELECT COUNT(*) AS n, MAX(time) AS last, MAX(formula_version) AS ver FROM trend_daily WHERE symbol = ? AND param_set = 'default'",
+                "SELECT COUNT(*) AS n, MAX(time) AS last, MAX(formula_version) AS ver, MAX(data_version) AS dv FROM trend_daily WHERE symbol = ? AND param_set = 'default'",
                 (symbol,),
             ).fetchone()
         return {
             "indicator_rows": int(ind["n"] or 0),
             "indicator_last": ind["last"],
             "indicator_version": ind["ver"],
+            "indicator_data_version": int(ind["dv"] or 0),
             "trend_rows": int(trend["n"] or 0),
             "trend_last": trend["last"],
             "trend_version": trend["ver"],
+            "trend_data_version": int(trend["dv"] or 0),
         }
 
     def indicator_cache_symbols(self) -> set[str]:

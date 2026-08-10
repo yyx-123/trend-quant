@@ -31,7 +31,7 @@ from core.display import filter_fully_classified, format_symbol_display
 from core.display import load_instrument_name_map as _config_name_map
 from services.market_indicators import compute_market_indicators, trend_config as _trend_config
 from services.dashboard import RevisionCache, build_subject_dashboard_payload
-from core.calendar import is_realtime_available, is_trading_day
+from core.calendar import is_past_market_open, is_realtime_available, is_trading_day
 from core.symbols import normalize_symbol as _normalize_symbol
 from data.intraday_service import build_intraday_dashboard, build_intraday_overlay
 from data.service import DataService
@@ -124,8 +124,9 @@ def trend_dashboard() -> dict:
 def intraday_dashboard(category: str = "") -> dict:
     """获取实时标的看板（基于当天实时报价，含盘中趋势值）。
 
-    仅在交易日 9:30-15:00（含午间休盘 11:30-13:00）可用；
-    非交易时段请使用 trend_dashboard 获取日K看板。
+    交易日 9:30 开盘后（含午间休盘 11:30-13:00 与收盘后）可用；收盘后
+    返回的是基于收盘报价的当日快照（日K补库任务落库前）。非交易日或
+    开盘前请使用 trend_dashboard 获取日K看板。
 
     Args:
         category: 可选，按分类筛选（匹配 L1/L2/L3），如 "宽基"、"行业"、
@@ -135,6 +136,7 @@ def intraday_dashboard(category: str = "") -> dict:
     Returns:
         与 trend_dashboard 相同的三级分类结构，另含:
         - is_intraday: True
+        - post_close: True 表示收盘后快照（非盘中实时）
         - intraday_ts: 计算时间戳
         - 每个标的的 daily_change_pct 为实时涨跌幅
     """
@@ -144,10 +146,10 @@ def intraday_dashboard(category: str = "") -> dict:
             "ok": False,
             "error": "今日非交易日，无实时数据；请使用 trend_dashboard 获取日K看板",
         }
-    if not is_realtime_available(now):
+    if not is_past_market_open(now):
         return {
             "ok": False,
-            "error": "当前非实时行情时段（交易日 9:30-15:00，含午间休盘）；请使用 trend_dashboard 获取日K看板",
+            "error": "今日尚未开盘（需 9:30 之后）；请使用 trend_dashboard 获取日K看板",
         }
 
     db = get_db()
@@ -172,10 +174,15 @@ def intraday_dashboard(category: str = "") -> dict:
     if not classified:
         return {"ok": False, "error": "无符合条件的标的（需完整三级分类）"}
 
-    payload = build_intraday_dashboard(
-        classified, db, DataService(), _trend_config()
-    )
+    ds = DataService()
+    try:
+        payload = build_intraday_dashboard(
+            classified, db, ds, _trend_config()
+        )
+    finally:
+        ds.close()
     payload["ok"] = True
+    payload["post_close"] = not is_realtime_available(now)
     payload["requested_category"] = category.strip() or None
     return payload
 
@@ -282,6 +289,11 @@ def symbol_detail(symbol: str, days: int = 60, rsi_period: int = 14, intraday: b
             payload["indicators"]["trend_intraday"] = overlay["trend"]
             payload["meta"]["is_intraday"] = True
             payload["meta"]["intraday_ts"] = overlay["ts"]
+            payload["meta"]["post_close"] = bool(overlay.get("post_close"))
+            # dates 已含当日合成K线：meta.end 必须与载荷一致，并标注其为
+            # 合成（未落库）数据，避免消费方拿 meta.end 误判数据新鲜度。
+            payload["meta"]["end"] = overlay["date"]
+            payload["meta"]["end_is_synthetic"] = True
 
     return payload
 

@@ -78,8 +78,11 @@ def rebuild_symbol(symbol: str, trend_cfg: dict, db=None) -> dict:
         return {"symbol": symbol, "status": "no_data", "rows": 0}
     ind_frame = compute_indicator_frame(df)
     trend_frame = compute_trend_frame(df, trend_cfg)
-    ind_rows = db.save_indicator_daily(symbol, ind_frame, INDICATOR_FORMULA_VERSION)
-    trend_rows = db.save_trend_daily(symbol, trend_frame, TREND_FORMULA_VERSION)
+    # 记录构建时的行情内容版本：之后 qfq 若被原位重写（除权重物化），
+    # _cache_fresh 能据此识别缓存已陈旧，而不是只看日期。
+    data_version = db.get_data_version(db.market_data_version_name(symbol))
+    ind_rows = db.save_indicator_daily(symbol, ind_frame, INDICATOR_FORMULA_VERSION, data_version=data_version)
+    trend_rows = db.save_trend_daily(symbol, trend_frame, TREND_FORMULA_VERSION, data_version=data_version)
     return {"symbol": symbol, "status": "rebuilt", "rows": ind_rows, "trend_rows": trend_rows}
 
 
@@ -210,7 +213,14 @@ def run_post_update_pipeline(settings, data_service, update_payload: dict, symbo
         for r in update_payload.get("results", [])
         if isinstance(r, dict) and r.get("status") == "updated"
     }
-    targets = sorted(updated | set(broken))
+    # qfq 自愈重物化（qfq_behind / 因子变化）的标的：行数与日期可能完全
+    # 不变、status 仍是 up_to_date，但价格口径已改写，指标缓存必须重建。
+    rematerialized = {
+        str(r.get("symbol", "")).strip().upper()
+        for r in update_payload.get("results", [])
+        if isinstance(r, dict) and r.get("qfq_rematerialized") == "ok"
+    }
+    targets = sorted(updated | rematerialized | set(broken))
     if not targets:
         return {"status": "up_to_date", "dividend_breaks": broken, "rebuilt": 0}
 

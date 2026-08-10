@@ -262,7 +262,9 @@ FAKE_QUOTE = {
     "low": 1.8,
     "volume": 500000,
     "amount": 1000000,
-    "ts": "2026-07-22T15:00:00",
+    # ts 必须是“今天”——陈旧报价（如停牌股的上一交易日快照）会被
+    # is_quote_fresh 拒绝，不合成当日K线。
+    "ts": date.today().isoformat() + "T15:00:00",
 }
 
 FAKE_INTRADAY_RESULT = {

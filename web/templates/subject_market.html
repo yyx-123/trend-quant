@@ -467,13 +467,20 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   }
 
   // ---- Intraday button & progress -----------------------------------------
+  let lastTradingStatus = null;
+  function isPostClose() {
+    return !!(lastTradingStatus && lastTradingStatus.is_past_market_open && !lastTradingStatus.is_realtime_available);
+  }
   async function checkTradingStatus() {
     try {
       const resp = await fetch('/subject-market/api/trading-status');
       const status = await resp.json();
-      if (status.is_realtime_available) {
+      lastTradingStatus = status;
+      if (status.is_past_market_open) {
         intradayBtn.disabled = false;
-        intradayBtn.title = '点击获取基于实时报价的盘中趋势值看板（午间休盘也可用）';
+        intradayBtn.title = isPostClose()
+          ? '今日已收盘：获取基于收盘报价的当日看板（日K补库前的收盘快照）'
+          : '点击获取基于实时报价的盘中趋势值看板（午间休盘也可用）';
       } else {
         intradayBtn.disabled = true;
         intradayBtn.title = status.next_session || '非交易时段';
@@ -533,8 +540,12 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       board.innerHTML = (data.groups || []).map(renderGroup).join('');
       renderHeatmap(data);
       isIntradayMode = true;
+      const modeLabel = isPostClose() ? '收盘快照' : '盘中实时';
+      const modeHint = isPostClose()
+        ? '⚠️ 数据基于收盘报价，日K补库任务落库后将以盘后确认值为准'
+        : '⚠️ 数据基于当前实时价格估算，非最终盘后确认值';
       statusEl.innerHTML = board.children.length
-        ? `<span class="intraday-dot"></span> 盘中实时 · ${data.as_of || ''} · ⚠️ 数据基于当前实时价格估算，非最终盘后确认值`
+        ? `<span class="intraday-dot"></span> ${modeLabel} · ${data.as_of || ''} · ${modeHint}`
         : '盘中无可用数据。';
       statusEl.className = 'intraday-status-bar';
     } catch (error) {
@@ -553,5 +564,10 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   checkTradingStatus();
   // Re-check trading status every 60 seconds.
   setInterval(checkTradingStatus, 60000);
+  // 盘后数据更新完成后自动重载最新 EOD 看板（用户正在看盘盘中实时视图时不打断）。
+  document.addEventListener('daily-update-done', function() {
+    if (!isIntradayMode) loadBoard();
+    checkTradingStatus();
+  });
 </script>
 {% endblock %}

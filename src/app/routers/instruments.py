@@ -475,8 +475,23 @@ async def daily_update_status() -> dict:
     """Latest 16:30 daily data update status for the global notification bar."""
     run = get_db().get_latest_job_run("daily_update")
     if not run:
-        return {"ts": None, "completed": False, "message": "暂无更新记录"}
+        return {"ts": None, "completed": False, "ok": False, "message": "暂无更新记录"}
     payload = run.get("payload") or {}
+    status = str(run.get("status") or "")
+    if status == "failed":
+        # 任务整体失败：必须如实上抛，不能伪装成「成功 0 只」。
+        return {
+            "ts": payload.get("ts") or run.get("created_at"),
+            "date": run.get("run_date"),
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "failed_symbols": [],
+            "completed": True,
+            "ok": False,
+            "status": status,
+            "message": f"盘后数据更新失败：{payload.get('error', '未知错误')}",
+        }
     return {
         "ts": payload.get("ts") or run.get("created_at"),
         "date": run.get("run_date"),
@@ -485,4 +500,6 @@ async def daily_update_status() -> dict:
         "failed": payload.get("failed", 0),
         "failed_symbols": payload.get("failed_symbols", []),
         "completed": True,
+        "ok": status in ("completed", "partial", ""),
+        "status": status or "completed",
     }

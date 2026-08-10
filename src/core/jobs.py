@@ -47,14 +47,21 @@ def _pool_symbols() -> list[str]:
     return symbols
 
 
-def daily_market_update_job(settings: Settings, data_service: DataService | None = None) -> dict:
+def daily_market_update_job(
+    settings: Settings,
+    data_service: DataService | None = None,
+    force: bool = False,
+) -> dict:
     """Incrementally backfill daily K-line data for the whole instrument pool.
 
     Records a ``job_runs`` row on non-trading days (skip) and on failures;
     successful trading-day runs are recorded by ``DataService.update_pool_daily``.
+
+    ``force=True``（启动补偿调用）在非交易日也执行——定时任务本身只在
+    工作日触发，但补跑可能发生在周末/节假日，用于补齐错过的交易日数据。
     """
     today = date.today()
-    if not is_trading_day(today):
+    if not force and not is_trading_day(today):
         logger.info("Daily market update skipped: %s is not a trading day", today.isoformat())
         payload = {
             "ts": datetime.now().isoformat(),

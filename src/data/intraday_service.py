@@ -19,7 +19,7 @@ import pandas as pd
 
 from data.storage.db import Database
 from data.service import DataService
-from core.calendar import is_past_market_open
+from core.calendar import is_past_market_open, is_realtime_available, market_now
 from core.indicators import atr as _compute_atr
 from core.trend import _detect_trend_phase
 from core.trend import calculate_trend_score_snapshot, safe_float
@@ -29,6 +29,59 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # synthetic bar construction
 # ---------------------------------------------------------------------------
+
+
+def quote_trade_date(quote: dict) -> "date | None":
+    """Extract the trading date carried by a real-time quote.
+
+    Handles ISO-ish strings and epoch seconds/milliseconds; returns None
+    when the quote carries no parseable timestamp.
+    """
+    from datetime import date, timezone  # noqa: PLC0415
+
+    raw = quote.get("ts")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        epoch = float(text)
+    except ValueError:
+        epoch = None
+    if epoch is not None and epoch > 1e9:
+        seconds = epoch / 1000.0 if epoch > 1e12 else epoch
+        market_tz = market_now().tzinfo
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).astimezone(market_tz).date()
+    parsed = pd.to_datetime(text, errors="coerce")
+    if parsed is None or pd.isna(parsed):
+        return None
+    ts = pd.Timestamp(parsed)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(market_now().tzinfo)
+    return ts.date()
+
+
+def is_quote_fresh(quote: dict) -> bool:
+    """True when the quote may represent today's session.
+
+    A quote whose trade date parses to an earlier day — e.g. a suspended
+    （停牌） symbol's last trade, or a vendor-stale snapshot — must never be
+    synthesized into a "today" bar. Quotes with no parseable timestamp are
+    allowed through (``price is None`` remains the hard failure mode and is
+    handled by callers); the session gates already restrict synthesis to
+    trading days past the open.
+    """
+    trade_date = quote_trade_date(quote)
+    if trade_date is None:
+        return True
+    fresh = trade_date >= market_now().date()
+    if not fresh:
+        logger.info(
+            "Discarding stale quote (trade date %s, today %s) for %s",
+            trade_date, market_now().date(), quote.get("symbol"),
+        )
+    return fresh
 
 
 def _number(value: object) -> float | None:
@@ -59,11 +112,20 @@ def build_synthetic_bar(quote: dict, prev_volume: float) -> dict:
     quote_price = _number(quote.get("price")) or 0.0
     quote_amount = _number(quote.get("amount")) or 0.0
 
+    # Missing/zero OHLC fields (e.g. suspended symbols) must not collapse
+    # the bar to open=0/low=0 — fall back to the last price.
+    if quote_open <= 0:
+        quote_open = quote_price
+    if quote_high <= 0:
+        quote_high = max(quote_open, quote_price)
+    if quote_low <= 0:
+        quote_low = min(quote_open, quote_price)
+
     return {
-        "time": datetime.now(),
+        "time": market_now().replace(tzinfo=None),  # naive Beijing wall time, matching DB bars
         "open": quote_open,
         "high": max(quote_high, quote_open, quote_price),
-        "low": min(quote_low, quote_open, quote_price) if quote_low > 0 else min(quote_open, quote_price),
+        "low": min(quote_low, quote_open, quote_price),
         "close": quote_price,
         "volume": float(prev_volume) if prev_volume > 0 else 0.0,
         "amount": quote_amount,
@@ -90,6 +152,20 @@ def _clean_daily_hist(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+def has_persisted_today_bar(hist: pd.DataFrame) -> bool:
+    """True when *hist* already contains today's persisted bar.
+
+    「当日K线已落库 → DB 数据优先」的唯一实现：intraday overlay 与
+    止损/持仓路径共用，任何第三处需要此判断时也必须复用本函数。
+    """
+    if hist.empty or "time" not in hist.columns:
+        return False
+    last = pd.to_datetime(hist["time"], errors="coerce").max()
+    if pd.isna(last):
+        return False
+    return pd.Timestamp(last).date() >= market_now().date()
 
 
 def build_intraday_overlay(
@@ -121,12 +197,12 @@ def build_intraday_overlay(
         return None
     try:
         hist = _clean_daily_hist(hist)
-        if hist.empty or hist["time"].iloc[-1].date() >= datetime.now().date():
+        if hist.empty or has_persisted_today_bar(hist):
             # Today's bar is already persisted — nothing to overlay.
             return None
         ds = data_service or DataService()
         quote = ds.fetch_latest_quote(symbol)
-        if not quote or quote.get("price") is None:
+        if not quote or quote.get("price") is None or not is_quote_fresh(quote):
             return None
         result = compute_intraday_trend_score(hist, quote, trend_config)
         if not result.get("ok"):
@@ -137,8 +213,12 @@ def build_intraday_overlay(
         if quote_vol > 0:
             synth["volume"] = quote_vol
         return {
-            "date": str(datetime.now().date()),
-            "ts": datetime.now().isoformat(),
+            "date": str(market_now().date()),
+            "ts": market_now().isoformat(),
+            # 收盘后为 True：合成K线来自收盘报价快照（日K补库前的估算），
+            # 供前端/MCP 正确标注「收盘估算」而非「盘中实时」（不依赖
+            # 消费方时区去解析 ts）。
+            "post_close": not is_realtime_available(),
             "bar": synth,
             "trend": {
                 "score": result["trend_score"],
@@ -186,6 +266,18 @@ def compute_intraday_trend_cached(
     volume = pd.to_numeric(tail_bars["volume"], errors="coerce").fillna(0.0)
     if close.empty:
         return {"ok": False, "reason": "insufficient_tail", "is_intraday": True}
+
+    # 锚点新鲜度校验：缓存锚点行（EMA/ATR 递推状态）的日期必须覆盖尾部
+    # 最后一根K线，否则说明行情已更新而指标缓存未重建（盘后流水线失败/
+    # 进行中），混用旧锚点与新收盘价会产出错误趋势值 —— 回退全量计算。
+    tail_last_date = pd.to_datetime(tail_bars["time"], errors="coerce").dropna().max()
+    anchor_date = pd.to_datetime(cache_row.get("time"), errors="coerce")
+    if (
+        pd.notna(tail_last_date)
+        and pd.notna(anchor_date)
+        and pd.Timestamp(anchor_date).date() < pd.Timestamp(tail_last_date).date()
+    ):
+        return {"ok": False, "reason": "stale_anchor", "is_intraday": True}
 
     prev_close = safe_float(close.iloc[-1], 0.0)
     prev_volume = safe_float(volume.iloc[-1], 0.0)
@@ -502,6 +594,10 @@ def build_intraday_dashboard(
         if not quote or "error" in quote or quote.get("price") is None:
             failed.append(symbol)
             continue
+        if not is_quote_fresh(quote):
+            # 停牌/陈旧报价：其 trade date 不是今天，绝不能当今日行情用。
+            failed.append(symbol)
+            continue
 
         meta = metadata_map.get(symbol, {})
         symbol = str(symbol)
@@ -612,7 +708,9 @@ def build_intraday_dashboard(
                 "name": name or symbol,
                 "time": datetime.now(),
                 "trend_score": result["trend_score"],
-                "return_1d": _number(quote.get("price")) or 0.0,
+                # 初始化为 None：日涨幅必须由「今收/昨收」在下方重算得出，
+                # 尾部数据缺失时保持 None 而不是错误地显示价格本身。
+                "return_1d": None,
                 "return_5d": 0.0,  # will be computed from history below
                 "return_20d": 0.0,
                 "return_60d": 0.0,
@@ -849,4 +947,6 @@ def build_intraday_dashboard(
         "instrument_count": len(instruments),
         "is_intraday": True,
         "intraday_ts": datetime.now().isoformat(),
+        # 报价失败/停牌/分类不全的标的：让调用方能区分「无数据」与「被省略」。
+        "failed_symbols": sorted(set(failed)),
     }
