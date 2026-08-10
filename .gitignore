@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -23,6 +23,8 @@ logs/calc/*.jsonl
 data/runtime/**
 data/*.db
 data/*.db.bak-*
+# 本地脚本/迁移的运行产物（扫描报告、断点、删档留档等）
+data/*.json
 
 # Local Codex app state
 .codex/config.toml
