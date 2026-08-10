@@ -1,38 +1,86 @@
 ---
 name: trend-quant-mcp
 description: >
-  通过 MCP 连接 Trend Quant 后端，获取 A 股 ETF 的趋势看板、标的详情、止损计算、标的列表，
-  以及手工交易的录入与持仓概览。
-  当用户需要查看市场趋势、分析 ETF 技术指标、计算止损价、查询可用标的、
-  记录一笔买入交易、或查看当前持仓的浮盈/止损情况时触发使用。
-  本 Skill 通过 MCP SSE 远程连接后端服务器，无需本地数据。
+  通过 MCP 连接 Trend Quant 后端服务器，获取 A 股 ETF 的趋势量化分析
+  （趋势看板、标的详情、技术指标、止损计算）和手工交易（录入、持仓）能力。
+  当用户需要查看市场趋势、分析 ETF 技术面、计算止损价、查询标的、
+  记录交易或查看持仓时触发使用。
+  服务端会持续新增和调整工具，可用工具清单以运行时 tools/list 返回为准。
 ---
 
 # Trend Quant MCP 服务
 
-## 用途
+A 股 ETF 趋势量化后端，以 MCP 服务器形式远程提供。本 Skill 说明**如何连接和调用**该服务；具体有哪些工具、每个工具的参数与返回值，**一律以运行时 `tools/list` 的返回为准**（服务端会持续新增/调整工具，不要假设存在固定工具清单）。
 
-通过 MCP 远程连接 Trend Quant 后端，获取 A 股 ETF 的趋势量化分析能力。Agent 侧通过 SSE 协议连接，调用 7 个工具获取数据或录入手工交易。工具的详细参数和返回值由 MCP 协议自动提供，此处不再重复。
+## 连接信息
 
-## 连接配置
+| 项目 | 值 |
+|---|---|
+| 公网 URL | `http://121.199.173.214:9000/mcp/sse` |
+| 服务器本机/内网 URL | `http://127.0.0.1:9000/mcp/sse`（或 `http://<内网IP>:9000/mcp/sse`） |
+| 传输协议 | MCP over **SSE**（Server-Sent Events） |
+| 认证 | 无（当前版本未启用 API Key） |
+
+端口说明：服务进程监听 9000，经 frp TCP 隧道映射到公网 `121.199.173.214:9000`，两者等价。在服务器本机调用时优先用本地地址，不依赖 frp 隧道状态。
+
+## 客户端配置
+
+支持 MCP 的客户端（Kimi Code、Claude Code、Cursor 等）在 MCP 配置中加入：
 
 ```json
 {
   "mcpServers": {
     "trend-quant": {
-      "url": "http://121.199.173.214:8000/mcp/sse"
+      "url": "http://121.199.173.214:9000/mcp/sse"
     }
   }
 }
 ```
 
-- **传输方式**：SSE（Server-Sent Events）over HTTP
-- **无认证**：当前版本未启用 API Key
-- **超时注意**：首次调用 `trend_dashboard` 需 5-10 秒（计算 600+ 标的），后续命中缓存秒返
+配置后该服务器的工具会以 `mcp__trend-quant__<工具名>` 的形式出现在工具列表中，直接调用即可。
+
+## 工具发现（重要）
+
+**不要凭记忆或文档假设工具清单。** 每次会话中如需了解可用能力，调用 MCP 标准的 `tools/list` 方法（MCP 客户端通常自动完成），返回中包含每个工具的：
+
+- `name`：工具名
+- `description`：功能说明、适用场景、使用注意事项（服务端维护，是最权威的用法文档）
+- `inputSchema`：参数的 JSON Schema（名称、类型、默认值、是否必填）
+
+调用工具前若不确定参数，先看该工具的 `inputSchema` 和 `description`。
+
+## 原始协议调用（无 MCP 客户端时）
+
+标准 MCP SSE 握手流程（已实测可用，协议版本 `2024-11-05`）：
+
+```bash
+# 1. 建立 SSE 长连接，第一条事件给出消息端点（含 session_id）
+curl -N -H 'Accept: text/event-stream' http://121.199.173.214:9000/mcp/sse
+# → event: endpoint
+# → data: /mcp/messages/?session_id=<SESSION_ID>
+
+# 2. 保持 SSE 连接不断开，向消息端点 POST JSON-RPC 请求
+#    （POST 只返回 "Accepted"，真正的响应通过 SSE 流推送）
+curl -X POST "http://121.199.173.214:9000/mcp/messages/?session_id=<SESSION_ID>" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"manual","version":"0.1"}}}'
+
+# 3. 发送 initialized 通知后即可调用 tools/list、tools/call
+curl -X POST "http://121.199.173.214:9000/mcp/messages/?session_id=<SESSION_ID>" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+curl -X POST "http://121.199.173.214:9000/mcp/messages/?session_id=<SESSION_ID>" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+注意：`session_id` 只在 SSE 连接存活期间有效，连接断开需重新握手。
 
 ---
 
 ## 领域知识
+
+解读工具返回数据所需的领域概念（与具体工具无关，较为稳定）。
 
 ### 趋势值（Trend Score）
 
@@ -54,7 +102,7 @@ description: >
 
 ### 趋势值 MA5（Trend MA5）
 
-趋势值的 5 日均值，是**看板中的主要排序指标**。与单点趋势值相比，MA5 更能反映趋势的持续性而非短期波动。
+趋势值的 5 日均值，是**看板类数据的主要排序指标**。与单点趋势值相比，MA5 更能反映趋势的持续性而非短期波动。
 
 ### 强度百分位（Strength）
 
@@ -62,14 +110,17 @@ description: >
 
 ### 趋势相位（Trend Phase）
 
-对趋势状态的定性判断：
-- **上升趋势**：趋势值和 MA5 同时向上
-- **下降趋势**：趋势值和 MA5 同时向下
-- **震荡**：方向不明确
+对趋势状态的定性信号，基于趋势值与 MA5 的绝对水平判定（不是方向比较）：
+
+- **趋势启动（start）**：trend_score ≥ 5 且 trend_ma5 ≥ 0
+- **趋势结束（end）**：trend_score ≤ -5 且 trend_ma5 ≤ 0
+- **其余情况**：无相位（None）
+
+相位信息还包含：`days`（相位已持续的交易日数，信号日为第 1 天）、`change_pct`（信号日收盘 → 最新收盘的涨跌幅）、`signal_date`（信号触发日）。
 
 ### 硬止损（Hard Stop）
 
-买入后立即生效的止损线，计算方式：买入价 − 买入日 ATR(20) × 1.5。
+买入后立即生效的止损线，计算方式：买入价 − 买入日 ATR(20) × 1.5（默认值，标的可自定义倍数覆盖）。
 
 目的是在趋势判断错误时快速止损，防止损失扩大。止损位应该在买入前计算好，作为风险控制的重要参考。
 
@@ -81,52 +132,9 @@ description: >
 
 ---
 
-## 调用模式
+## 通用注意事项
 
-### 模式 1：市场概览 → 深入分析
-
-```
-trend_dashboard()          → 扫全市场，找到趋势最强的板块和标的
-symbol_detail(symbol, days) → 对感兴趣的标的深入分析
-```
-
-典型用法："帮我看看现在哪些板块趋势最强？" → 先调 `trend_dashboard`，在结果中找 strength 高、趋势相位刚进入"上升趋势"的标的，再调 `symbol_detail` 看技术面。
-
-### 模式 2：发现标的 → 计算止损
-
-```
-list_instruments(keyword="XX")        → 找到标的代码
-calc_stop_loss(symbol, buy_date, buy_price) → 计算止损
-```
-
-典型用法："我想买沪深300，帮我算一下止损位" → 先用 `list_instruments` 确认标的代码，再用 `calc_stop_loss` 计算硬止损和吊灯止损。
-
-### 模式 3：风险评估
-
-```
-symbol_detail(symbol, days=60)  → 获取标的详细数据
-calc_stop_loss(symbol, ...)     → 计算止损价
-```
-
-对比最新价格和止损价的距离，评估当前风险收益比。
-
-### 模式 4：手工交易记录与持仓跟踪
-
-```
-add_trade(username, password, symbol, buy_date, buy_price, shares) → 录入一笔买入
-open_positions(username, password)  → 查看当前持仓实时概览
-```
-
-典型用法："我前天以 4.12 买了 10000 份沪深300，帮我记一笔" → 用 `add_trade` 录入（买入价会校验落在当日价格区间内）。"帮我看看现在持仓怎么样" → 用 `open_positions` 获取每笔持仓的浮盈、最大回撤、硬/吊灯止损价及触发状态，交易时段内为盘中实时口径。
-
-**注意**：`add_trade` / `open_positions` 需要用户提供手工交易账号的用户名和密码（与网页端手工交易同一套账号），调用前先向用户索取；这两个工具会操作用户的真实交易记录，录入前请与用户确认日期、价格、份数无误。
-
----
-
-## 实践注意事项
-
-- **首次调用 `trend_dashboard` 较慢**（5-10 秒），因需计算 600+ 标的趋势值。后续命中缓存秒返。
-- **`symbol_detail` 指标需要至少 30 根 K 线**做回看。设置 `days` 过小时，OHLCV 数据正确截断，但指标序列可能包含更多回看数据点。
 - **标的代码格式**：支持 `510300.SS`（带后缀）和 `510300`（自动补全）。`.SS` 上海、`.SZ` 深圳。
-- **`calc_stop_loss`**：若标的在 DB（instrument_metadata 表）中自定义了 `stop_atr_mul`，自动覆盖默认值 1.5。ATR 来自预计算缓存（indicator_daily.atr，单一来源）。
-- **数据时效**：依赖 Trend Quant 后端每日 16:30 的数据更新，若未正常运行数据会滞后。
+- **数据口径**：日 K 数据依赖后端每日 16:30 的数据更新，最新一根 K 线通常是上一个交易日；盘中实时数据仅在交易日 9:30-15:00（含午间休盘）可得，其余时段相关工具会返回提示或静默回退为日 K 口径。具体行为以各工具的 description 为准。
+- **写操作类工具**（如手工交易录入）：需要用户提供手工交易账号的用户名和密码（与网页端同一套账号），调用前先向用户索取；这类工具操作用户的真实交易记录，调用前必须与用户确认关键参数（日期、价格、数量）无误。
+- **性能**：看板类数据有缓存通常秒返；全市场（600+ 标的）的实时计算可能需要 1 分钟以上，能缩小范围就缩小范围。
