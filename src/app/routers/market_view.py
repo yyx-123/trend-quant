@@ -312,7 +312,33 @@ async def get_market_daily(
             ])
             payload["volumes"].append(_num(bar["volume"]))
             payload["amounts"].append(_num(bar["amount"]))
-            payload["indicators"]["trend_intraday"] = overlay["trend"]
+            # --- In-memory intraday indicator recompute -------------------
+            # 同花顺-style: treat the synthetic bar as today's (still
+            # forming) bar and recompute the FULL indicator suite on
+            # history + synth bar, so MACD/MA/BOLL/BIAS/RSI/ATR/volume_ma/
+            # trend all have a live value for today.
+            # Everything below is strictly in-memory — the recomputed
+            # intraday values are NEVER written to the DB; persisted EOD
+            # indicators remain owned by the 16:30 daily job.
+            synth_row = pd.DataFrame([{
+                "time": pd.to_datetime(bar["time"], errors="coerce"),
+                "open": bar["open"],
+                "high": bar["high"],
+                "low": bar["low"],
+                "close": bar["close"],
+                "volume": bar["volume"],
+                "amount": bar["amount"],
+            }])
+            combined = pd.concat([data, synth_row], ignore_index=True)
+            for col in ("open", "high", "low", "close", "volume", "amount"):
+                if col in combined.columns:
+                    combined[col] = pd.to_numeric(combined[col], errors="coerce")
+            indicators = compute_market_indicators(combined, trend_cfg, rsi_period_value)
+            # Keep the fixed-semantics intraday trend snapshot alongside the
+            # recomputed suite (fixed ATR/volume — used by API consumers
+            # that need the uncontaminated signal value).
+            indicators["trend_intraday"] = overlay["trend"]
+            payload["indicators"] = indicators
             payload["meta"]["is_intraday"] = True
             payload["meta"]["intraday_ts"] = overlay["ts"]
 

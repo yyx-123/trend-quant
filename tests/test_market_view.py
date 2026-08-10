@@ -221,6 +221,7 @@ class MarketViewApiTest(unittest.IsolatedAsyncioTestCase):
                 symbol="518850.SS",
                 limit=market_view.DEFAULT_LIMIT,
                 rsi_period=7,
+                intraday=False,
             )
 
         self.assertEqual(payload["meta"]["rsi_config"]["period"], 7)
@@ -341,6 +342,46 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["volumes"][-1], FAKE_QUOTE["volume"])
         self.assertIn("trend_intraday", payload["indicators"])
         mock_ds_cls.return_value.fetch_latest_quote.assert_called_once()
+
+    async def test_intraday_recomputes_all_indicators_with_synth_bar(self) -> None:
+        """同花顺-style: every indicator series gains a live value for today
+        (history + synthetic bar), computed in memory only."""
+        df = _daily_bars_ending(date.today() - timedelta(days=1))
+
+        payload, _ = await self._call_daily(df, past_open=True)
+
+        indicators = payload["indicators"]
+        expected_len = len(df) + 1
+        # Series-aligned indicators all carry today's recomputed point.
+        self.assertEqual(len(indicators["macd"]["dif"]), expected_len)
+        self.assertIsNotNone(indicators["macd"]["dif"][-1])
+        self.assertIsNotNone(indicators["macd"]["dea"][-1])
+        self.assertIsNotNone(indicators["macd"]["bar"][-1])
+        for period in ("5", "10", "20", "30", "40", "60"):
+            self.assertEqual(len(indicators["ma"][period]), expected_len)
+            self.assertIsNotNone(indicators["ma"][period][-1])
+        self.assertIsNotNone(indicators["boll"]["mid"][-1])
+        self.assertIsNotNone(indicators["rsi"]["series"][-1])
+        self.assertIsNotNone(indicators["atr"]["20"][-1])
+        self.assertIsNotNone(indicators["volume_ma"]["5"][-1])
+        self.assertIsNotNone(indicators["volume_ma"]["10"][-1])
+        # MA5 of today = mean of the last 4 historical closes + live price.
+        hist_closes = list(df["close"].tail(4)) + [FAKE_QUOTE["price"]]
+        self.assertAlmostEqual(indicators["ma"]["5"][-1], sum(hist_closes) / 5, places=5)
+        # The fixed-semantics intraday trend snapshot is still injected.
+        self.assertEqual(
+            indicators["trend_intraday"]["score"], FAKE_INTRADAY_RESULT["trend_score"]
+        )
+
+    async def test_no_intraday_indicators_match_eod_lengths(self) -> None:
+        """Without the overlay (before open), indicators stay EOD-only."""
+        df = _daily_bars_ending(date.today() - timedelta(days=1))
+
+        payload, _ = await self._call_daily(df, past_open=False)
+
+        self.assertFalse(payload["meta"]["is_intraday"])
+        self.assertEqual(len(payload["indicators"]["macd"]["dif"]), len(df))
+        self.assertNotIn("trend_intraday", payload["indicators"])
 
     async def test_past_open_db_already_has_today_no_overlay(self) -> None:
         """Rule 3: DB already contains today's bar (write job done) -> no
