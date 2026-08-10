@@ -7,10 +7,15 @@ Uses FastAPI's ``TestClient`` with a fully isolated app instance:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 
 import pytest
 from fastapi.testclient import TestClient
+
+# 测试日志独立目录：app.main 导入时会 setup_logging 并挂 RotatingFileHandler，
+# 不覆盖的话 TestClient 的 httpx/uvicorn 日志会写进生产 logs/app/。
+os.environ.setdefault("TREND_QUANT_LOG_DIR", "logs/test")
 
 # 关键：在任何 monkeypatch 生效前完成 app → routers → services 的顶层导入。
 # 服务模块顶层 `from data.storage.db import get_db` 是值绑定，会固化导入瞬间
