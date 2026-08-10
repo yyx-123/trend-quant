@@ -15,6 +15,7 @@ import services.stop_loss as sl
 def _no_intraday_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """默认走纯 EOD 路径，避免测试在交易时段访问实时行情。"""
     monkeypatch.setattr(sl, "_fetch_intraday_bar", lambda symbol, df: None)
+    monkeypatch.setattr(sl, "fetch_intraday_bars", lambda dfs: dict.fromkeys(dfs, None))
 
 
 @pytest.fixture

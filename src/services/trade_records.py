@@ -211,15 +211,20 @@ def list_trades(
     rows = db.list_manual_trades(user["id"])
     name_map = load_instrument_name_map()  # DB 不可用时返回 {}（单测环境）
 
-    # 同 symbol 实时报价请求级去重：一次列表内每个 symbol 只拉一次报价
+    # 同 symbol 实时报价请求级去重 + 批量预取：整个列表只发一次批量报价请求，
+    # 避免逐标的单调打满 tickflow 实时行情 10/min 限流导致接口分钟级卡顿
     prefetched: dict[str, dict | None] = {}
     if intraday:
+        open_dfs = {}
         for row in rows:
-            if row["status"] == "open" and row["symbol"] not in prefetched:
-                df = db.load_market_data(row["symbol"])
-                prefetched[row["symbol"]] = (
-                    None if df.empty else sl.fetch_intraday_bar(row["symbol"], df)
-                )
+            if row["status"] != "open" or row["symbol"] in prefetched or row["symbol"] in open_dfs:
+                continue
+            df = db.load_market_data(row["symbol"])
+            if df.empty:
+                prefetched[row["symbol"]] = None
+            else:
+                open_dfs[row["symbol"]] = df
+        prefetched.update(sl.fetch_intraday_bars(open_dfs))
 
     open_items: list[dict] = []
     closed_items: list[dict] = []

@@ -20,6 +20,7 @@ def _pins(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin strategy config + 纯 EOD 路径（不访问实时行情）。"""
     monkeypatch.setattr(sl, "get_strategy_config", lambda: dict(DEFAULT_STRATEGY_CONFIG))
     monkeypatch.setattr(sl, "_fetch_intraday_bar", lambda symbol, df: None)
+    monkeypatch.setattr(sl, "fetch_intraday_bars", lambda dfs: dict.fromkeys(dfs, None))
 
 
 @pytest.fixture
@@ -176,6 +177,36 @@ class TestCloseTrade:
 
 
 class TestListTrades:
+    def test_intraday_prefetched_in_one_batch(self, env, monkeypatch) -> None:
+        """多标的持仓的盘中数据整个列表只批量预取一次。
+
+        回归防护：逐标的单调实时行情会打满 tickflow 10/min 限流，
+        曾导致列表接口耗时 115 秒。
+        """
+        db, bars, alice, *_ = env
+        from conftest import make_bull_bars
+
+        bars2 = make_bull_bars(40)
+        db.save_market_data("510050.SS", bars2, price_mode="qfq")
+        d1, p1 = _day(bars, -5)
+        d2, p2 = _day(bars2, -5)
+        tr.create_trade("alice", "pw1", symbol="510300", buy_date=d1,
+                        buy_price=p1, shares=100, db=db)
+        tr.create_trade("alice", "pw1", symbol="510050", buy_date=d2,
+                        buy_price=p2, shares=100, db=db)
+
+        calls: list[list[str]] = []
+
+        def fake_batch(dfs):
+            calls.append(sorted(dfs))
+            return dict.fromkeys(dfs, None)
+
+        monkeypatch.setattr(sl, "fetch_intraday_bars", fake_batch)
+
+        out = tr.list_trades("alice", "pw1", db=db)
+        assert len(out["trades"]) == 2
+        assert calls == [["510050.SS", "510300.SS"]]
+
     def test_open_sorted_by_position_value_closed_last(self, env) -> None:
         db, bars, alice, *_ = env
         # 小持仓先录入，大持仓后录入 —— 验证不是按录入顺序而是按持仓金额

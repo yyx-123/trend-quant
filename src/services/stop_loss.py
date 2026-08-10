@@ -53,6 +53,15 @@ def _load_instrument_metadata(db) -> list[dict]:
         return []
 
 
+def _synthesize_intraday_bar(symbol: str, df: pd.DataFrame, quote: dict | None) -> dict | None:
+    """由实时报价合成当日K线（单标的/批量两条路径共用）。报价无效返回 None。"""
+    if not quote or quote.get("price") is None:
+        return None
+    volumes = pd.to_numeric(df["volume"], errors="coerce") if len(df) else pd.Series(dtype=float)
+    prev_vol = safe_float(volumes.iloc[-1], 0.0) if len(volumes) else 0.0
+    return build_synthetic_bar(quote, prev_vol)
+
+
 def _fetch_intraday_bar(symbol: str, df: pd.DataFrame) -> dict | None:
     """交易时段内（含午间休盘）用实时报价合成当日K线；否则/失败返回 None。
 
@@ -64,19 +73,37 @@ def _fetch_intraday_bar(symbol: str, df: pd.DataFrame) -> dict | None:
         return None
     try:
         quote = DataService().fetch_latest_quote(symbol)
-        if not quote or quote.get("price") is None:
-            return None
-        volumes = pd.to_numeric(df["volume"], errors="coerce") if len(df) else pd.Series(dtype=float)
-        prev_vol = safe_float(volumes.iloc[-1], 0.0) if len(volumes) else 0.0
-        return build_synthetic_bar(quote, prev_vol)
+        return _synthesize_intraday_bar(symbol, df, quote)
     except Exception as exc:
         logger.warning("Intraday quote failed for %s; falling back to EOD: %s", symbol, exc)
         return None
 
 
-def fetch_intraday_bar(symbol: str, df: pd.DataFrame) -> dict | None:
-    """``_fetch_intraday_bar`` 的公开包装：交易记录列表按 symbol 预取去重用。"""
-    return _fetch_intraday_bar(symbol, df)
+def fetch_intraday_bars(dfs: dict[str, pd.DataFrame]) -> dict[str, dict | None]:
+    """批量盘中K线预取：一次批量报价请求，逐标的本地合成当日K线。
+
+    交易记录列表一次需要全部持仓标的的盘中数据；逐标的单调实时行情会打满
+    tickflow 的 10/min 限流（每个持仓一次请求叠加 429 重试，9 个持仓曾导致
+    列表接口耗时 115 秒）。这里改为一次批量请求。任一标的失败静默回退 EOD
+    （对应值为 None）。
+    """
+    result: dict[str, dict | None] = dict.fromkeys(dfs, None)
+    if not dfs or not is_realtime_available():
+        return result
+    try:
+        quotes = DataService().fetch_latest_quotes(list(dfs))
+    except Exception as exc:
+        logger.warning("Batch intraday quotes failed; falling back to EOD: %s", exc)
+        return result
+    for symbol, df in dfs.items():
+        quote = quotes.get(symbol) or {}
+        if quote.get("error"):
+            continue
+        try:
+            result[symbol] = _synthesize_intraday_bar(symbol, df, quote)
+        except Exception as exc:
+            logger.warning("Intraday bar build failed for %s; falling back to EOD: %s", symbol, exc)
+    return result
 
 
 def compute_stop_loss(

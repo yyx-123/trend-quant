@@ -1,4 +1,4 @@
-﻿app:
+app:
   timezone: Asia/Shanghai
   data_provider_priority:
     - tickflow
@@ -16,6 +16,9 @@ tickflow:
   daily_kline_batch_requests_per_minute: 30
   daily_kline_batch_max_workers: 1
   daily_kline_single_requests_per_minute: 60
+  # 实时行情限额（付费套餐实测 2026-08-10：单请求 18 标的、12 连发均通过）。
+  # 注意：Starter 体验档/会员过期降级后限额骤降（批量最大 5 标的、10/min），
+  # 若行情接口突然大量 400/429，先检查 tickflow 会员状态。
   quote_max_symbols_per_request: 50
   quote_requests_per_minute: 60
 
