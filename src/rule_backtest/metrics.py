@@ -25,6 +25,14 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
             "sharpe": 0.0,
             "sortino": 0.0,
             "calmar": 0.0,
+            "n_returns": 0,
+            "mean_daily_return": 0.0,
+            "std_daily_return": 0.0,
+            "downside_std": 0.0,
+            "max_dd_peak_date": None,
+            "max_dd_peak_equity": None,
+            "max_dd_trough_date": None,
+            "max_dd_trough_equity": None,
             "win_rate": 0.0,
             "profit_factor": 0.0,
             "trade_count": 0,
@@ -58,6 +66,20 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
     max_drawdown = min((float(row["drawdown"]) for row in dd_rows), default=0.0)
     calmar = annual_return / abs(max_drawdown) if max_drawdown < 0 else 0.0
 
+    # 最大回撤的峰/谷明细（供前端悬停展示计算过程；无回撤时为 None）
+    max_dd_peak_date = max_dd_trough_date = None
+    max_dd_peak_equity = max_dd_trough_equity = None
+    if max_drawdown < 0:
+        eq = df["equity"].reset_index(drop=True)
+        dd_series = (eq / eq.cummax().replace(0, np.nan) - 1.0).fillna(0.0)
+        trough_pos = int(dd_series.to_numpy().argmin())
+        peak_pos = int(eq.iloc[: trough_pos + 1].to_numpy().argmax())
+        dates = df["date"].reset_index(drop=True)
+        max_dd_peak_date = str(dates.iloc[peak_pos])
+        max_dd_trough_date = str(dates.iloc[trough_pos])
+        max_dd_peak_equity = float(eq.iloc[peak_pos])
+        max_dd_trough_equity = float(eq.iloc[trough_pos])
+
     sell_pnls = [float(t.get("pnl", 0.0) or 0.0) for t in trades if str(t.get("side", "")).upper() == "SELL"]
     wins = [x for x in sell_pnls if x > 0]
     losses = [x for x in sell_pnls if x < 0]
@@ -80,6 +102,14 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
         "sharpe": float(sharpe),
         "sortino": float(sortino),
         "calmar": float(calmar),
+        "n_returns": int(len(returns)),
+        "mean_daily_return": float(mean_ret),
+        "std_daily_return": float(std_ret),
+        "downside_std": float(downside_std),
+        "max_dd_peak_date": max_dd_peak_date,
+        "max_dd_peak_equity": max_dd_peak_equity,
+        "max_dd_trough_date": max_dd_trough_date,
+        "max_dd_trough_equity": max_dd_trough_equity,
         "win_rate": float(win_rate),
         "profit_factor": float(profit_factor),
         "trade_count": int(len(trades)),

@@ -255,11 +255,15 @@ def compute_stop_loss(
     highs = pd.to_numeric(df["high"], errors="coerce")
     latest_price = safe_float(pd.to_numeric(df["close"], errors="coerce").iloc[-1], 0.0)
     highest_since_buy = latest_price
+    highest_since_buy_date: str | None = str(df["time"].iloc[-1].date())
     mask_since = df["time"] >= buy_ts
     if mask_since.any():
         since_highs = highs[mask_since]
         if not since_highs.empty and since_highs.notna().any():
             highest_since_buy = safe_float(since_highs.max(), latest_price)
+            # 最高价出现日期（首次触及；供前端悬停展示最大浮盈/吊灯止损的计算过程）
+            peak_idx = since_highs.fillna(float("-inf")).to_numpy(dtype=float).argmax()
+            highest_since_buy_date = str(df.loc[mask_since, "time"].iloc[peak_idx].date())
 
     # Calculate stop prices
     hard_stop_price = round(buy_price - hard_stop_mul * atr_at_buy, 4)
@@ -322,6 +326,7 @@ def compute_stop_loss(
         "atr_at_buy": round(atr_at_buy, 4),
         "current_atr": round(current_atr, 4),
         "highest_since_buy": round(highest_since_buy, 4),
+        "highest_since_buy_date": highest_since_buy_date,
         "latest_price": round(latest_price, 4),
         "is_intraday": synth is not None,
         "stop_mode": "tight" if stop_mode == "tight" else "loose",

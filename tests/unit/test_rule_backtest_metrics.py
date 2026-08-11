@@ -52,6 +52,34 @@ class TestComputeSummary:
         assert summary["win_rate"] == 0.0
         assert summary["trade_count"] == 0
 
+    def test_detail_keys_for_hover_tips(self) -> None:
+        """悬停计算明细键：日收益统计与最大回撤峰/谷。"""
+        nav = _make_nav([100_000, 110_000, 99_000, 105_000])
+        summary = compute_summary(nav, [], 0.0)
+        for key in ("n_returns", "mean_daily_return", "std_daily_return", "downside_std",
+                    "max_dd_peak_date", "max_dd_peak_equity",
+                    "max_dd_trough_date", "max_dd_trough_equity"):
+            assert key in summary
+        assert summary["n_returns"] == 3
+        assert summary["mean_daily_return"] == pytest.approx((0.1 - 0.1 + 105 / 99 - 1) / 3)
+        # 回撤：峰值 110000（第 2 日）→ 谷底 99000（第 3 日）= -10%
+        assert summary["max_drawdown"] == pytest.approx(-0.1)
+        assert summary["max_dd_peak_date"] == "2025-01-03"
+        assert summary["max_dd_peak_equity"] == pytest.approx(110_000)
+        assert summary["max_dd_trough_date"] == "2025-01-04"
+        assert summary["max_dd_trough_equity"] == pytest.approx(99_000)
+
+    def test_detail_keys_no_drawdown_and_empty(self) -> None:
+        # 无回撤：峰/谷明细为 None
+        summary = compute_summary(_make_nav([100_000, 110_000]), [], 0.0)
+        assert summary["max_dd_peak_date"] is None
+        assert summary["max_dd_trough_date"] is None
+        # 空序列：明细键同样存在（零值/None）
+        empty = compute_summary([], [], 0.0)
+        assert empty["n_returns"] == 0
+        assert empty["mean_daily_return"] == 0.0
+        assert empty["max_dd_peak_date"] is None
+
 
 class TestAnnualReturns:
     def test_returns_year_list(self) -> None:

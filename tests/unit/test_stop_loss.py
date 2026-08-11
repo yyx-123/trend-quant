@@ -130,6 +130,10 @@ class TestComputeStopLoss:
         assert out["chandelier_stop_price"] == pytest.approx(expected)
         assert out["chandelier_stop_atr_mul"] == 2.5
         assert out["highest_since_buy"] == pytest.approx(round(highest, 4))
+        # 最高价出现日期（首次触及）
+        since = bars[pd.to_datetime(bars["time"]) >= buy_ts]
+        expected_date = str(pd.Timestamp(since.loc[since["high"].idxmax(), "time"]).date())
+        assert out["highest_since_buy_date"] == expected_date
 
     def test_chandelier_stop_ratchet_matches_independent_recompute(self, bull_db) -> None:
         """棘轮价 = 逐日候选值（截至当日最高价 − 2.5×当日ATR）的历史最大值，
@@ -357,6 +361,8 @@ class TestComputeStopLossIntraday:
         assert out["is_intraday"] is True
         assert out["intraday_bar"]["date"] == "2025-03-03"
         assert out["highest_since_buy"] == pytest.approx(round(synth_high, 4))
+        # 盘中创出新高：最高价日期为盘中当日
+        assert out["highest_since_buy_date"] == "2025-03-03"
         assert out["latest_price"] == pytest.approx(round(synth_close, 4))
         # ATR 不被当日不完整K线污染 → 硬止损不变
         assert out["current_atr"] == eod["current_atr"]

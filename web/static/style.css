@@ -4003,6 +4003,11 @@ details > summary::marker {
   cursor: help;
 }
 
+/* 通用悬停明细（持仓指标/金额/盈亏等，原生 title 展示计算过程） */
+.mt-tip {
+  cursor: help;
+}
+
 /* ── 手工交易：清仓弹窗 ───────────────────────────────────── */
 .mt-modal {
   position: fixed;

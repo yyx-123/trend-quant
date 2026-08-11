@@ -65,6 +65,37 @@ class TestComputeManualTrade:
         assert out["start_date"] == str(pd.Timestamp(since.iloc[0]["time"]).date())
         assert out["latest_date"] == str(pd.Timestamp(bars.iloc[-1]["time"]).date())
 
+    def test_total_return_includes_buy_day_gain(self, bull_db) -> None:
+        """口径回归：累计收益率以买入价为净值 1.0 起算（含买入日收益），
+        而非从买入日收盘价起算（旧口径漏算买入日，2026-08 用户反馈）。"""
+        db, bars = bull_db
+        row = bars.iloc[-3]
+        buy_date = str(row["time"])[:10]
+        # 买入价刻意低于当日收盘 → 买入日即有浮盈，新旧口径必然不同
+        buy_price = round((float(row["low"]) + float(row["close"])) / 2, 4)
+
+        out = mt.compute_manual_trade("510300.SS", buy_date, buy_price, db=db)
+
+        latest_close = float(bars.iloc[-1]["close"])
+        first_close = float(row["close"])
+        holding = out["holding"]
+        # 新口径：最新收盘 / 买入价 − 1（含买入日收益）
+        assert holding["total_return"] == pytest.approx(
+            round((latest_close / buy_price - 1) * 100, 2)
+        )
+        # 旧口径（最新收盘 / 买入日收盘 − 1）应不再成立
+        assert holding["total_return"] != pytest.approx(
+            round((latest_close / first_close - 1) * 100, 2)
+        )
+        # 日收益样本数 = 持有交易日数（买入日收益 + 之后每日）
+        assert holding["n_returns"] == holding["hold_days"]
+        # 悬停明细字段
+        assert holding["highest_since_buy"] > 0
+        assert holding["highest_since_buy_date"] is not None
+        assert isinstance(holding["mean_daily_return"], float)
+        assert isinstance(holding["std_daily_return"], float)
+        assert isinstance(holding["downside_std"], float)
+
     def test_hard_stop_triggered_in_downtrend(self, test_db) -> None:
         from conftest import make_bear_bars
 
@@ -86,6 +117,13 @@ class TestComputeManualTrade:
         assert stops["hard_stop_trigger_low"] == pytest.approx(round(float(trigger_day.iloc[0]["low"]), 4))
         assert stops["hard_stop_trigger_close"] == pytest.approx(round(float(trigger_day.iloc[0]["close"]), 4))
         assert out["holding"]["pnl_pct"] < 0
+        # 最大回撤峰/谷明细：买入即净值峰值 1.0，之后持续回撤
+        holding = out["holding"]
+        assert holding["max_drawdown"] < 0
+        assert holding["max_dd_peak_date"] == buy_date
+        assert holding["max_dd_peak_equity"] == pytest.approx(1.0)
+        assert holding["max_dd_trough_date"] is not None
+        assert holding["max_dd_trough_equity"] < holding["max_dd_peak_equity"]
 
     def test_buy_date_after_latest_raises(self, bull_db) -> None:
         db, _ = bull_db

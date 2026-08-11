@@ -92,7 +92,12 @@ def compute_manual_trade(
             {"date": intraday_bar["date"], "equity": intraday_bar["close"] / buy_price}
         )
 
-    summary = compute_summary(daily_nav, trades=[], turnover_total=0.0)
+    # 指标口径：以买入价为初始净值 1.0（含买入日收益）。
+    # daily_nav 首点是买入日收盘净值（已含当日浮动），compute_summary 以序列
+    # 首点为基准，故前补买入价对应的 1.0 起点；hold_days/起止日期仍用
+    # daily_nav（交易日计数语义不变）。
+    metric_nav = [{"date": str(buy_ts.date()), "equity": 1.0}] + daily_nav
+    summary = compute_summary(metric_nav, trades=[], turnover_total=0.0)
 
     latest_close = stops["latest_price"]
     pnl_points = round(latest_close - buy_price, 4)
@@ -171,11 +176,21 @@ def compute_manual_trade(
             "pnl_points": pnl_points,
             "pnl_pct": pnl_pct,
             "max_gain_pct": max_gain_pct,
+            "highest_since_buy": stops["highest_since_buy"],
+            "highest_since_buy_date": stops.get("highest_since_buy_date"),
             "total_return": round(summary["total_return"] * 100, 2),
             "annual_return": round(summary["annual_return"] * 100, 2),
             "max_drawdown": round(summary["max_drawdown"] * 100, 2),
+            "max_dd_peak_date": summary["max_dd_peak_date"],
+            "max_dd_peak_equity": summary["max_dd_peak_equity"],
+            "max_dd_trough_date": summary["max_dd_trough_date"],
+            "max_dd_trough_equity": summary["max_dd_trough_equity"],
             "sharpe": round(summary["sharpe"], 2),
             "sortino": round(summary["sortino"], 2),
             "calmar": round(summary["calmar"], 2),
+            "n_returns": summary["n_returns"],
+            "mean_daily_return": round(summary["mean_daily_return"] * 100, 4),
+            "std_daily_return": round(summary["std_daily_return"] * 100, 4),
+            "downside_std": round(summary["downside_std"] * 100, 4),
         },
     }

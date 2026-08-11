@@ -168,6 +168,7 @@ def _open_item(row: dict, result: dict, name_map: dict[str, str]) -> dict:
             "pnl_amount": round((latest - buy_price) * shares, 2),
             "is_intraday": bool(result.get("is_intraday")),
             "intraday_ts": result.get("intraday_ts"),
+            "latest_date": result.get("latest_date"),
             "stops": result["stops"],
             "holding": result["holding"],
         }

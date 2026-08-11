@@ -263,6 +263,12 @@
     return Number(v) > 0 ? 'metric-positive' : (Number(v) < 0 ? 'metric-negative' : '');
   }
 
+  // 通用悬停包装：tip 非空时给 HTML 包一层带 title 的 span（cursor: help），
+  // 与止损价/徽章的原生 title 悬停同一机制
+  function withTip(html, tip) {
+    return tip ? '<span class="mt-tip" title="' + esc(tip) + '">' + html + '</span>' : html;
+  }
+
   function todayStr() {
     return new Date().toISOString().slice(0, 10);
   }
@@ -307,10 +313,11 @@
       if (stat.cls === 'metric-positive') cls.push('mt-stat-pos');
       if (stat.cls === 'metric-negative') cls.push('mt-stat-neg');
       const valueCls = 'mt-stat-value' + (stat.cls ? ' ' + stat.cls : '');
+      const valueHtml = '<span class="' + valueCls + '">' + esc(stat.value) + '</span>';
       const note = stat.note ? '<span class="mt-stat-note">' + esc(stat.note) + '</span>' : '';
       return '<div class="' + cls.join(' ') + '">' +
         '<span class="mt-stat-label">' + esc(stat.label) + '</span>' +
-        '<span class="' + valueCls + '">' + esc(stat.value) + '</span>' +
+        (stat.tip ? withTip(valueHtml, stat.tip) : valueHtml) +
         note +
         '</div>';
     }).join('');
@@ -332,7 +339,8 @@
           '<span class="mt-stat-label">棘轮吊灯止损价</span>' +
           stopPill(ratchetTriggered, '未跌破', '⚠ 已跌破') +
         '</div>' +
-        '<span class="mt-stop-price">' + esc(fmtPrice(ratchetPrice)) + '</span>' +
+        withTip('<span class="mt-stop-price">' + esc(fmtPrice(ratchetPrice)) + '</span>',
+          ratchetStopTip(stops)) +
         '<span class="mt-stat-note">同吊灯公式但只上移不下移 · 现价距 ' +
           esc(fmtPct(stops.chandelier_stop_ratchet_distance_pct)) + '</span>' +
       '</div>' : '';
@@ -342,7 +350,8 @@
           '<span class="mt-stat-label">硬止损价</span>' +
           stopPill(hardTriggered, '未击穿', '⚠ 已击穿') +
         '</div>' +
-        '<span class="mt-stop-price">' + esc(fmtPrice(stops.hard_stop_price)) + '</span>' +
+        withTip('<span class="mt-stop-price">' + esc(fmtPrice(stops.hard_stop_price)) + '</span>',
+          hardStopTip(stops)) +
         '<span class="mt-stat-note">买入价 − ' + esc(stops.hard_stop_atr_mul) + '×ATR(买入日) · 距买入价 ' +
           esc(fmtPct(stops.hard_stop_pct)) +
           (hardTriggered ? ' · 于 ' + esc(stops.hard_stop_trigger_date) + ' 被击穿' +
@@ -357,22 +366,25 @@
           '<span class="mt-stat-label">吊灯止损价</span>' +
           stopPill(chandTriggered, '未跌破', '⚠ 已跌破') +
         '</div>' +
-        '<span class="mt-stop-price">' + esc(fmtPrice(stops.chandelier_stop_price)) + '</span>' +
+        withTip('<span class="mt-stop-price">' + esc(fmtPrice(stops.chandelier_stop_price)) + '</span>',
+          chandelierStopTip(stops)) +
         '<span class="mt-stat-note">买入以来最高价 − ' + esc(stops.chandelier_stop_atr_mul) + '×ATR(最新) · 距最高价 ' +
           esc(fmtPct(stops.chandelier_stop_pct_from_high)) + '</span>' +
       '</div>' +
       ratchetCard +
       '<div class="mt-stop-card mt-stop-dist">' +
         '<div class="mt-stop-card-head"><span class="mt-stat-label">现价距硬止损</span></div>' +
-        '<span class="mt-stop-price ' + pctClass(stops.hard_stop_distance_pct) + '">' +
-          esc(fmtPct(stops.hard_stop_distance_pct)) + '</span>' +
+        withTip('<span class="mt-stop-price ' + pctClass(stops.hard_stop_distance_pct) + '">' +
+          esc(fmtPct(stops.hard_stop_distance_pct)) + '</span>',
+          stopDistanceTip('现价距硬止损', stops, 'hard_stop_price', 'hard_stop_distance_pct')) +
         '<span class="mt-stat-note">最新价 ' + esc(fmtPrice(stops.latest_price)) + ' / 止损价 ' +
           esc(fmtPrice(stops.hard_stop_price)) + '</span>' +
       '</div>' +
       '<div class="mt-stop-card mt-stop-dist">' +
         '<div class="mt-stop-card-head"><span class="mt-stat-label">现价距吊灯止损</span></div>' +
-        '<span class="mt-stop-price ' + pctClass(stops.chandelier_stop_distance_pct) + '">' +
-          esc(fmtPct(stops.chandelier_stop_distance_pct)) + '</span>' +
+        withTip('<span class="mt-stop-price ' + pctClass(stops.chandelier_stop_distance_pct) + '">' +
+          esc(fmtPct(stops.chandelier_stop_distance_pct)) + '</span>',
+          stopDistanceTip('现价距吊灯止损', stops, 'chandelier_stop_price', 'chandelier_stop_distance_pct')) +
         '<span class="mt-stat-note">最新价 ' + esc(fmtPrice(stops.latest_price)) + ' / 止损价 ' +
           esc(fmtPrice(stops.chandelier_stop_price)) + '</span>' +
       '</div>';
@@ -383,25 +395,32 @@
     const note = rangeNote ||
       (t.status === 'closed' ? t.buy_date + ' ~ ' + t.sell_date : t.buy_date);
     const items = [
-      {label: '持有交易日数', value: String(holding.hold_days), note: note},
-      {label: '最大浮盈', value: fmtPct(holding.max_gain_pct), cls: pctClass(holding.max_gain_pct)},
+      {label: '持有交易日数', value: String(holding.hold_days), note: note,
+        tip: holdDaysTip(t, holding)},
+      {label: '最大浮盈', value: fmtPct(holding.max_gain_pct), cls: pctClass(holding.max_gain_pct),
+        tip: maxGainTip(t, holding)},
     ];
     if (t.status === 'closed') {
       items.push({
         label: '实际盈亏',
         value: fmtPct(t.realized_pnl_pct) + '（' + fmtMoney(t.realized_pnl) + '）',
         cls: pctClass(t.realized_pnl), primary: true,
+        tip: realizedPnlTip(t),
       });
     } else {
       items.push({
         label: '累计收益率', value: fmtPct(holding.total_return),
         cls: pctClass(holding.total_return), primary: true,
+        tip: totalReturnTip(t, holding),
       });
     }
     items.push(
-      {label: '最大回撤', value: fmtPct(holding.max_drawdown), cls: pctClass(holding.max_drawdown)},
-      {label: '夏普比率', value: Number(holding.sharpe).toFixed(2), cls: pctClass(holding.sharpe)},
-      {label: '卡玛比率', value: Number(holding.calmar).toFixed(2), cls: pctClass(holding.calmar)},
+      {label: '最大回撤', value: fmtPct(holding.max_drawdown), cls: pctClass(holding.max_drawdown),
+        tip: maxDrawdownTip(t, holding)},
+      {label: '夏普比率', value: Number(holding.sharpe).toFixed(2), cls: pctClass(holding.sharpe),
+        tip: sharpeTip(holding)},
+      {label: '卡玛比率', value: Number(holding.calmar).toFixed(2), cls: pctClass(holding.calmar),
+        tip: calmarTip(holding)},
     );
     return items;
   }
@@ -527,10 +546,16 @@
       (data.is_intraday ? '（含今日盘中实时数据 ' + intradayTime + '）' : '');
 
     renderStopStats(stopStatsEl, stops);
-    renderStats(holdingStatsEl, holdingStatItems(
-      {status: 'open', buy_date: data.buy_date, holding: data.holding || {}},
-      data.start_date + ' ~ ' + data.latest_date,
-    ));
+    renderStats(holdingStatsEl, holdingStatItems({
+      status: 'open',
+      buy_date: data.buy_date,
+      buy_price: data.buy_price,
+      latest_price: stops.latest_price,
+      latest_date: data.latest_date,
+      is_intraday: data.is_intraday,
+      intraday_ts: data.intraday_ts,
+      holding: data.holding || {},
+    }, data.start_date + ' ~ ' + data.latest_date));
 
     resultEl.hidden = false;
   }
@@ -708,20 +733,132 @@
   }
 
   // 硬止损价 = 买入价 − mul×ATR(买入日)
-  function hardStopTip(t, stops) {
+  function hardStopTip(stops) {
     if (stops.atr_at_buy == null) return '';
-    return '硬止损价（' + stopModeLabel(stops) + '口径）= 买入价 ' + fmtPrice(t.buy_price) +
+    return '硬止损价（' + stopModeLabel(stops) + '口径）= 买入价 ' + fmtPrice(stops.buy_price) +
       ' − ' + stops.hard_stop_atr_mul + ' × ATR(买入日) ' + fmtPrice(stops.atr_at_buy) +
       ' = ' + fmtPrice(stops.hard_stop_price);
   }
 
   // 吊灯止损价 = 买入以来最高价 − mul×ATR(最新)
-  function chandelierStopTip(t, stops) {
+  function chandelierStopTip(stops) {
     if (stops.highest_since_buy == null || stops.current_atr == null) return '';
     return '吊灯止损价（' + stopModeLabel(stops) + '口径）= 买入以来最高价 ' +
-      fmtPrice(stops.highest_since_buy) + ' − ' + stops.chandelier_stop_atr_mul +
+      fmtPrice(stops.highest_since_buy) +
+      (stops.highest_since_buy_date ? '（' + stops.highest_since_buy_date + '）' : '') +
+      ' − ' + stops.chandelier_stop_atr_mul +
       ' × ATR(最新) ' + fmtPrice(stops.current_atr) +
       ' = ' + fmtPrice(stops.chandelier_stop_price);
+  }
+
+  // 棘轮吊灯：与吊灯同公式逐日回放，取历史最大值（只上移不下移）
+  function ratchetStopTip(stops) {
+    const price = Number(stops.chandelier_stop_ratchet_price);
+    if (!isFinite(price) || price <= 0) return '';
+    return '棘轮吊灯止损价（' + stopModeLabel(stops) + '口径）= max(逐日：截至当日最高价 − ' +
+      stops.chandelier_stop_atr_mul + ' × 当日ATR)，只上移不下移 = ' + fmtPrice(price);
+  }
+
+  // 现价距止损 = 最新价 / 止损价 − 1
+  function stopDistanceTip(label, stops, priceKey, pctKey) {
+    const price = Number(stops[priceKey]);
+    if (!isFinite(price) || price <= 0 || stops.latest_price == null) return '';
+    return label + ' = 最新价 ' + fmtPrice(stops.latest_price) + ' / 止损价 ' +
+      fmtPrice(price) + ' − 1 = ' + fmtPct(stops[pctKey]);
+  }
+
+  // ── 持仓指标悬停明细：展示每个数字的计算过程（数据均来自后端响应） ──
+
+  // 持有交易日数：日期区间 + 是否含盘中实时
+  function holdDaysTip(t, holding) {
+    if (holding.hold_days == null) return '';
+    const end = t.status === 'closed' ? t.sell_date : t.latest_date;
+    let tip = (t.buy_date || '?') + ' ~ ' + (end || '?') +
+      ' 共 ' + holding.hold_days + ' 个交易日';
+    if (t.is_intraday && t.intraday_ts) {
+      tip += '（含今日盘中实时数据 ' + String(t.intraday_ts).slice(11, 16) + '）';
+    }
+    return tip;
+  }
+
+  // 最大浮盈 = 买入以来最高价 / 买入价 − 1
+  function maxGainTip(t, holding) {
+    if (holding.max_gain_pct == null || holding.highest_since_buy == null) return '';
+    return '最大浮盈 = 买入以来最高价 ' + fmtPrice(holding.highest_since_buy) +
+      (holding.highest_since_buy_date ? '（' + holding.highest_since_buy_date + '）' : '') +
+      ' / 买入价 ' + fmtPrice(t.buy_price) + ' − 1 = ' + fmtPct(holding.max_gain_pct);
+  }
+
+  // 累计收益率 = 最新价 / 买入价 − 1（净值从买入价 1.0 起算，含买入日收益）
+  function totalReturnTip(t, holding) {
+    if (holding.total_return == null || t.latest_price == null) return '';
+    return '累计收益率 = 最新价 ' + fmtPrice(t.latest_price) + ' / 买入价 ' +
+      fmtPrice(t.buy_price) + ' − 1 = ' + fmtPct(holding.total_return) +
+      '（净值从买入价 1.0 起算，含买入日收益）';
+  }
+
+  // 最大回撤 = 持有期净值谷底 / 净值峰值 − 1（净值为买入价=1.0 口径，括注换算价格）
+  function maxDrawdownTip(t, holding) {
+    if (holding.max_drawdown == null) return '';
+    if (!holding.max_dd_peak_date) return '持有期净值未出现回撤';
+    const buyPrice = Number(t.buy_price);
+    const priceNote = function(equity) {
+      return isFinite(buyPrice) && buyPrice > 0 ? '，约合价格 ' + fmtPrice(equity * buyPrice) : '';
+    };
+    return '最大回撤 = 净值谷底 ' + Number(holding.max_dd_trough_equity).toFixed(4) +
+      '（' + holding.max_dd_trough_date + priceNote(Number(holding.max_dd_trough_equity)) + '）' +
+      ' / 净值峰值 ' + Number(holding.max_dd_peak_equity).toFixed(4) +
+      '（' + holding.max_dd_peak_date + priceNote(Number(holding.max_dd_peak_equity)) + '）' +
+      ' − 1 = ' + fmtPct(holding.max_drawdown);
+  }
+
+  // 夏普 = 日收益均值 / 日收益波动 × √252
+  function sharpeTip(holding) {
+    if (holding.sharpe == null || !holding.n_returns) return '';
+    if (!Number(holding.std_daily_return)) return '持有期日收益无波动，夏普比率记 0';
+    return '夏普比率 = 日收益均值 ' + Number(holding.mean_daily_return).toFixed(2) +
+      '% / 日收益波动 ' + Number(holding.std_daily_return).toFixed(2) + '% × √252 = ' +
+      Number(holding.sharpe).toFixed(2) + '（基于 ' + holding.n_returns + ' 个日收益）';
+  }
+
+  // 卡玛 = 年化收益率 / |最大回撤|
+  function calmarTip(holding) {
+    if (holding.calmar == null) return '';
+    if (!holding.max_drawdown || Number(holding.max_drawdown) >= 0) {
+      return '持有期无回撤，卡玛比率记 0';
+    }
+    return '卡玛比率 = 年化收益率 ' + fmtPct(holding.annual_return) + ' / |最大回撤 ' +
+      fmtPct(holding.max_drawdown) + '| = ' + Number(holding.calmar).toFixed(2);
+  }
+
+  // 浮动盈亏 = (现价 − 买价) × 份数；收益率 = 现价 / 买价 − 1
+  function pnlTip(t, holding) {
+    if (holding.pnl_pct == null || t.latest_price == null) return '';
+    return '盈亏 = (现价 ' + fmtPrice(t.latest_price) + ' − 买价 ' + fmtPrice(t.buy_price) +
+      ') × 份数 ' + fmtShares(t.shares) + ' = ' + fmtMoney(t.pnl_amount) +
+      '；现价 / 买价 − 1 = ' + fmtPct(holding.pnl_pct);
+  }
+
+  // 持仓金额 = 现价 × 份数
+  function positionValueTip(t) {
+    if (t.position_value == null || t.latest_price == null) return '';
+    return '持仓金额 = 现价 ' + fmtPrice(t.latest_price) + ' × 份数 ' + fmtShares(t.shares) +
+      ' = ¥' + Number(t.position_value).toFixed(2);
+  }
+
+  // 买入金额 = 买价 × 份数
+  function buyAmountTip(t) {
+    if (t.buy_price == null || t.shares == null) return '';
+    return '买入金额 = 买价 ' + fmtPrice(t.buy_price) + ' × 份数 ' + fmtShares(t.shares) +
+      ' = ¥' + (Number(t.buy_price) * Number(t.shares)).toFixed(2);
+  }
+
+  // 实际盈亏 = (卖价 − 买价) × 份数；收益率 = 卖价 / 买价 − 1（未计交易费用）
+  function realizedPnlTip(t) {
+    if (t.realized_pnl == null || t.sell_price == null) return '';
+    return '实际盈亏 = (卖价 ' + fmtPrice(t.sell_price) + ' − 买价 ' + fmtPrice(t.buy_price) +
+      ') × 份数 ' + fmtShares(t.shares) + ' = ' + fmtMoney(t.realized_pnl) +
+      '；收益率 = 卖价 / 买价 − 1 = ' + fmtPct(t.realized_pnl_pct) + '（未计交易费用）';
   }
 
   function holdDaysCell(holding) {
@@ -800,14 +937,16 @@
       cells +=
         '<td>' + esc(fmtPrice(t.latest_price)) + '</td>' +
         '<td>' + esc(fmtShares(t.shares)) + '</td>' +
-        '<td>' + esc(fmtMoney(t.position_value).replace(/^\+/, '')) + '</td>' +
-        '<td><span class="' + pctClass(holding.pnl_pct) + '">' + esc(fmtPct(holding.pnl_pct)) +
-          '（' + esc(fmtMoney(t.pnl_amount)) + '）</span></td>' +
-        '<td><span class="' + pctClass(holding.max_gain_pct) + '">' + esc(fmtPct(holding.max_gain_pct)) + '</span></td>' +
-        '<td><span class="' + pctClass(holding.max_drawdown) + '">' + esc(fmtPct(holding.max_drawdown)) + '</span></td>' +
-        '<td>' + stopCellHtml(stops.hard_stop_price, stops.hard_stop_distance_pct, hardDominant, hardStopTip(t, stops)) + '</td>' +
-        '<td>' + stopCellHtml(stops.chandelier_stop_price, stops.chandelier_stop_distance_pct, chandDominant, chandelierStopTip(t, stops)) + '</td>' +
-        '<td>' + holdDaysCell(holding) + '</td>';
+        '<td>' + withTip(esc(fmtMoney(t.position_value).replace(/^\+/, '')), positionValueTip(t)) + '</td>' +
+        '<td>' + withTip('<span class="' + pctClass(holding.pnl_pct) + '">' + esc(fmtPct(holding.pnl_pct)) +
+          '（' + esc(fmtMoney(t.pnl_amount)) + '）</span>', pnlTip(t, holding)) + '</td>' +
+        '<td>' + withTip('<span class="' + pctClass(holding.max_gain_pct) + '">' +
+          esc(fmtPct(holding.max_gain_pct)) + '</span>', maxGainTip(t, holding)) + '</td>' +
+        '<td>' + withTip('<span class="' + pctClass(holding.max_drawdown) + '">' +
+          esc(fmtPct(holding.max_drawdown)) + '</span>', maxDrawdownTip(t, holding)) + '</td>' +
+        '<td>' + stopCellHtml(stops.hard_stop_price, stops.hard_stop_distance_pct, hardDominant, hardStopTip(stops)) + '</td>' +
+        '<td>' + stopCellHtml(stops.chandelier_stop_price, stops.chandelier_stop_distance_pct, chandDominant, chandelierStopTip(stops)) + '</td>' +
+        '<td>' + withTip(holdDaysCell(holding), holdDaysTip(t, holding)) + '</td>';
     }
     cells += '<td class="mt-cell-actions">' +
       (t.error ? '' : '<button type="button" class="mt-btn-sm mt-btn-danger mt-close-btn">清仓</button>') +
@@ -831,12 +970,16 @@
     } else {
       const buyAmount = Number(t.buy_price) * Number(t.shares);
       cells +=
-        '<td>' + esc(fmtMoney(buyAmount).replace(/^\+/, '')) + '</td>' +
-        '<td><span class="' + pctClass(t.realized_pnl) + '">' + esc(fmtMoney(t.realized_pnl)) + '</span></td>' +
-        '<td><span class="' + pctClass(t.realized_pnl_pct) + '">' + esc(fmtPct(t.realized_pnl_pct)) + '</span></td>' +
-        '<td><span class="' + pctClass(holding.max_gain_pct) + '">' + esc(fmtPct(holding.max_gain_pct)) + '</span></td>' +
-        '<td><span class="' + pctClass(holding.max_drawdown) + '">' + esc(fmtPct(holding.max_drawdown)) + '</span></td>' +
-        '<td>' + holdDaysCell(holding) + '</td>';
+        '<td>' + withTip(esc(fmtMoney(buyAmount).replace(/^\+/, '')), buyAmountTip(t)) + '</td>' +
+        '<td>' + withTip('<span class="' + pctClass(t.realized_pnl) + '">' +
+          esc(fmtMoney(t.realized_pnl)) + '</span>', realizedPnlTip(t)) + '</td>' +
+        '<td>' + withTip('<span class="' + pctClass(t.realized_pnl_pct) + '">' +
+          esc(fmtPct(t.realized_pnl_pct)) + '</span>', realizedPnlTip(t)) + '</td>' +
+        '<td>' + withTip('<span class="' + pctClass(holding.max_gain_pct) + '">' +
+          esc(fmtPct(holding.max_gain_pct)) + '</span>', maxGainTip(t, holding)) + '</td>' +
+        '<td>' + withTip('<span class="' + pctClass(holding.max_drawdown) + '">' +
+          esc(fmtPct(holding.max_drawdown)) + '</span>', maxDrawdownTip(t, holding)) + '</td>' +
+        '<td>' + withTip(holdDaysCell(holding), holdDaysTip(t, holding)) + '</td>';
     }
     return '<tr data-id="' + esc(t.id) + '" class="is-closed">' + cells + '</tr>';
   }
