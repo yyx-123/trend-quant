@@ -21,6 +21,8 @@ tickflow:
   daily_kline_batch_size: 100
   daily_kline_batch_requests_per_minute: 30
   daily_kline_batch_max_workers: 1
+  # 注意：ex-factors 除权因子接口批量上限为 50 标的/次（低于日K批量的 100），
+  # 超限返回 400「标的数量超限」；provider_tickflow.fetch_ex_factors 已按 50 分批。
   daily_kline_single_requests_per_minute: 60
   # 实时行情限额（付费档实测 2026-08-10：单请求 18 标的、5.5s 12 连发均通过；
   # Starter 降级档实测：批量最大 5 标的、10/min，超限返回 400/429）。

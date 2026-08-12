@@ -252,7 +252,9 @@ class TickFlowProvider(IDataProvider):
         self,
         symbols: list[str],
         *,
-        batch_size: int = 100,
+        # ex-factors 接口服务端上限 50 标的/次（与日K批量接口的 100 上限不同），
+        # 超限返回 400「标的数量超限」。
+        batch_size: int = 50,
     ) -> tuple[dict[str, list[tuple[date, float]]], dict[str, str]]:
         """批量获取除权因子：{symbol: [(ex_date, ex_factor)]} 升序。
 
@@ -267,7 +269,7 @@ class TickFlowProvider(IDataProvider):
 
         factors_by_symbol: dict[str, list[tuple[date, float]]] = {}
         errors: dict[str, str] = {}
-        batch_limit = max(1, min(int(batch_size or 100), 100))
+        batch_limit = max(1, min(int(batch_size or 50), 50))
         chunks = [
             normalized_symbols[index : index + batch_limit]
             for index in range(0, len(normalized_symbols), batch_limit)
