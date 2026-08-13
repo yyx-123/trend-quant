@@ -505,6 +505,8 @@ def open_positions(username: str, password: str) -> dict:
                 "buy_price": t["buy_price"],
                 "shares": t["shares"],
                 "latest_price": t.get("latest_price"),
+                "prev_close": t.get("prev_close"),
+                "daily_change_pct": t.get("daily_change_pct"),
                 "position_value": t.get("position_value"),
                 "pnl_amount": t.get("pnl_amount"),
                 "pnl_pct": holding.get("pnl_pct"),

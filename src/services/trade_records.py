@@ -164,6 +164,8 @@ def _open_item(row: dict, result: dict, name_map: dict[str, str]) -> dict:
     item.update(
         {
             "latest_price": latest,
+            "prev_close": result.get("prev_close"),
+            "daily_change_pct": result.get("daily_change_pct"),
             "position_value": round(shares * latest, 2),
             "pnl_amount": round((latest - buy_price) * shares, 2),
             "is_intraday": bool(result.get("is_intraday")),

@@ -242,6 +242,21 @@ class TestListTrades:
         assert item["stops"]["chandelier_stop_price"] > 0
         assert item["holding"]["hold_days"] == 3
 
+    def test_open_item_daily_change_fields(self, env) -> None:
+        """持仓列表项携带当日涨跌幅：最新收盘 / 前一交易日收盘 − 1（EOD 口径）。"""
+        db, bars, *_ = env
+        d, p = _day(bars, -3)
+        tr.create_trade("alice", "pw1", symbol="510300", buy_date=d,
+                        buy_price=p, shares=1000, db=db)
+        out = tr.list_trades("alice", "pw1", db=db)
+        item = out["trades"][0]
+        last_close = float(bars.iloc[-1]["close"])
+        prev_close = float(bars.iloc[-2]["close"])
+        assert item["prev_close"] == pytest.approx(round(prev_close, 4))
+        assert item["daily_change_pct"] == pytest.approx(
+            round((last_close / prev_close - 1) * 100, 2)
+        )
+
     def test_closed_item_uses_sell_date_cutoff(self, env) -> None:
         db, bars, *_ = env
         bd, bp = _day(bars, -6)
