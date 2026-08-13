@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from core.display import load_instrument_name_map
@@ -16,11 +18,34 @@ from data.storage.db import get_db
 from rule_backtest.metrics import compute_summary
 from services.stop_loss import UNSET_INTRADAY_BAR, StopLossError, compute_stop_loss
 
-__all__ = ["ManualTradeError", "compute_manual_trade"]
+__all__ = ["ManualTradeError", "compute_manual_trade", "compute_position_sizing"]
 
 
 class ManualTradeError(StopLossError):
     """手工交易聚合中的业务错误（如买入日期晚于最新数据）。"""
+
+
+def compute_position_sizing(
+    buy_price: float, hard_stop_price: float, risk_budget: float
+) -> dict:
+    """按风险预算计算最大可买入份数。
+
+    每股风险 = 买入价 − 硬止损价（硬止损触发时的每股损失）；
+    可买份数 = 风险预算 ÷ 每股风险，下取整到百位（ETF 一手 100 份）。
+    如 12345.67 份 → 12300 份。
+    """
+    risk_per_share = round(buy_price - hard_stop_price, 4)
+    max_qty = 0
+    if risk_per_share > 0 and risk_budget > 0:
+        # +1e-9 防浮点误差把整百倍误判少一手（如 0.3/0.001 类边界）
+        max_qty = int(math.floor(risk_budget / risk_per_share / 100 + 1e-9)) * 100
+    return {
+        "risk_budget": risk_budget,
+        "risk_per_share": risk_per_share,
+        "max_qty": max_qty,
+        "max_loss": round(max_qty * risk_per_share, 2),
+        "position_value": round(max_qty * buy_price, 2),
+    }
 
 
 def compute_manual_trade(
@@ -32,6 +57,7 @@ def compute_manual_trade(
     end_date: str | None = None,
     intraday_bar: dict | None | object = UNSET_INTRADAY_BAR,
     stop_mode: str | None = None,
+    risk_budget: float | None = None,
 ) -> dict:
     """止损价 + 持仓指标的一站式计算（手工交易页面的后端）。
 
@@ -46,7 +72,8 @@ def compute_manual_trade(
 
     ``end_date`` 用于已清仓交易：净值序列截断到该日（含），强制关闭
     intraday，所有指标按截止日口径。``stop_mode`` 透传给止损计算
-    （"tight" 紧止损 / None|"loose" 松止损）。
+    （"tight" 紧止损 / None|"loose" 松止损）。``risk_budget`` 非空时
+    附带按硬止损价推算的最大可买入份数（``position_sizing`` 字段）。
 
     Raises:
         StopLossError: 标的无效、无数据（来自 ``compute_stop_loss``）。
@@ -71,8 +98,36 @@ def compute_manual_trade(
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
     if end_ts is not None:
         df = df[df["time"] <= end_ts]
+    # 纯 EOD 收盘序列（不含下方可能追加的盘中合成K线），供当日涨跌幅取前收
+    eod_closes = pd.to_numeric(df["close"], errors="coerce").dropna()
 
     since = df[df["time"] >= buy_ts]
+    if since.empty:
+        # 买入日为当日且日K尚未落库（盘中 / 收盘后补库任务前的窗口）：
+        # 用 compute_stop_loss 已由实时报价合成的当日K线补齐，使当日试算可用；
+        # 持仓净值/止损触发随每次试算的最新报价刷新（ATR 仍为前一交易日口径）。
+        ib = stops.get("intraday_bar")
+        if ib and pd.Timestamp(ib["date"]) >= buy_ts:
+            df = pd.concat(
+                [
+                    df,
+                    pd.DataFrame(
+                        [
+                            {
+                                "time": pd.Timestamp(ib["date"]),
+                                "open": ib["open"],
+                                "high": ib["high"],
+                                "low": ib["low"],
+                                "close": ib["close"],
+                                "volume": 0.0,
+                                "amount": 0.0,
+                            }
+                        ]
+                    ),
+                ],
+                ignore_index=True,
+            )
+            since = df[df["time"] >= buy_ts]
     if since.empty:
         raise ManualTradeError(f"买入日期 {buy_date} 晚于最新数据日期")
 
@@ -103,6 +158,18 @@ def compute_manual_trade(
     pnl_points = round(latest_close - buy_price, 4)
     pnl_pct = round((latest_close / buy_price - 1) * 100, 2)
     max_gain_pct = round((stops["highest_since_buy"] / buy_price - 1) * 100, 2)
+
+    # 当日涨跌幅：最新价（盘中为实时价）相对前一交易日收盘价。
+    # intraday_bar 存在 → 当日K线未落库，前收 = 最后一根 EOD 收盘；
+    # 否则最新价即最后一根 EOD 收盘，前收取倒数第二根（非交易时段时
+    # 即"最新交易日涨跌幅"）。
+    if intraday_bar is not None:
+        prev_close = round(float(eod_closes.iloc[-1]), 4) if len(eod_closes) else None
+    else:
+        prev_close = round(float(eod_closes.iloc[-2]), 4) if len(eod_closes) >= 2 else None
+    daily_change_pct = (
+        round((latest_close / prev_close - 1) * 100, 2) if prev_close else None
+    )
 
     # 硬止损击穿检测：买入（含）以来最低价 ≤ 硬止损价。
     # 记录首次击穿日的价格明细（最低/收盘），供前端徽章悬停提示展示历史。
@@ -150,13 +217,15 @@ def compute_manual_trade(
 
     name = load_instrument_name_map().get(symbol, "")
 
-    return {
+    result = {
         "symbol": symbol,
         "name": name,
         "buy_date": buy_date,
         "buy_price": buy_price,
         "start_date": daily_nav[0]["date"],
         "latest_date": daily_nav[-1]["date"],
+        "prev_close": prev_close,
+        "daily_change_pct": daily_change_pct,
         "is_intraday": bool(stops.get("is_intraday")),
         "intraday_ts": stops.get("intraday_ts"),
         "stops": {
@@ -194,3 +263,8 @@ def compute_manual_trade(
             "downside_std": round(summary["downside_std"] * 100, 4),
         },
     }
+    if risk_budget is not None:
+        result["position_sizing"] = compute_position_sizing(
+            buy_price, hard_stop_price, risk_budget
+        )
+    return result

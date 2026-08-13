@@ -134,6 +134,94 @@ class TestManualTradeEvaluateApi:
         assert resp.status_code == 400
         assert "当日价格区间" in resp.json()["detail"]
 
+    def test_evaluate_with_risk_budget(self, client, populated_db) -> None:
+        """携带风险预算：响应附带最大可买入份数（下取整到百位）。"""
+        _, bars = populated_db
+        row = bars.iloc[-3]
+        buy_price = round(float(row["close"]), 4)
+
+        resp = client.post(
+            "/manual-trade/api/evaluate",
+            json={
+                "symbol": "510300",
+                "buy_date": str(row["time"])[:10],
+                "buy_price": buy_price,
+                "risk_budget": 10000,
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        ps = data["position_sizing"]
+        assert ps["risk_budget"] == 10000
+        assert ps["risk_per_share"] == pytest.approx(
+            round(buy_price - data["stops"]["hard_stop_price"], 4)
+        )
+        assert ps["max_qty"] % 100 == 0
+        assert ps["max_qty"] * ps["risk_per_share"] <= 10000
+        assert ps["max_loss"] <= 10000
+
+    def test_evaluate_without_risk_budget_has_no_sizing(self, client, populated_db) -> None:
+        _, bars = populated_db
+        row = bars.iloc[-3]
+        resp = client.post(
+            "/manual-trade/api/evaluate",
+            json={
+                "symbol": "510300",
+                "buy_date": str(row["time"])[:10],
+                "buy_price": round(float(row["close"]), 4),
+            },
+        )
+        assert resp.status_code == 200
+        assert "position_sizing" not in resp.json()
+
+    def test_evaluate_invalid_risk_budget_422(self, client, populated_db) -> None:
+        _, bars = populated_db
+        row = bars.iloc[-3]
+        resp = client.post(
+            "/manual-trade/api/evaluate",
+            json={
+                "symbol": "510300",
+                "buy_date": str(row["time"])[:10],
+                "buy_price": round(float(row["close"]), 4),
+                "risk_budget": -100,
+            },
+        )
+        assert resp.status_code == 422
+
+    def test_evaluate_buy_today_intraday_not_persisted(self, client, populated_db, monkeypatch) -> None:
+        """买入日为当日且日K未落库：用实时报价合成的当日K线完成试算（不再报"晚于最新数据日期"）。"""
+        _, bars = populated_db
+        last_close = float(bars.iloc[-1]["close"])
+        monkeypatch.setattr(
+            sl,
+            "_fetch_intraday_bar",
+            lambda symbol, df: {
+                "time": pd.Timestamp("2025-03-03 10:30:00"),  # 晚于 bars 末日
+                "open": last_close,
+                "high": last_close * 1.02,
+                "low": last_close * 0.98,
+                "close": last_close * 1.01,
+                "volume": 0.0,
+                "amount": 0.0,
+            },
+        )
+
+        resp = client.post(
+            "/manual-trade/api/evaluate",
+            json={
+                "symbol": "510300",
+                "buy_date": "2025-03-03",
+                "buy_price": round(last_close * 1.005, 4),
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["is_intraday"] is True
+        assert data["start_date"] == "2025-03-03"
+        assert data["holding"]["hold_days"] == 1
+
     def test_evaluate_intraday_overlay(self, client, populated_db, monkeypatch) -> None:
         _, bars = populated_db
         row = bars.iloc[-3]

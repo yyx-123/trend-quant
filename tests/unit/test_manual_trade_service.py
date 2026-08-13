@@ -171,3 +171,143 @@ class TestComputeManualTrade:
         assert out["stops"]["hard_stop_trigger_close"] == pytest.approx(round(synth["close"], 4))
         # EOD 口径下尚未触发
         assert eod["stops"]["hard_stop_triggered"] is False
+
+    def test_daily_change_pct_eod(self, bull_db) -> None:
+        """当日涨跌幅（EOD 口径）= 最新收盘 / 前一交易日收盘 − 1。"""
+        db, bars = bull_db
+        row = bars.iloc[-3]
+        buy_price = round((float(row["low"]) + float(row["close"])) / 2, 4)
+
+        out = mt.compute_manual_trade("510300.SS", str(row["time"])[:10], buy_price, db=db)
+
+        last_close = float(bars.iloc[-1]["close"])
+        prev_close = float(bars.iloc[-2]["close"])
+        assert out["prev_close"] == pytest.approx(round(prev_close, 4))
+        assert out["daily_change_pct"] == pytest.approx(
+            round((last_close / prev_close - 1) * 100, 2)
+        )
+
+    def test_daily_change_pct_intraday_uses_realtime(self, bull_db, monkeypatch) -> None:
+        """盘中口径：最新价为实时价，前一交易日收盘 = 最后一根 EOD 收盘。"""
+        db, bars = bull_db
+        row = bars.iloc[-3]
+        buy_price = round((float(row["low"]) + float(row["close"])) / 2, 4)
+        last_eod_close = float(bars.iloc[-1]["close"])
+        synth_close = last_eod_close * 1.05
+        monkeypatch.setattr(
+            sl,
+            "_fetch_intraday_bar",
+            lambda symbol, df: {
+                "time": pd.Timestamp("2025-03-03 10:30:00"),  # 晚于 bull bars 末日
+                "open": last_eod_close,
+                "high": synth_close,
+                "low": last_eod_close * 0.99,
+                "close": synth_close,
+                "volume": 0.0,
+                "amount": 0.0,
+            },
+        )
+
+        out = mt.compute_manual_trade("510300.SS", str(row["time"])[:10], buy_price, db=db)
+
+        assert out["is_intraday"] is True
+        assert out["prev_close"] == pytest.approx(round(last_eod_close, 4))
+        assert out["daily_change_pct"] == pytest.approx(
+            round((synth_close / last_eod_close - 1) * 100, 2)
+        )
+        assert out["daily_change_pct"] > 0
+
+    def test_buy_date_today_before_daily_bar_persisted(self, bull_db, monkeypatch) -> None:
+        """当日试算（日K未落库）：DB 无当日K线时用实时报价合成的当日K线补齐，
+        买入价按当日最新最高/最低价校验，ATR 取前一交易日口径。"""
+        db, bars = bull_db
+        last_close = float(bars.iloc[-1]["close"])
+        synth = {
+            "time": pd.Timestamp("2025-03-03 10:30:00"),  # 晚于 bull bars 末日
+            "open": last_close,
+            "high": last_close * 1.02,
+            "low": last_close * 0.98,
+            "close": last_close * 1.01,
+            "volume": 0.0,
+            "amount": 0.0,
+        }
+        monkeypatch.setattr(sl, "_fetch_intraday_bar", lambda symbol, df: synth)
+        buy_price = round(last_close * 1.005, 4)  # 落在当日 [low, high] 内
+
+        out = mt.compute_manual_trade("510300.SS", "2025-03-03", buy_price, db=db)
+
+        assert out["is_intraday"] is True
+        assert out["start_date"] == "2025-03-03"
+        assert out["latest_date"] == "2025-03-03"
+        assert out["holding"]["hold_days"] == 1
+        assert out["holding"]["pnl_points"] == pytest.approx(round(synth["close"] - buy_price, 4))
+        # ATR 取前一交易日（当日 20 日 ATR 未定型，不含当日不完整K线）
+        assert out["stops"]["atr_at_buy"] == pytest.approx(out["stops"]["current_atr"])
+
+    def test_buy_date_today_price_out_of_intraday_range(self, bull_db, monkeypatch) -> None:
+        """当日试算：买入价超出当日实时最高/最低价区间 → 报错。"""
+        db, bars = bull_db
+        last_close = float(bars.iloc[-1]["close"])
+        monkeypatch.setattr(
+            sl,
+            "_fetch_intraday_bar",
+            lambda symbol, df: {
+                "time": pd.Timestamp("2025-03-03 10:30:00"),
+                "open": last_close,
+                "high": last_close * 1.02,
+                "low": last_close * 0.98,
+                "close": last_close * 1.01,
+                "volume": 0.0,
+                "amount": 0.0,
+            },
+        )
+        with pytest.raises(sl.StopLossError, match="当日价格区间"):
+            mt.compute_manual_trade(
+                "510300.SS", "2025-03-03", round(last_close * 1.05, 4), db=db
+            )
+
+
+class TestPositionSizing:
+    def test_floor_to_hundreds(self) -> None:
+        """可买份数下取整到百位：12345.67 份 → 12300 份。"""
+        ps = mt.compute_position_sizing(buy_price=2.0, hard_stop_price=1.0, risk_budget=12345.67)
+        assert ps["risk_per_share"] == pytest.approx(1.0)
+        assert ps["max_qty"] == 12300
+        assert ps["max_loss"] == pytest.approx(12300.0)
+        assert ps["position_value"] == pytest.approx(24600.0)
+        # 下取整保证硬止损触发损失不超过预算
+        assert ps["max_loss"] <= 12345.67
+
+    def test_fractional_shares_dropped(self) -> None:
+        ps = mt.compute_position_sizing(buy_price=4.025, hard_stop_price=3.95, risk_budget=10000)
+        assert ps["risk_per_share"] == pytest.approx(0.075)
+        assert ps["max_qty"] == 133300  # 10000 / 0.075 = 133333.33 → 133300
+        assert ps["max_qty"] % 100 == 0
+
+    def test_tiny_budget_rounds_to_zero(self) -> None:
+        ps = mt.compute_position_sizing(buy_price=10.0, hard_stop_price=9.0, risk_budget=50)
+        assert ps["max_qty"] == 0
+        assert ps["max_loss"] == 0
+
+    def test_sizing_in_compute_manual_trade(self, bull_db) -> None:
+        db, bars = bull_db
+        row = bars.iloc[-3]
+        buy_date = str(row["time"])[:10]
+        buy_price = round((float(row["low"]) + float(row["close"])) / 2, 4)
+
+        out = mt.compute_manual_trade("510300.SS", buy_date, buy_price, db=db, risk_budget=10000)
+
+        ps = out["position_sizing"]
+        hard_stop = out["stops"]["hard_stop_price"]
+        assert ps["risk_per_share"] == pytest.approx(round(buy_price - hard_stop, 4))
+        assert ps["max_qty"] % 100 == 0
+        assert ps["max_qty"] * ps["risk_per_share"] <= 10000
+        assert ps["max_loss"] == pytest.approx(round(ps["max_qty"] * ps["risk_per_share"], 2))
+        assert ps["position_value"] == pytest.approx(round(ps["max_qty"] * buy_price, 2))
+
+    def test_no_risk_budget_no_sizing(self, bull_db) -> None:
+        db, bars = bull_db
+        row = bars.iloc[-3]
+        buy_price = round((float(row["low"]) + float(row["close"])) / 2, 4)
+        out = mt.compute_manual_trade("510300.SS", str(row["time"])[:10], buy_price, db=db)
+        assert "position_sizing" not in out

@@ -13,6 +13,10 @@
     <label>买入价格
       <input id="mtBuyPrice" type="number" min="0" step="0.0001" placeholder="如 4.025">
     </label>
+    <label>风险预算（元）
+      <input id="mtRiskBudget" type="number" min="0" step="100" placeholder="选填，如 10000"
+        title="可承受的最大亏损金额：按硬止损触发的每股损失推算最大可买入份数（下取整到百位）">
+    </label>
     <button id="mtEvaluateBtn" type="button">试算</button>
   </div>
   <div id="mtPriceHint" class="mt-price-hint" hidden></div>
@@ -141,6 +145,7 @@
   const symbolOptionsEl = document.getElementById('mtSymbolOptions');
   const buyDateEl = document.getElementById('mtBuyDate');
   const buyPriceEl = document.getElementById('mtBuyPrice');
+  const riskBudgetEl = document.getElementById('mtRiskBudget');
   const evaluateBtn = document.getElementById('mtEvaluateBtn');
   const priceHintEl = document.getElementById('mtPriceHint');
   const messageEl = document.getElementById('mtMessage');
@@ -506,16 +511,23 @@
     const symbol = symbolEl.value.trim();
     const buyDate = buyDateEl.value;
     const buyPrice = parseFloat(buyPriceEl.value);
+    const riskBudget = parseFloat(riskBudgetEl.value);
     if (!symbol) { showMessage('请输入标的代码', true); return null; }
     if (!buyDate) { showMessage('请选择买入日期', true); return null; }
     if (!(buyPrice > 0)) { showMessage('请输入大于 0 的买入价格', true); return null; }
+    if (riskBudgetEl.value.trim() && !(riskBudget > 0)) {
+      showMessage('风险预算需为大于 0 的金额（选填）', true);
+      return null;
+    }
     if (dayRange && dayRange.date === buyDate &&
         (buyPrice < dayRange.low || buyPrice > dayRange.high)) {
       showMessage('买入价格 ' + fmtPrice(buyPrice) + ' 超出 ' + buyDate + ' 当日价格区间 [' +
         fmtPrice(dayRange.low) + ', ' + fmtPrice(dayRange.high) + ']', true);
       return null;
     }
-    return {symbol: symbol, buy_date: buyDate, buy_price: buyPrice};
+    const form = {symbol: symbol, buy_date: buyDate, buy_price: buyPrice};
+    if (riskBudget > 0) form.risk_budget = riskBudget;
+    return form;
   }
 
   async function evaluate() {
@@ -537,6 +549,19 @@
     }
   }
 
+  // 最大可买入份数 = 风险预算 ÷ 每股风险（买入价 − 硬止损价），下取整到百位
+  function positionSizingTip(data) {
+    const ps = data.position_sizing || {};
+    const stops = data.stops || {};
+    if (ps.risk_per_share == null) return '';
+    return '每股风险 = 买入价 ' + fmtPrice(data.buy_price) + ' − 硬止损价 ' +
+      fmtPrice(stops.hard_stop_price) + ' = ' + fmtPrice(ps.risk_per_share) +
+      '；可买份数 = 风险预算 ¥' + Number(ps.risk_budget).toFixed(2) + ' ÷ 每股风险 ' +
+      fmtPrice(ps.risk_per_share) + '，下取整到百位 = ' + fmtShares(ps.max_qty) +
+      ' 份；若硬止损触发亏损约 ¥' + Number(ps.max_loss).toFixed(2) +
+      '，持仓金额约 ¥' + Number(ps.position_value).toFixed(2);
+  }
+
   function renderResult(data) {
     const stops = data.stops || {};
     const title = (data.name ? data.name + ' ' : '') + data.symbol +
@@ -546,7 +571,7 @@
       (data.is_intraday ? '（含今日盘中实时数据 ' + intradayTime + '）' : '');
 
     renderStopStats(stopStatsEl, stops);
-    renderStats(holdingStatsEl, holdingStatItems({
+    const holdingItems = holdingStatItems({
       status: 'open',
       buy_date: data.buy_date,
       buy_price: data.buy_price,
@@ -555,7 +580,17 @@
       is_intraday: data.is_intraday,
       intraday_ts: data.intraday_ts,
       holding: data.holding || {},
-    }, data.start_date + ' ~ ' + data.latest_date));
+    }, data.start_date + ' ~ ' + data.latest_date);
+    if (data.position_sizing) {
+      holdingItems.unshift({
+        label: '最大可买入份数',
+        value: fmtShares(data.position_sizing.max_qty) + ' 份',
+        primary: true,
+        note: '风险预算 ¥' + Number(data.position_sizing.risk_budget).toFixed(2),
+        tip: positionSizingTip(data),
+      });
+    }
+    renderStats(holdingStatsEl, holdingItems);
 
     resultEl.hidden = false;
   }
@@ -623,7 +658,7 @@
   }
 
   // 统一表格展示：各值的格式与原卡片保持一致，持有天数挪到外层后无需再展开详情
-  const TRADE_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '买价', '现价', '份数', '持仓金额',
+  const TRADE_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '买价', '现价', '涨跌幅', '份数', '持仓金额',
     '盈亏', '最大浮盈', '最大回撤', '硬止损价', '吊灯止损价', '持有天数', '操作'];
 
   // 清仓交易表：体现一笔完整交易的结果（收益金额与收益率分列），不展示现价/持仓金额/止损价/操作
@@ -643,6 +678,10 @@
     '现价': function(t) {
       if (t.error) return null;
       return numOrNull(t.latest_price);
+    },
+    '涨跌幅': function(t) {
+      if (t.error) return null;
+      return numOrNull(t.daily_change_pct);
     },
     '持仓金额': function(t) {
       if (t.error) return null;
@@ -831,6 +870,14 @@
       fmtPct(holding.max_drawdown) + '| = ' + Number(holding.calmar).toFixed(2);
   }
 
+  // 当日涨跌幅 = 最新价 / 前一交易日收盘 − 1（盘中最新价为实时价）
+  function dailyChangeTip(t) {
+    if (t.daily_change_pct == null || t.prev_close == null || t.latest_price == null) return '';
+    return '当日涨跌幅 = 最新价 ' + fmtPrice(t.latest_price) + ' / 前一交易日收盘 ' +
+      fmtPrice(t.prev_close) + ' − 1 = ' + fmtPct(t.daily_change_pct) +
+      (t.is_intraday && t.intraday_ts ? '（最新价为盘中实时价 ' + String(t.intraday_ts).slice(11, 16) + '）' : '');
+  }
+
   // 浮动盈亏 = (现价 − 买价) × 份数；收益率 = 现价 / 买价 − 1
   function pnlTip(t, holding) {
     if (holding.pnl_pct == null || t.latest_price == null) return '';
@@ -926,6 +973,7 @@
       '<td>' + esc(fmtPrice(t.buy_price)) + '</td>';
     if (t.error) {
       cells += '<td>—</td>' +
+        '<td>—</td>' +
         '<td>' + esc(fmtShares(t.shares)) + '</td>' +
         '<td colspan="7"><span class="mt-trade-error">指标计算失败：' + esc(t.error) + '</span></td>';
     } else {
@@ -936,6 +984,10 @@
       const chandDominant = isFinite(chandPrice) && (!isFinite(hardPrice) || chandPrice >= hardPrice);
       cells +=
         '<td>' + esc(fmtPrice(t.latest_price)) + '</td>' +
+        '<td>' + (t.daily_change_pct != null
+          ? withTip('<span class="' + pctClass(t.daily_change_pct) + '">' +
+            esc(fmtPct(t.daily_change_pct)) + '</span>', dailyChangeTip(t))
+          : '—') + '</td>' +
         '<td>' + esc(fmtShares(t.shares)) + '</td>' +
         '<td>' + withTip(esc(fmtMoney(t.position_value).replace(/^\+/, '')), positionValueTip(t)) + '</td>' +
         '<td>' + withTip('<span class="' + pctClass(holding.pnl_pct) + '">' + esc(fmtPct(holding.pnl_pct)) +
@@ -1168,10 +1220,14 @@
 
   // ── 事件绑定 ───────────────────────────────────────────
   evaluateBtn.addEventListener('click', evaluate);
-  [symbolEl, buyDateEl, buyPriceEl].forEach(function(el) {
+  [symbolEl, buyDateEl, buyPriceEl, riskBudgetEl].forEach(function(el) {
     el.addEventListener('keydown', function(ev) {
       if (ev.key === 'Enter') evaluate();
     });
+  });
+  // 风险预算变更后，试算结果已展示时按新预算自动重算（与止损松紧切换同一模式）
+  riskBudgetEl.addEventListener('change', function() {
+    if (!resultEl.hidden) evaluate();
   });
   symbolEl.addEventListener('change', scheduleRangeRefresh);
   buyDateEl.addEventListener('change', scheduleRangeRefresh);

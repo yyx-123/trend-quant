@@ -25,6 +25,9 @@ class ManualTradeEvaluateRequest(BaseModel):
     stop_mode: StopMode | None = Field(
         None, description="止损松紧：tight 紧止损（1×/2×ATR），loose 松止损（1.5×/2.5×ATR）"
     )
+    risk_budget: float | None = Field(
+        None, gt=0, description="风险预算金额（元）：按硬止损损失推算最大可买入份数（下取整到百位）"
+    )
 
 
 class Credentials(BaseModel):
@@ -67,6 +70,7 @@ async def evaluate_manual_trade(payload: ManualTradeEvaluateRequest) -> dict:
             payload.buy_date.isoformat(),
             payload.buy_price,
             stop_mode=payload.stop_mode,
+            risk_budget=payload.risk_budget,
         )
     except StopLossError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

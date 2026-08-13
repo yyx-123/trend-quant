@@ -1582,8 +1582,9 @@
       rangeMetaEl.textContent = '';
       return;
     }
-    applySelectedSymbol(allSymbols[0]);
-    await loadDaily(allSymbols[0].symbol);
+    // 不默认加载任何标的：等待用户输入代码/名称后再展示（2026-08 需求）
+    chartTitleEl.textContent = '请输入标的代码或名称';
+    rangeMetaEl.textContent = '';
   }
 
   function selectedStrategyIds() {
