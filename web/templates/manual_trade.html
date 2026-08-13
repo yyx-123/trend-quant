@@ -28,9 +28,9 @@
       <div class="mt-stop-grid" id="mtStopStats"></div>
     </div>
 
-    <div class="viz-panel">
-      <h3>持仓指标</h3>
-      <div class="mt-stat-grid" id="mtHoldingStats"></div>
+    <div class="viz-panel" id="mtSizingPanel" hidden>
+      <h3>仓位试算</h3>
+      <div id="mtHoldingStats"></div>
     </div>
   </div>
 
@@ -153,6 +153,7 @@
   const summaryTitleEl = document.getElementById('mtSummaryTitle');
   const stopStatsEl = document.getElementById('mtStopStats');
   const holdingStatsEl = document.getElementById('mtHoldingStats');
+  const sizingPanelEl = document.getElementById('mtSizingPanel');
 
   const loginFormEl = document.getElementById('mtLoginForm');
   const usernameEl = document.getElementById('mtUsername');
@@ -246,7 +247,7 @@
   }
 
   function fmtPrice(v) {
-    return Number(v).toFixed(2);
+    return Number(v).toFixed(3);
   }
 
   function fmtPct(v) {
@@ -395,41 +396,6 @@
       '</div>';
   }
 
-  function holdingStatItems(t, rangeNote) {
-    const holding = t.holding || {};
-    const note = rangeNote ||
-      (t.status === 'closed' ? t.buy_date + ' ~ ' + t.sell_date : t.buy_date);
-    const items = [
-      {label: '持有交易日数', value: String(holding.hold_days), note: note,
-        tip: holdDaysTip(t, holding)},
-      {label: '最大浮盈', value: fmtPct(holding.max_gain_pct), cls: pctClass(holding.max_gain_pct),
-        tip: maxGainTip(t, holding)},
-    ];
-    if (t.status === 'closed') {
-      items.push({
-        label: '实际盈亏',
-        value: fmtPct(t.realized_pnl_pct) + '（' + fmtMoney(t.realized_pnl) + '）',
-        cls: pctClass(t.realized_pnl), primary: true,
-        tip: realizedPnlTip(t),
-      });
-    } else {
-      items.push({
-        label: '累计收益率', value: fmtPct(holding.total_return),
-        cls: pctClass(holding.total_return), primary: true,
-        tip: totalReturnTip(t, holding),
-      });
-    }
-    items.push(
-      {label: '最大回撤', value: fmtPct(holding.max_drawdown), cls: pctClass(holding.max_drawdown),
-        tip: maxDrawdownTip(t, holding)},
-      {label: '夏普比率', value: Number(holding.sharpe).toFixed(2), cls: pctClass(holding.sharpe),
-        tip: sharpeTip(holding)},
-      {label: '卡玛比率', value: Number(holding.calmar).toFixed(2), cls: pctClass(holding.calmar),
-        tip: calmarTip(holding)},
-    );
-    return items;
-  }
-
   // 当日K线区间（买入提示 / 清仓提示共用）：无K线返回 null，请求失败抛错。
   // intraday=true：当日K线未落库时由实时报价合成（含盘后收盘快照），
   // 否则当日买入/清仓在 16:30 补库前拿不到区间提示。
@@ -559,7 +525,24 @@
       '；可买份数 = 风险预算 ¥' + Number(ps.risk_budget).toFixed(2) + ' ÷ 每股风险 ' +
       fmtPrice(ps.risk_per_share) + '，下取整到百位 = ' + fmtShares(ps.max_qty) +
       ' 份；若硬止损触发亏损约 ¥' + Number(ps.max_loss).toFixed(2) +
-      '，持仓金额约 ¥' + Number(ps.position_value).toFixed(2);
+      '，按买入价计持仓约 ¥' + Number(ps.position_value).toFixed(2);
+  }
+
+  // 仓位试算单行展示：最大可买入份数 + 最大可买入金额（份数 × 买入价），推算明细在悬停提示
+  function renderSizingLine(data) {
+    const ps = data.position_sizing;
+    if (!ps) {
+      sizingPanelEl.hidden = true;
+      holdingStatsEl.innerHTML = '';
+      return;
+    }
+    const html = '最大可买入份数 <b>' + esc(fmtShares(ps.max_qty)) + ' 份</b>' +
+      '<span class="mt-stat-note">（风险预算 ¥' + Number(ps.risk_budget).toFixed(2) + '）</span>' +
+      '　｜　最大可买入金额 <b>¥' + Number(ps.position_value).toFixed(2) + '</b>' +
+      '<span class="mt-stat-note">＝ ' + esc(fmtShares(ps.max_qty)) + ' 份 × 买入价 ' +
+      esc(fmtPrice(data.buy_price)) + '</span>';
+    holdingStatsEl.innerHTML = withTip(html, positionSizingTip(data));
+    sizingPanelEl.hidden = false;
   }
 
   function renderResult(data) {
@@ -571,26 +554,7 @@
       (data.is_intraday ? '（含今日盘中实时数据 ' + intradayTime + '）' : '');
 
     renderStopStats(stopStatsEl, stops);
-    const holdingItems = holdingStatItems({
-      status: 'open',
-      buy_date: data.buy_date,
-      buy_price: data.buy_price,
-      latest_price: stops.latest_price,
-      latest_date: data.latest_date,
-      is_intraday: data.is_intraday,
-      intraday_ts: data.intraday_ts,
-      holding: data.holding || {},
-    }, data.start_date + ' ~ ' + data.latest_date);
-    if (data.position_sizing) {
-      holdingItems.unshift({
-        label: '最大可买入份数',
-        value: fmtShares(data.position_sizing.max_qty) + ' 份',
-        primary: true,
-        note: '风险预算 ¥' + Number(data.position_sizing.risk_budget).toFixed(2),
-        tip: positionSizingTip(data),
-      });
-    }
-    renderStats(holdingStatsEl, holdingItems);
+    renderSizingLine(data);
 
     resultEl.hidden = false;
   }
@@ -828,14 +792,6 @@
       ' / 买入价 ' + fmtPrice(t.buy_price) + ' − 1 = ' + fmtPct(holding.max_gain_pct);
   }
 
-  // 累计收益率 = 最新价 / 买入价 − 1（净值从买入价 1.0 起算，含买入日收益）
-  function totalReturnTip(t, holding) {
-    if (holding.total_return == null || t.latest_price == null) return '';
-    return '累计收益率 = 最新价 ' + fmtPrice(t.latest_price) + ' / 买入价 ' +
-      fmtPrice(t.buy_price) + ' − 1 = ' + fmtPct(holding.total_return) +
-      '（净值从买入价 1.0 起算，含买入日收益）';
-  }
-
   // 最大回撤 = 持有期净值谷底 / 净值峰值 − 1（净值为买入价=1.0 口径，括注换算价格）
   function maxDrawdownTip(t, holding) {
     if (holding.max_drawdown == null) return '';
@@ -849,25 +805,6 @@
       ' / 净值峰值 ' + Number(holding.max_dd_peak_equity).toFixed(4) +
       '（' + holding.max_dd_peak_date + priceNote(Number(holding.max_dd_peak_equity)) + '）' +
       ' − 1 = ' + fmtPct(holding.max_drawdown);
-  }
-
-  // 夏普 = 日收益均值 / 日收益波动 × √252
-  function sharpeTip(holding) {
-    if (holding.sharpe == null || !holding.n_returns) return '';
-    if (!Number(holding.std_daily_return)) return '持有期日收益无波动，夏普比率记 0';
-    return '夏普比率 = 日收益均值 ' + Number(holding.mean_daily_return).toFixed(2) +
-      '% / 日收益波动 ' + Number(holding.std_daily_return).toFixed(2) + '% × √252 = ' +
-      Number(holding.sharpe).toFixed(2) + '（基于 ' + holding.n_returns + ' 个日收益）';
-  }
-
-  // 卡玛 = 年化收益率 / |最大回撤|
-  function calmarTip(holding) {
-    if (holding.calmar == null) return '';
-    if (!holding.max_drawdown || Number(holding.max_drawdown) >= 0) {
-      return '持有期无回撤，卡玛比率记 0';
-    }
-    return '卡玛比率 = 年化收益率 ' + fmtPct(holding.annual_return) + ' / |最大回撤 ' +
-      fmtPct(holding.max_drawdown) + '| = ' + Number(holding.calmar).toFixed(2);
   }
 
   // 当日涨跌幅 = 最新价 / 前一交易日收盘 − 1（盘中最新价为实时价）
