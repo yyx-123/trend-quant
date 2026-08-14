@@ -183,16 +183,23 @@ def kline_mini(bars: pd.DataFrame, count: int = 20) -> dict:
     order. 盘中场景把当日合成K线追加在末尾再调用，末根即为实时K线。
     Returns ``{"kline": [{o,h,l,c}...], "kline_ma5": [...]}`` — MA5 与 kline
     对齐，不足 5 根的头部位置为 None。
+    悬停提示所需的附加字段（存在时才附带）：``d`` 交易日期、``pct`` 当日
+    涨跌幅（%）、``a`` 成交额。
     """
     empty: dict = {"kline": [], "kline_ma5": []}
     if bars is None or bars.empty:
         return empty
+    # 涨跌幅在全序列上算好再截尾，保证尾部首根也有相对前一根的涨跌幅。
+    pct_full = pd.to_numeric(bars["close"], errors="coerce").pct_change() * 100.0
     tail = bars.tail(count)
     close = pd.to_numeric(tail["close"], errors="coerce")
     ma5 = sma(close, 5, min_periods=5)
+    pct = pct_full.loc[tail.index]
+    has_time = "time" in tail.columns
+    has_amount = "amount" in tail.columns
     candles: list[dict] = []
     ma5_values: list[float | None] = []
-    for (_, row), ma_value in zip(tail.iterrows(), ma5):
+    for (_, row), ma_value, pct_value in zip(tail.iterrows(), ma5, pct):
         try:
             candle = {
                 "o": float(row["open"]),
@@ -204,11 +211,49 @@ def kline_mini(bars: pd.DataFrame, count: int = 20) -> dict:
             continue
         if not all(np.isfinite(v) for v in candle.values()):
             continue
+        if has_time and pd.notna(row["time"]):
+            candle["d"] = pd.Timestamp(row["time"]).date().isoformat()
+        if np.isfinite(pct_value):
+            candle["pct"] = round(float(pct_value), 2)
+        if has_amount:
+            amount = pd.to_numeric(pd.Series([row["amount"]]), errors="coerce").iloc[0]
+            if np.isfinite(amount):
+                candle["a"] = float(amount)
         candles.append(candle)
         ma5_values.append(float(ma_value) if np.isfinite(ma_value) else None)
     if not candles:
         return empty
     return {"kline": candles, "kline_ma5": ma5_values}
+
+
+def macd_mini(bars: pd.DataFrame, count: int = 20) -> dict:
+    """Package the last ``count`` bars' MACD (DIF/DEA/hist) for a mini chart.
+
+    与 ``kline_mini`` 同一尾部窗口（根数一致、逐根对齐），EMA 预热口径与
+    ``detect_macd_phase`` 相同（warmup=True，全历史预热后截取尾部）。
+    盘中场景把当日合成K线追加在末尾再调用，末根即为实时值。
+    """
+    empty: dict = {"macd_dif": [], "macd_dea": [], "macd_hist": [], "macd_dates": []}
+    if bars is None or bars.empty or "close" not in bars.columns:
+        return empty
+    close = pd.to_numeric(bars["close"], errors="coerce")
+    if close.dropna().empty:
+        return empty
+    result = macd(close, warmup=True).tail(count)
+    def _values(series: pd.Series) -> list[float | None]:
+        return [float(v) if np.isfinite(v) else None for v in series]
+    dates: list[str | None] = []
+    if "time" in bars.columns:
+        dates = [
+            pd.Timestamp(v).date().isoformat() if pd.notna(v) else None
+            for v in bars["time"].tail(count)
+        ]
+    return {
+        "macd_dif": _values(result["dif"]),
+        "macd_dea": _values(result["dea"]),
+        "macd_hist": _values(result["hist"]),
+        "macd_dates": dates,
+    }
 
 
 def bollinger(close: pd.Series, period: int = 20, std_mul: float = 2.0) -> pd.DataFrame:

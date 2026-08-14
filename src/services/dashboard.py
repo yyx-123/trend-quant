@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from data.indicator_store import get_series
-from core.indicators import detect_macd_phase, kline_mini
+from core.indicators import detect_macd_phase, kline_mini, macd_mini
 from core.trend import _detect_trend_phase
 from data.storage.db import get_db
 from core.trend import TREND_FORMULA_VERSION
@@ -206,6 +206,10 @@ def _empty_macd_kline() -> dict:
         "macd_dead_count": None,
         "kline": [],
         "kline_ma5": [],
+        "macd_dif": [],
+        "macd_dea": [],
+        "macd_hist": [],
+        "macd_dates": [],
     }
 
 
@@ -247,6 +251,7 @@ def _macd_kline_payloads(db) -> dict[str, dict]:
             "macd_golden_count": None,
             "macd_dead_count": None,
             **kline_mini(history),
+            **macd_mini(history),
         }
     return payloads
 

@@ -5,7 +5,7 @@
     <div>
       <p class="index-board-kicker">SUBJECT MARKET / DAILY</p>
       <h1>标的看板</h1>
-      <p>默认展示一级类目下的二级类目聚合。点击二级类目展开三级类目，再点击三级类目展开具体标的；所有聚合均按每个交易日的成交额加权。</p>
+      <p>每行一个标的，按一级 / 二级类目分组平铺；左侧分类目录可快速跳转，类目行仅统计金叉 / 死叉家数。</p>
     </div>
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px;">
       <div class="index-board-legend"><span class="dot positive"></span>强势 <span class="dot negative"></span>弱势</div>
@@ -31,21 +31,28 @@
     <progress id="intradayProgressBar" max="100" value="0" aria-label="盘中计算进度"></progress>
     <span id="intradayProgressText">准备中…</span>
   </div>
-  <div id="subjectBoardStatus" class="context-hint">正在按类目层级汇总本地标的日K数据…</div>
-  <div id="subjectBoard" class="index-board"></div>
+  <div id="subjectBoardStatus" class="context-hint">正在加载本地标的日K数据…</div>
+  <div class="instrument-content-layout">
+    <aside class="instrument-side-nav" aria-label="标的分类目录">
+      <div class="instrument-side-nav-title">分类目录</div>
+      <div id="subjectSideNav" class="instrument-side-nav-body"></div>
+    </aside>
+    <div id="subjectBoard" class="index-board"></div>
+  </div>
 </section>
 <script src="/static/echarts.min.js?v={{ request.app.state.asset_version|default('1', true) if request is defined else '1' }}"></script>
 <script>
   const board = document.getElementById('subjectBoard');
   const statusEl = document.getElementById('subjectBoardStatus');
+  const sideNavEl = document.getElementById('subjectSideNav');
   const intradayBtn = document.getElementById('intradayBtn');
   const intradayProgress = document.getElementById('intradayProgress');
   const intradayProgressBar = document.getElementById('intradayProgressBar');
   const intradayProgressText = document.getElementById('intradayProgressText');
-  let nodeSequence = 0;
   let isIntradayMode = false;
-  // 已展开行的稳定标识（类目路径），跨整表重载（EOD 刷新/盘中看板）保留展开状态。
-  const expandedRows = new Set();
+  // 当前看板的二级类目锚点清单（侧栏跳转/滚动高亮用），随整表重载重建。
+  let boardSections = [];
+  let activeSyncPending = false;
   const fmtAmount = (value) => {
     if (value == null || !Number.isFinite(value)) return '—';
     if (Math.abs(value) >= 1e8) return `${(value / 1e8).toFixed(1)}亿`;
@@ -57,16 +64,18 @@
   const getChangeClass = (value) => value != null && value >= 0 ? 'is-positive' : 'is-negative';
   const fmtPhase = (item) => {
     if (item.macd_phase != null && item.macd_phase_days != null) {
-      const phaseLabel = item.macd_phase === 'golden' ? 'MACD金叉' : 'MACD死叉';
+      const phaseLabel = item.macd_phase === 'golden' ? '金叉' : '死叉';
       const phaseClass = item.macd_phase === 'golden' ? 'is-positive' : 'is-negative';
       const changeVal = item.macd_phase_change_pct != null ? item.macd_phase_change_pct.toFixed(2) : '—';
       const changeSign = item.macd_phase_change_pct != null && item.macd_phase_change_pct >= 0 ? '+' : '';
       const changeClass = item.macd_phase_change_pct != null ? (item.macd_phase_change_pct >= 0 ? 'is-positive' : 'is-negative') : '';
       return `<span class="${phaseClass}">${phaseLabel}第 ${item.macd_phase_days} 天</span>，涨跌幅：<span class="${changeClass}">${changeSign}${changeVal}%</span>`;
     }
-    // 类目聚合行：金叉/死叉家数（成员相位计数）。
-    const golden = item.macd_golden_count, dead = item.macd_dead_count;
-    if ((golden == null && dead == null) || (!golden && !dead)) return '<span class="index-phase-na">—</span>';
+    return '<span class="index-phase-na">—</span>';
+  };
+  // 类目行（一级头 / 二级分隔行）的金叉死叉家数：成员相位计数。
+  const fmtCrossCounts = (golden, dead) => {
+    if ((golden == null && dead == null) || (!golden && !dead)) return '';
     return `<span class="is-positive">金叉 ${golden || 0}</span> / <span class="is-negative">死叉 ${dead || 0}</span>`;
   };
 
@@ -446,66 +455,281 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const maLine = maPoints ? `<polyline class="kspark-ma5" points="${maPoints}"/>` : '';
     return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近20日K线">${parts.join('')}${maLine}</svg>`;
   };
-  const rowLabel = (item, level) => {
-    if (level === 'l2') return { name: item.category_l2, sub: `${item.child_count} 个三级类目 · ${item.member_count} 个标的 · 成交额加权` };
-    if (level === 'l3') return { name: item.category_l3, sub: `${item.child_count} 个标的 · 成交额加权` };
-    return { name: item.name || item.symbol, sub: `${item.symbol} · 具体标的` };
+  // MACD mini 图：红柱/绿柱（hist = DIF-DEA 两倍）+ DIF/DEA 双线，根数与
+  // 近20日K线 mini 图一致（同一尾部窗口）。仅具体标的行有数据。
+  const macdSpark = (dif, dea, hist) => {
+    if (!Array.isArray(hist) || !hist.length) return '<span class="spark-empty">—</span>';
+    const n = hist.length;
+    const values = [0];
+    const collect = (series) => (Array.isArray(series) ? series : []).forEach((v) => {
+      if (Number.isFinite(v)) values.push(v);
+    });
+    collect(hist);
+    collect(dif);
+    collect(dea);
+    let vMin = Math.min(...values);
+    let vMax = Math.max(...values);
+    if (vMax <= vMin) vMax = vMin + 1e-6;
+    const pad = (vMax - vMin) * 0.08;
+    vMin -= pad;
+    vMax += pad;
+    const y = (value) => 100 - ((Math.min(vMax, Math.max(vMin, value)) - vMin) / (vMax - vMin) * 100);
+    const step = 100 / n;
+    const barW = step * 0.62;
+    const zeroY = y(0);
+    const parts = [];
+    hist.forEach((v, i) => {
+      if (!Number.isFinite(v)) return;
+      const cx = (i + 0.5) * step;
+      const color = v >= 0 ? '#c13f3a' : '#187b5f';
+      const top = Math.min(y(v), zeroY);
+      const height = Math.max(Math.abs(y(v) - zeroY), 0.8);
+      parts.push(`<rect x="${(cx - barW / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${barW.toFixed(1)}" height="${height.toFixed(1)}" fill="${color}"/>`);
+    });
+    if (!parts.length) return '<span class="spark-empty">—</span>';
+    const lineFor = (series) => (Array.isArray(series) ? series : [])
+      .map((v, i) => Number.isFinite(v) ? `${((i + 0.5) * step).toFixed(1)},${y(v).toFixed(1)}` : '')
+      .filter(Boolean).join(' ');
+    const difLine = lineFor(dif);
+    const deaLine = lineFor(dea);
+    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="MACD"><line class="mspark-zero" x1="0" y1="${zeroY.toFixed(1)}" x2="100" y2="${zeroY.toFixed(1)}"/>${parts.join('')}${deaLine ? `<polyline class="mspark-dea" points="${deaLine}"/>` : ''}${difLine ? `<polyline class="mspark-dif" points="${difLine}"/>` : ''}</svg>`;
   };
-  const renderRow = (item, level, depth, path) => {
-    const children = item.children || [];
-    const expandable = children.length > 0;
-    const childId = expandable ? `subjectChildren${++nodeSequence}` : '';
-    const label = rowLabel(item, level);
-    const rowKey = `${path}/${label.name}`;
-    const isExpanded = expandable && expandedRows.has(rowKey);
-    // 具体标的行末尾的「查看」按钮：跳转标的查看页（/market-view?symbol=）。
-    const viewBtn = level === 'instrument' && item.symbol
-      ? `<a class="index-view-btn" href="/market-view?symbol=${encodeURIComponent(item.symbol)}" title="在标的查看页打开 ${escHtml(item.symbol)}">查看</a>`
-      : '';
-    const metrics = `<div class="index-phase">${fmtPhase(item)}</div>
-      <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
-      <div class="index-kspark">${klineSpark(item.kline || [], item.kline_ma5 || [])}</div>
-      <div class="index-spark">${sparkline(item.trend_history || [], item.trend_dates || [], item.trend_upper_history || [], item.trend_lower_history || [])}</div>
-      <div class="index-amount">${fmtAmount(item.amount)}</div>
-      <div class="index-strength">${item.strength == null ? '—' : item.strength}</div>
-      <div class="index-view">${viewBtn}</div>`;
-    const row = `<div class="index-row subject-row subject-row-${level}${expandable ? ' is-expandable' : ''}${isExpanded ? ' is-expanded' : ''}" data-depth="${depth}"${expandable ? ` data-target="${childId}" data-key="${escHtml(rowKey)}" aria-expanded="${isExpanded}" tabindex="0" role="button"` : ''}>
-      <div class="index-name"><strong>${expandable ? '<span class="subject-caret" aria-hidden="true">›</span>' : '<span class="subject-leaf" aria-hidden="true"></span>'}${label.name}</strong><span>${label.sub}</span></div>${metrics}
-    </div>`;
-    if (!expandable) return row;
-    const nextLevel = level === 'l2' ? 'l3' : 'instrument';
-    return `${row}<div id="${childId}" class="subject-children" data-depth="${depth + 1}"${isExpanded ? '' : ' hidden'}>${children.map(child => renderRow(child, nextLevel, depth + 1, rowKey)).join('')}</div>`;
+  // ---- 扁平表格渲染（每行一个标的）+ 左侧分类目录 ---------------------------
+  const safeAnchorId = (l1, l2, index) => {
+    const raw = `${l1}-${l2}`.trim().replace(/\s+/g, '-');
+    const safe = raw.replace(/[^\w一-龥-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    return `subject-section-${index}-${safe || 'uncategorized'}`;
   };
-  const renderGroup = (group) => `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${group.category_l1}</h2><span>${group.count} 个二级类目</span></div><div class="index-grid-head"><span>二级类目</span><span>MACD相位</span><span>日变动</span><span>近20日K线</span><span>近3月趋势 MA5</span><span>成交额</span><span>强度</span><span></span></div><div class="subject-tree">${group.items.map(item => renderRow(item, 'l2', 0, group.category_l1)).join('')}</div></section>`;
-  const toggleRow = (row) => {
-    const children = document.getElementById(row.dataset.target);
-    if (!children) return;
-    const expanded = row.getAttribute('aria-expanded') === 'true';
-    row.setAttribute('aria-expanded', String(!expanded));
-    row.classList.toggle('is-expanded', !expanded);
-    children.hidden = expanded;
-    const key = row.dataset.key;
-    if (key) {
-      if (expanded) expandedRows.delete(key);
-      else expandedRows.add(key);
+  // 从嵌套 payload 提取二级类目锚点清单：侧栏显示金叉/死叉家数。
+  const collectSections = (groups) => {
+    const sections = [];
+    for (const group of groups || []) {
+      for (const l2 of group.items || []) {
+        let golden = l2.macd_golden_count;
+        let dead = l2.macd_dead_count;
+        if (golden == null && dead == null) {
+          const members = (l2.children || []).flatMap((l3) => l3.children || []);
+          golden = members.filter((inst) => inst.macd_phase === 'golden').length;
+          dead = members.filter((inst) => inst.macd_phase === 'dead').length;
+        }
+        sections.push({
+          id: safeAnchorId(group.category_l1, l2.category_l2, sections.length + 1),
+          l1: group.category_l1,
+          l2: l2.category_l2,
+          golden,
+          dead,
+        });
+      }
+    }
+    return sections;
+  };
+  const setActiveSideNav = (sectionId) => {
+    if (!sectionId) return;
+    let activeBtn = null;
+    for (const btn of sideNavEl.querySelectorAll('[data-section-id]')) {
+      const active = btn.getAttribute('data-section-id') === sectionId;
+      btn.classList.toggle('is-active', active);
+      if (active) activeBtn = btn;
+    }
+    if (activeBtn) {
+      const scroller = sideNavEl.closest('.instrument-side-nav') || sideNavEl;
+      const targetTop = activeBtn.offsetTop - (scroller.clientHeight / 2) + (activeBtn.offsetHeight / 2);
+      scroller.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
     }
   };
-  board.addEventListener('click', (event) => {
-    const row = event.target.closest('.subject-row.is-expandable');
-    if (row) toggleRow(row);
+  const renderSideNav = (sections) => {
+    if (!sections.length) {
+      sideNavEl.innerHTML = '<div class="instrument-side-nav-empty">无可跳转分类</div>';
+      return;
+    }
+    const parts = [];
+    let lastL1 = null;
+    for (const section of sections) {
+      if (section.l1 !== lastL1) {
+        if (lastL1 !== null) parts.push('</div>');
+        parts.push(`<div class="instrument-side-nav-group"><div class="instrument-side-nav-l1">${escHtml(section.l1)}</div>`);
+        lastL1 = section.l1;
+      }
+      const cross = `<span class="is-positive">${section.golden || 0}</span>/<span class="is-negative">${section.dead || 0}</span>`;
+      parts.push(`<button class="instrument-side-nav-l2" type="button" data-section-id="${escHtml(section.id)}" title="${escHtml(`${section.l1} - ${section.l2}`)}"><span>${escHtml(section.l2)}</span><em>${cross}</em></button>`);
+    }
+    if (lastL1 !== null) parts.push('</div>');
+    sideNavEl.innerHTML = parts.join('');
+  };
+  const syncActiveSection = () => {
+    activeSyncPending = false;
+    const dividers = Array.from(board.querySelectorAll('.subject-l2-head[id]'));
+    if (!dividers.length) return;
+    const anchorTop = 260;
+    let current = dividers[0];
+    for (const divider of dividers) {
+      if (divider.getBoundingClientRect().top <= anchorTop) current = divider;
+      else break;
+    }
+    setActiveSideNav(current.id);
+  };
+  const requestActiveSync = () => {
+    if (activeSyncPending) return;
+    activeSyncPending = true;
+    window.requestAnimationFrame(syncActiveSection);
+  };
+  sideNavEl.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-section-id]');
+    if (!btn) return;
+    const section = document.getElementById(btn.getAttribute('data-section-id') || '');
+    if (!section) return;
+    setActiveSideNav(section.id);
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
-  board.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    const row = event.target.closest('.subject-row.is-expandable');
-    if (row) { event.preventDefault(); toggleRow(row); }
+  window.addEventListener('scroll', requestActiveSync, { passive: true });
+  window.addEventListener('resize', requestActiveSync);
+
+  // 具体标的行：列内容与改版前一致（相位/日变动/近20日K线/MACD/趋势MA5/强度/查看）。
+  const renderInstrumentRow = (item) => {
+    const viewBtn = item.symbol
+      ? `<a class="index-view-btn" href="/market-view?symbol=${encodeURIComponent(item.symbol)}" title="在标的查看页打开 ${escHtml(item.symbol)}">查看</a>`
+      : '';
+    return `<div class="index-row subject-inst-row" data-symbol="${escHtml(item.symbol || '')}">
+      <div class="index-name"><strong>${escHtml(item.name || item.symbol)}</strong><span>${escHtml(item.symbol)} · 具体标的</span></div>
+      <div class="index-phase">${fmtPhase(item)}</div>
+      <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
+      <div class="index-kspark">${klineSpark(item.kline || [], item.kline_ma5 || [])}<div class="chart-cross" hidden></div></div>
+      <div class="index-mspark">${macdSpark(item.macd_dif || [], item.macd_dea || [], item.macd_hist || [])}<div class="chart-cross" hidden></div></div>
+      <div class="index-spark">${sparkline(item.trend_history || [], item.trend_dates || [], item.trend_upper_history || [], item.trend_lower_history || [])}</div>
+      <div class="index-strength">${item.strength == null ? '—' : item.strength}</div>
+      <div class="index-view">${viewBtn}</div>
+    </div>`;
+  };
+  const renderGroup = (group, sections) => {
+    const golden = (group.items || []).reduce((sum, l2) => sum + (l2.macd_golden_count || 0), 0);
+    const dead = (group.items || []).reduce((sum, l2) => sum + (l2.macd_dead_count || 0), 0);
+    const cross = fmtCrossCounts(golden, dead);
+    const headMeta = `${group.count} 个二级类目${cross ? ` · ${cross}` : ''}`;
+    const body = (group.items || []).map((l2) => {
+      const section = sections.find((s) => s.l1 === group.category_l1 && s.l2 === l2.category_l2);
+      const dividerCross = fmtCrossCounts(l2.macd_golden_count, l2.macd_dead_count);
+      const rows = (l2.children || []).map((l3) => (l3.children || []).map(renderInstrumentRow).join('')).join('');
+      return `<div class="subject-l2-head"${section ? ` id="${escHtml(section.id)}"` : ''}><strong>${escHtml(l2.category_l2)}</strong><span class="subject-l2-meta">${dividerCross}</span></div>${rows}`;
+    }).join('');
+    return `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${escHtml(group.category_l1)}</h2><span>${headMeta}</span></div><div class="index-table-scroll"><div class="index-grid-head"><span>标的</span><span>MACD相位</span><span>日变动</span><span>近20日K线</span><span>MACD</span><span>近3月趋势 MA5</span><span>强度</span><span></span></div>${body}</div></section>`;
+  };
+  const renderBoard = (data) => {
+    boardSections = collectSections(data.groups || []);
+    board.innerHTML = (data.groups || []).map((group) => renderGroup(group, boardSections)).join('');
+    renderSideNav(boardSections);
+    syncActiveSection();
+    // 悬停提示数据索引：symbol → K线/MACD 序列（含日期、涨跌幅）。
+    chartData = {};
+    for (const group of data.groups || []) {
+      for (const l2 of group.items || []) {
+        for (const l3 of l2.children || []) {
+          for (const inst of l3.children || []) {
+            chartData[inst.symbol] = inst;
+          }
+        }
+      }
+    }
+  };
+
+  // ---- mini 图悬停提示（日K / MACD）----------------------------------------
+  const chartTip = document.createElement('div');
+  chartTip.className = 'chart-tip';
+  chartTip.hidden = true;
+  document.body.appendChild(chartTip);
+  let chartData = {};
+  let chartCrossEl = null;
+
+  const fmtPrice = (value) => value == null || !Number.isFinite(value) ? '—' : Number(value.toFixed(3)).toString();
+  const fmtPct = (value) => {
+    if (value == null || !Number.isFinite(value)) return '<span>—</span>';
+    const cls = value >= 0 ? 'heat-tip-pos' : 'heat-tip-neg';
+    return `<span class="${cls}">${value >= 0 ? '+' : ''}${value.toFixed(2)}%</span>`;
+  };
+  const fmtMacdVal = (value) => value == null || !Number.isFinite(value) ? '—' : value.toFixed(4);
+
+  const hideChartTip = () => {
+    chartTip.hidden = true;
+    if (chartCrossEl) {
+      chartCrossEl.hidden = true;
+      chartCrossEl = null;
+    }
+  };
+
+  const showChartTip = (event, container, html, index, count) => {
+    chartTip.innerHTML = html;
+    chartTip.hidden = false;
+    const tipRect = chartTip.getBoundingClientRect();
+    let x = event.clientX + 14;
+    let y = event.clientY + 14;
+    if (x + tipRect.width > window.innerWidth - 8) x = event.clientX - tipRect.width - 14;
+    if (y + tipRect.height > window.innerHeight - 8) y = event.clientY - tipRect.height - 14;
+    chartTip.style.left = `${Math.max(8, x)}px`;
+    chartTip.style.top = `${Math.max(8, y)}px`;
+    // 十字线：定位到当前柱子中心。
+    const cross = container.querySelector('.chart-cross');
+    if (cross) {
+      if (chartCrossEl && chartCrossEl !== cross) chartCrossEl.hidden = true;
+      cross.style.left = `${((index + 0.5) / count * 100).toFixed(2)}%`;
+      cross.hidden = false;
+      chartCrossEl = cross;
+    }
+  };
+
+  const klineTipHtml = (k) => {
+    const rows = [
+      `<tr><td>开盘</td><td>${fmtPrice(k.o)}</td></tr>`,
+      `<tr><td>最高</td><td>${fmtPrice(k.h)}</td></tr>`,
+      `<tr><td>最低</td><td>${fmtPrice(k.l)}</td></tr>`,
+      `<tr><td>收盘</td><td>${fmtPrice(k.c)}</td></tr>`,
+      `<tr><td>涨跌幅</td><td>${fmtPct(k.pct)}</td></tr>`,
+    ];
+    if (k.a != null) rows.push(`<tr><td>成交额</td><td>${fmtAmount(k.a)}</td></tr>`);
+    return `<div class="heat-tip-title">${escHtml(k.d || '')}</div><table class="heat-tip-table">${rows.join('')}</table>`;
+  };
+  const macdTipHtml = (date, dif, dea, hist) => {
+    const histCls = hist != null && Number.isFinite(hist) ? (hist >= 0 ? 'heat-tip-pos' : 'heat-tip-neg') : '';
+    return `<div class="heat-tip-title">${escHtml(date || '')}</div><table class="heat-tip-table">` +
+      `<tr><td>DIF</td><td>${fmtMacdVal(dif)}</td></tr>` +
+      `<tr><td>DEA</td><td>${fmtMacdVal(dea)}</td></tr>` +
+      `<tr><td>MACD柱</td><td><span class="${histCls}">${fmtMacdVal(hist)}</span></td></tr>` +
+      `</table>`;
+  };
+
+  board.addEventListener('mousemove', (event) => {
+    const svg = event.target.closest('.index-kspark svg, .index-mspark svg');
+    const row = event.target.closest('.subject-inst-row');
+    if (!svg || !row) {
+      hideChartTip();
+      return;
+    }
+    const inst = chartData[row.dataset.symbol];
+    if (!inst) {
+      hideChartTip();
+      return;
+    }
+    const container = svg.parentElement;
+    const isKline = container.classList.contains('index-kspark');
+    const count = isKline ? (inst.kline || []).length : (inst.macd_hist || []).length;
+    if (!count) {
+      hideChartTip();
+      return;
+    }
+    const rect = svg.getBoundingClientRect();
+    const ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0;
+    const index = Math.max(0, Math.min(count - 1, Math.floor(ratio * count)));
+    const html = isKline
+      ? klineTipHtml(inst.kline[index])
+      : macdTipHtml((inst.macd_dates || [])[index], (inst.macd_dif || [])[index], (inst.macd_dea || [])[index], (inst.macd_hist || [])[index]);
+    showChartTip(event, container, html, index, count);
   });
+  board.addEventListener('mouseleave', hideChartTip);
+  window.addEventListener('scroll', hideChartTip, { passive: true });
   async function loadBoard() {
     try {
       const response = await fetch('/subject-market/api/dashboard');
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || '标的看板加载失败');
-      nodeSequence = 0;
-      board.innerHTML = (data.groups || []).map(renderGroup).join('');
+      renderBoard(data);
       renderHeatmap(data);
       isIntradayMode = false;
       statusEl.innerHTML = board.children.length
@@ -588,8 +812,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       const data = await resultResp.json();
 
       // Render.
-      nodeSequence = 0;
-      board.innerHTML = (data.groups || []).map(renderGroup).join('');
+      renderBoard(data);
       renderHeatmap(data);
       isIntradayMode = true;
       const modeLabel = isPostClose() ? '收盘快照' : '盘中实时';

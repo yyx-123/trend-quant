@@ -21,7 +21,7 @@ from data.storage.db import Database
 from data.service import DataService
 from core.calendar import is_past_market_open, is_realtime_available, market_now
 from core.indicators import atr as _compute_atr
-from core.indicators import detect_macd_phase, kline_mini
+from core.indicators import detect_macd_phase, kline_mini, macd_mini
 from core.trend import _detect_trend_phase
 from core.trend import calculate_trend_score_snapshot, safe_float
 
@@ -702,6 +702,7 @@ def build_intraday_dashboard(
         # 实时价（合成K线 close = quote price）。当日K线已落库则 DB 优先。
         macd_phase_info: dict = {"phase": None, "days": None, "change_pct": None, "signal_date": None}
         kline_payload: dict = {"kline": [], "kline_ma5": []}
+        macd_mini_payload: dict = {"macd_dif": [], "macd_dea": [], "macd_hist": [], "macd_dates": []}
         macd_src = hist if (hist is not None and not hist.empty) else tail
         if macd_src is not None and not macd_src.empty:
             bars = macd_src.copy()
@@ -715,6 +716,7 @@ def build_intraday_dashboard(
             macd_dates = [pd.Timestamp(v).date().isoformat() for v in bars["time"]]
             macd_phase_info = detect_macd_phase(list(bars["close"]), macd_dates)
             kline_payload = kline_mini(bars)
+            macd_mini_payload = macd_mini(bars)
 
         name = str(meta.get("name") or name_map.get(symbol, "")).strip()
         if hist is not None and not hist.empty:
@@ -759,6 +761,10 @@ def build_intraday_dashboard(
                 "macd_phase_signal_date": macd_phase_info["signal_date"],
                 "kline": kline_payload["kline"],
                 "kline_ma5": kline_payload["kline_ma5"],
+                "macd_dif": macd_mini_payload["macd_dif"],
+                "macd_dea": macd_mini_payload["macd_dea"],
+                "macd_hist": macd_mini_payload["macd_hist"],
+                "macd_dates": macd_mini_payload["macd_dates"],
                 # 聚合层（L2/L3/标的）MA5 历史的原料：含今日盘中快照的
                 # 趋势序列 + 对齐日期 + 成交额权重（见 _weighted_daily_trend_series）。
                 "trend_score_series": extended_scores,
@@ -880,6 +886,9 @@ def build_intraday_dashboard(
             result["kline"] = list(kline) if isinstance(kline, list) else []
             kline_ma5 = row.get("kline_ma5")
             result["kline_ma5"] = list(kline_ma5) if isinstance(kline_ma5, list) else []
+            for macd_key in ("macd_dif", "macd_dea", "macd_hist", "macd_dates"):
+                macd_series = row.get(macd_key)
+                result[macd_key] = list(macd_series) if isinstance(macd_series, list) else []
         else:
             result["trend_phase"] = None
             result["trend_phase_days"] = None
@@ -893,6 +902,10 @@ def build_intraday_dashboard(
             result["macd_phase_signal_date"] = None
             result["kline"] = []
             result["kline_ma5"] = []
+            result["macd_dif"] = []
+            result["macd_dea"] = []
+            result["macd_hist"] = []
+            result["macd_dates"] = []
         # 家数字段仅类目行使用（嵌套后填充），标的行恒为 None。
         result["macd_golden_count"] = None
         result["macd_dead_count"] = None
