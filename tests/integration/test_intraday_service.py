@@ -346,6 +346,89 @@ class TestBuildIntradayDashboard:
             g = result["groups"][0]
             assert len(g) > 0, "empty group dict"
 
+    def test_cache_first_path_with_indicator_cache(self, fake_deps) -> None:
+        """回归：缓存路径下 amount 权重取自 1y tail —— load_market_tail 必须含
+        amount 列，否则 amount_src=tail 时 KeyError（hist 为 None 才触发）。"""
+        ds, db, cfg = fake_deps
+        from core.indicators import INDICATOR_FORMULA_VERSION
+        from core.trend import TREND_FORMULA_VERSION
+        from data.indicator_store import compute_indicator_frame, compute_trend_frame
+
+        # 契约钉住：缓存路径的成交额加权聚合直接读 tail 的 amount 列。
+        tail_rows = db.load_market_tail(days=365)
+        assert tail_rows and "amount" in tail_rows[0]
+
+        for sym in ("A.SS", "B.SS", "C.SS"):
+            hist = db.load_market_data(sym, price_mode="qfq")
+            db.save_indicator_daily(sym, compute_indicator_frame(hist), formula_version=INDICATOR_FORMULA_VERSION)
+            db.save_trend_daily(sym, compute_trend_frame(hist, cfg), formula_version=TREND_FORMULA_VERSION)
+
+        from data.intraday_service import build_intraday_dashboard
+
+        result = build_intraday_dashboard(
+            symbols=["A.SS", "B.SS", "C.SS"],
+            db=db,
+            data_service=ds,
+            trend_config=cfg,
+        )
+        assert result["instrument_count"] == 3
+        instruments = [
+            inst
+            for group in result["groups"]
+            for l2 in group["items"]
+            for l3 in l2["children"]
+            for inst in l3["children"]
+        ]
+        for inst in instruments:
+            assert inst.get("macd_phase") in ("golden", "dead", None)
+            assert 0 < len(inst.get("kline") or []) <= 20
+            # 缓存路径下 trend_history（成交额加权 MA5 序列）也必须非空。
+            assert len(inst.get("trend_history") or []) > 0
+
+    def test_instrument_rows_carry_macd_phase_and_kline(self, fake_deps) -> None:
+        """标的行带 MACD 相位与近10日K线（末根=盘中实时合成K线）；类目行为占位。"""
+        ds, db, cfg = fake_deps
+        from data.intraday_service import build_intraday_dashboard
+
+        result = build_intraday_dashboard(
+            symbols=["A.SS", "B.SS", "C.SS"],
+            db=db,
+            data_service=ds,
+            trend_config=cfg,
+        )
+
+        instruments = [
+            inst
+            for group in result["groups"]
+            for l2 in group["items"]
+            for l3 in l2["children"]
+            for inst in l3["children"]
+        ]
+        assert instruments, "expected instrument rows in intraday dashboard"
+        quotes = ds.fetch_latest_quotes.return_value
+        for inst in instruments:
+            assert inst.get("macd_phase") in ("golden", "dead", None)
+            for key in ("macd_phase_days", "macd_phase_change_pct", "macd_phase_signal_date"):
+                assert key in inst, f"Missing key: {key}"
+            kline = inst.get("kline") or []
+            assert 0 < len(kline) <= 20
+            assert len(inst.get("kline_ma5") or []) == len(kline)
+            # 当日K线未落库 → 末根为实时合成K线，close = 实时价。
+            assert kline[-1]["c"] == pytest.approx(quotes[inst["symbol"]]["price"])
+
+        for group in result["groups"]:
+            for l2 in group["items"]:
+                assert l2["macd_phase"] is None
+                assert l2["kline"] == []
+                l2_instruments = [inst for l3 in l2["children"] for inst in l3["children"]]
+                assert l2["macd_golden_count"] == sum(1 for i in l2_instruments if i["macd_phase"] == "golden")
+                assert l2["macd_dead_count"] == sum(1 for i in l2_instruments if i["macd_phase"] == "dead")
+                for l3 in l2["children"]:
+                    assert l3["macd_phase"] is None
+                    assert l3["kline"] == []
+                    assert l3["macd_golden_count"] == sum(1 for i in l3["children"] if i["macd_phase"] == "golden")
+                    assert l3["macd_dead_count"] == sum(1 for i in l3["children"] if i["macd_phase"] == "dead")
+
 
 def _all_same_score(group: dict) -> bool:
     """Return True if trend_history has only one unique value."""

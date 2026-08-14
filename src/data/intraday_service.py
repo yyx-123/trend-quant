@@ -21,6 +21,7 @@ from data.storage.db import Database
 from data.service import DataService
 from core.calendar import is_past_market_open, is_realtime_available, market_now
 from core.indicators import atr as _compute_atr
+from core.indicators import detect_macd_phase, kline_mini
 from core.trend import _detect_trend_phase
 from core.trend import calculate_trend_score_snapshot, safe_float
 
@@ -670,7 +671,7 @@ def build_intraday_dashboard(
         # 缓存路径用 1y tail），今日盘中用实时成交额；缺失日聚合时等权兜底。
         amount_src = hist if (hist is not None and not hist.empty) else tail
         amount_by_date: dict[str, float | None] = {}
-        if amount_src is not None and not amount_src.empty:
+        if amount_src is not None and not amount_src.empty and "amount" in amount_src.columns:
             for _t, _a in zip(amount_src["time"], amount_src["amount"]):
                 amount_by_date[pd.Timestamp(_t).date().isoformat()] = _number(_a)
         extended_amounts = [amount_by_date.get(d) for d in hist_dates] + [
@@ -694,6 +695,26 @@ def build_intraday_dashboard(
                 sig_close = hist_closes[signal_idx]
                 if sig_close and sig_close > 0:
                     phase_info["change_pct"] = round((intraday_price / sig_close - 1.0) * 100.0, 2)
+
+        # --- MACD 金叉/死叉相位 + 近10日K线 --------------------------------
+        # 与 EOD 看板同口径（1y qfq 尾部），盘中把当日合成K线追加在末尾 —
+        # 盘中金叉/死叉当天即可见；涨跌幅基准为金叉/死叉首日收盘，分子为
+        # 实时价（合成K线 close = quote price）。当日K线已落库则 DB 优先。
+        macd_phase_info: dict = {"phase": None, "days": None, "change_pct": None, "signal_date": None}
+        kline_payload: dict = {"kline": [], "kline_ma5": []}
+        macd_src = hist if (hist is not None and not hist.empty) else tail
+        if macd_src is not None and not macd_src.empty:
+            bars = macd_src.copy()
+            if not has_persisted_today_bar(bars):
+                prev_vol = safe_float(bars["volume"].iloc[-1], 0.0) if "volume" in bars.columns else 0.0
+                synth_bar = build_synthetic_bar(quote, prev_vol)
+                quote_vol = safe_float(quote.get("volume"), 0.0)
+                if quote_vol > 0:
+                    synth_bar["volume"] = quote_vol
+                bars = pd.concat([bars, pd.DataFrame([synth_bar])], ignore_index=True)
+            macd_dates = [pd.Timestamp(v).date().isoformat() for v in bars["time"]]
+            macd_phase_info = detect_macd_phase(list(bars["close"]), macd_dates)
+            kline_payload = kline_mini(bars)
 
         name = str(meta.get("name") or name_map.get(symbol, "")).strip()
         if hist is not None and not hist.empty:
@@ -732,6 +753,12 @@ def build_intraday_dashboard(
                 "trend_phase_days": phase_info["days"],
                 "trend_phase_change_pct": phase_info["change_pct"],
                 "trend_phase_signal_date": phase_info["signal_date"],
+                "macd_phase": macd_phase_info["phase"],
+                "macd_phase_days": macd_phase_info["days"],
+                "macd_phase_change_pct": macd_phase_info["change_pct"],
+                "macd_phase_signal_date": macd_phase_info["signal_date"],
+                "kline": kline_payload["kline"],
+                "kline_ma5": kline_payload["kline_ma5"],
                 # 聚合层（L2/L3/标的）MA5 历史的原料：含今日盘中快照的
                 # 趋势序列 + 对齐日期 + 成交额权重（见 _weighted_daily_trend_series）。
                 "trend_score_series": extended_scores,
@@ -845,11 +872,30 @@ def build_intraday_dashboard(
             result["trend_phase_days"] = _number(row.get("trend_phase_days"))
             result["trend_phase_change_pct"] = _number(row.get("trend_phase_change_pct"))
             result["trend_phase_signal_date"] = row.get("trend_phase_signal_date")
+            result["macd_phase"] = row.get("macd_phase")
+            result["macd_phase_days"] = _number(row.get("macd_phase_days"))
+            result["macd_phase_change_pct"] = _number(row.get("macd_phase_change_pct"))
+            result["macd_phase_signal_date"] = row.get("macd_phase_signal_date")
+            kline = row.get("kline")
+            result["kline"] = list(kline) if isinstance(kline, list) else []
+            kline_ma5 = row.get("kline_ma5")
+            result["kline_ma5"] = list(kline_ma5) if isinstance(kline_ma5, list) else []
         else:
             result["trend_phase"] = None
             result["trend_phase_days"] = None
             result["trend_phase_change_pct"] = None
             result["trend_phase_signal_date"] = None
+            # 类目聚合行：K线无聚合意义，看板显示「—」；
+            # MACD 相位聚合为金叉/死叉家数，在嵌套完成后按成员填充。
+            result["macd_phase"] = None
+            result["macd_phase_days"] = None
+            result["macd_phase_change_pct"] = None
+            result["macd_phase_signal_date"] = None
+            result["kline"] = []
+            result["kline_ma5"] = []
+        # 家数字段仅类目行使用（嵌套后填充），标的行恒为 None。
+        result["macd_golden_count"] = None
+        result["macd_dead_count"] = None
 
         return result
 
@@ -909,10 +955,17 @@ def build_intraday_dashboard(
     for children in inst_by_l3.values():
         _sort(children, "name")
 
+    def _macd_counts(instruments: list[dict]) -> dict:
+        """金叉/死叉家数：类目行的 MACD 相位聚合口径（成员相位计数）。"""
+        golden = sum(1 for item in instruments if item.get("macd_phase") == "golden")
+        dead = sum(1 for item in instruments if item.get("macd_phase") == "dead")
+        return {"macd_golden_count": golden, "macd_dead_count": dead}
+
     l3_by_l2: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for l3 in l3_items:
         l3["children"] = inst_by_l3.get((l3["category_l1"], l3["category_l2"], l3["category_l3"]), [])
         l3["child_count"] = len(l3["children"])
+        l3.update(_macd_counts(l3["children"]))
         l3_by_l2[(l3["category_l1"], l3["category_l2"])].append(l3)
     for children in l3_by_l2.values():
         _sort(children, "category_l3")
@@ -921,6 +974,7 @@ def build_intraday_dashboard(
     for l2 in l2_items:
         l2["children"] = l3_by_l2.get((l2["category_l1"], l2["category_l2"]), [])
         l2["child_count"] = len(l2["children"])
+        l2.update(_macd_counts([inst for l3 in l2["children"] for inst in l3["children"]]))
         l2_by_l1[l2["category_l1"]].append(l2)
     for children in l2_by_l1.values():
         _sort(children, "category_l2")

@@ -665,12 +665,16 @@ class Database:
         return {item["symbol"]: item for item in self.list_instrument_metadata()}
 
     def load_market_tail(self, days: int, price_mode: str = "qfq") -> list[dict]:
-        """Lean K-line tail for all symbols (no metadata join) — bulk overlay reads."""
+        """Lean K-line tail for all symbols (no metadata join) — bulk overlay reads.
+
+        amount 一并取出：盘中看板的成交额加权聚合（_weighted_daily_trend_series）
+        在缓存路径下只有 tail 可用，缺列会 KeyError。
+        """
         table = self._market_table(price_mode)
         cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
         with self._connect() as conn:
             rows = conn.execute(
-                f"""SELECT symbol, time, open, high, low, close, volume
+                f"""SELECT symbol, time, open, high, low, close, volume, amount
                     FROM {table} WHERE time >= ? ORDER BY symbol, time""",
                 (cutoff,),
             ).fetchall()

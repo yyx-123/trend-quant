@@ -44,6 +44,8 @@
   const intradayProgressText = document.getElementById('intradayProgressText');
   let nodeSequence = 0;
   let isIntradayMode = false;
+  // 已展开行的稳定标识（类目路径），跨整表重载（EOD 刷新/盘中看板）保留展开状态。
+  const expandedRows = new Set();
   const fmtAmount = (value) => {
     if (value == null || !Number.isFinite(value)) return '—';
     if (Math.abs(value) >= 1e8) return `${(value / 1e8).toFixed(1)}亿`;
@@ -54,13 +56,18 @@
   const fmtChange = (value) => value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
   const getChangeClass = (value) => value != null && value >= 0 ? 'is-positive' : 'is-negative';
   const fmtPhase = (item) => {
-    if (item.trend_phase == null || item.trend_phase_days == null) return '<span class="index-phase-na">—</span>';
-    const phaseLabel = item.trend_phase === 'start' ? '趋势启动' : '趋势结束';
-    const phaseClass = item.trend_phase === 'start' ? 'is-positive' : 'is-negative';
-    const changeVal = item.trend_phase_change_pct != null ? item.trend_phase_change_pct.toFixed(2) : '—';
-    const changeSign = item.trend_phase_change_pct != null && item.trend_phase_change_pct >= 0 ? '+' : '';
-    const changeClass = item.trend_phase_change_pct != null ? (item.trend_phase_change_pct >= 0 ? 'is-positive' : 'is-negative') : '';
-    return `<span class="${phaseClass}">${phaseLabel}第 ${item.trend_phase_days} 天</span>，涨跌幅：<span class="${changeClass}">${changeSign}${changeVal}%</span>`;
+    if (item.macd_phase != null && item.macd_phase_days != null) {
+      const phaseLabel = item.macd_phase === 'golden' ? 'MACD金叉' : 'MACD死叉';
+      const phaseClass = item.macd_phase === 'golden' ? 'is-positive' : 'is-negative';
+      const changeVal = item.macd_phase_change_pct != null ? item.macd_phase_change_pct.toFixed(2) : '—';
+      const changeSign = item.macd_phase_change_pct != null && item.macd_phase_change_pct >= 0 ? '+' : '';
+      const changeClass = item.macd_phase_change_pct != null ? (item.macd_phase_change_pct >= 0 ? 'is-positive' : 'is-negative') : '';
+      return `<span class="${phaseClass}">${phaseLabel}第 ${item.macd_phase_days} 天</span>，涨跌幅：<span class="${changeClass}">${changeSign}${changeVal}%</span>`;
+    }
+    // 类目聚合行：金叉/死叉家数（成员相位计数）。
+    const golden = item.macd_golden_count, dead = item.macd_dead_count;
+    if ((golden == null && dead == null) || (!golden && !dead)) return '<span class="index-phase-na">—</span>';
+    return `<span class="is-positive">金叉 ${golden || 0}</span> / <span class="is-negative">死叉 ${dead || 0}</span>`;
   };
 
   // ---- 类目热力图（Treemap）------------------------------------------------
@@ -400,36 +407,76 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const lowerLine = pointsFor(lowerPoints);
     return `<div class="spark-plot">${yLabels}<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近三月趋势 MA5"><g class="spark-y-axis">${yGrid}</g><g class="spark-time-axis">${timeTicks.join('')}</g>${band ? `<polygon class="spark-range-band" points="${band}"/>` : ''}${upperLine ? `<polyline class="spark-bound spark-bound-upper" points="${upperLine}"/>` : ''}${lowerLine ? `<polyline class="spark-bound spark-bound-lower" points="${lowerLine}"/>` : ''}<line class="spark-zero-axis" x1="${plotLeft}" y1="${zeroY}" x2="100" y2="${zeroY}"/>${segments.join('')}</svg><span class="spark-latest-dot ${latestClass}" style="left:${latest.x.toFixed(1)}%;top:${y(latest.value).toFixed(1)}%" aria-label="最新趋势值"></span></div>`;
   };
+  // 近20日K线 mini 图：蜡烛（红涨绿跌）+ 5日均线。盘中模式下最后一根为
+  // 当日实时合成K线。仅具体标的行有数据，类目聚合行显示「—」。
+  const klineSpark = (candles, ma5) => {
+    if (!Array.isArray(candles) || !candles.length) return '<span class="spark-empty">—</span>';
+    const n = candles.length;
+    const values = [];
+    candles.forEach((k, i) => {
+      if (Number.isFinite(k?.h)) values.push(k.h);
+      if (Number.isFinite(k?.l)) values.push(k.l);
+      const m = ma5?.[i];
+      if (Number.isFinite(m)) values.push(m);
+    });
+    if (!values.length) return '<span class="spark-empty">—</span>';
+    let vMin = Math.min(...values);
+    let vMax = Math.max(...values);
+    if (vMax <= vMin) vMax = vMin + 1e-6;
+    const pad = (vMax - vMin) * 0.06;
+    vMin -= pad;
+    vMax += pad;
+    const y = (value) => 100 - ((Math.min(vMax, Math.max(vMin, value)) - vMin) / (vMax - vMin) * 100);
+    const step = 100 / n;
+    const bodyW = step * 0.62;
+    const parts = [];
+    candles.forEach((k, i) => {
+      if (!Number.isFinite(k?.o) || !Number.isFinite(k?.h) || !Number.isFinite(k?.l) || !Number.isFinite(k?.c)) return;
+      const cx = (i + 0.5) * step;
+      const color = k.c >= k.o ? '#c13f3a' : '#187b5f';
+      const top = y(Math.max(k.o, k.c));
+      const height = Math.max(y(Math.min(k.o, k.c)) - top, 0.8);
+      parts.push(`<line x1="${cx.toFixed(1)}" y1="${y(k.h).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${y(k.l).toFixed(1)}" stroke="${color}"/>`);
+      parts.push(`<rect x="${(cx - bodyW / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${height.toFixed(1)}" fill="${color}"/>`);
+    });
+    if (!parts.length) return '<span class="spark-empty">—</span>';
+    const maPoints = (Array.isArray(ma5) ? ma5 : [])
+      .map((value, i) => Number.isFinite(value) ? `${((i + 0.5) * step).toFixed(1)},${y(value).toFixed(1)}` : '')
+      .filter(Boolean).join(' ');
+    const maLine = maPoints ? `<polyline class="kspark-ma5" points="${maPoints}"/>` : '';
+    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近20日K线">${parts.join('')}${maLine}</svg>`;
+  };
   const rowLabel = (item, level) => {
     if (level === 'l2') return { name: item.category_l2, sub: `${item.child_count} 个三级类目 · ${item.member_count} 个标的 · 成交额加权` };
     if (level === 'l3') return { name: item.category_l3, sub: `${item.child_count} 个标的 · 成交额加权` };
     return { name: item.name || item.symbol, sub: `${item.symbol} · 具体标的` };
   };
-  const renderRow = (item, level, depth) => {
+  const renderRow = (item, level, depth, path) => {
     const children = item.children || [];
     const expandable = children.length > 0;
     const childId = expandable ? `subjectChildren${++nodeSequence}` : '';
     const label = rowLabel(item, level);
-    const scoreClass = (item.trend_score || 0) >= 0 ? 'is-positive' : 'is-negative';
-    const ma5Class = (item.trend_ma5 || 0) >= 0 ? 'is-positive' : 'is-negative';
+    const rowKey = `${path}/${label.name}`;
+    const isExpanded = expandable && expandedRows.has(rowKey);
+    // 具体标的行末尾的「查看」按钮：跳转标的查看页（/market-view?symbol=）。
+    const viewBtn = level === 'instrument' && item.symbol
+      ? `<a class="index-view-btn" href="/market-view?symbol=${encodeURIComponent(item.symbol)}" title="在标的查看页打开 ${escHtml(item.symbol)}">查看</a>`
+      : '';
     const metrics = `<div class="index-phase">${fmtPhase(item)}</div>
-      <div class="index-score ${ma5Class}">${fmtScore(item.trend_ma5)}</div>
-      <div class="index-score ${scoreClass}">${fmtScore(item.trend_score)}</div>
-      <div class="index-change ${getChangeClass(item.change_60d)}">${fmtChange(item.change_60d)}</div>
-      <div class="index-change ${getChangeClass(item.change_20d)}">${fmtChange(item.change_20d)}</div>
-      <div class="index-change ${getChangeClass(item.change_5d)}">${fmtChange(item.change_5d)}</div>
       <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
+      <div class="index-kspark">${klineSpark(item.kline || [], item.kline_ma5 || [])}</div>
       <div class="index-spark">${sparkline(item.trend_history || [], item.trend_dates || [], item.trend_upper_history || [], item.trend_lower_history || [])}</div>
       <div class="index-amount">${fmtAmount(item.amount)}</div>
-      <div class="index-strength">${item.strength == null ? '—' : item.strength}</div>`;
-    const row = `<div class="index-row subject-row subject-row-${level}${expandable ? ' is-expandable' : ''}" data-depth="${depth}"${expandable ? ` data-target="${childId}" aria-expanded="false" tabindex="0" role="button"` : ''}>
+      <div class="index-strength">${item.strength == null ? '—' : item.strength}</div>
+      <div class="index-view">${viewBtn}</div>`;
+    const row = `<div class="index-row subject-row subject-row-${level}${expandable ? ' is-expandable' : ''}${isExpanded ? ' is-expanded' : ''}" data-depth="${depth}"${expandable ? ` data-target="${childId}" data-key="${escHtml(rowKey)}" aria-expanded="${isExpanded}" tabindex="0" role="button"` : ''}>
       <div class="index-name"><strong>${expandable ? '<span class="subject-caret" aria-hidden="true">›</span>' : '<span class="subject-leaf" aria-hidden="true"></span>'}${label.name}</strong><span>${label.sub}</span></div>${metrics}
     </div>`;
     if (!expandable) return row;
     const nextLevel = level === 'l2' ? 'l3' : 'instrument';
-    return `${row}<div id="${childId}" class="subject-children" data-depth="${depth + 1}" hidden>${children.map(child => renderRow(child, nextLevel, depth + 1)).join('')}</div>`;
+    return `${row}<div id="${childId}" class="subject-children" data-depth="${depth + 1}"${isExpanded ? '' : ' hidden'}>${children.map(child => renderRow(child, nextLevel, depth + 1, rowKey)).join('')}</div>`;
   };
-  const renderGroup = (group) => `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${group.category_l1}</h2><span>${group.count} 个二级类目</span></div><div class="index-grid-head"><span>二级类目</span><span>趋势相位</span><span>趋势MA5</span><span>趋势</span><span>60日变动</span><span>20日变动</span><span>5日变动</span><span>日变动</span><span>近3月趋势 MA5</span><span>成交额</span><span>强度</span></div><div class="subject-tree">${group.items.map(item => renderRow(item, 'l2', 0)).join('')}</div></section>`;
+  const renderGroup = (group) => `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${group.category_l1}</h2><span>${group.count} 个二级类目</span></div><div class="index-grid-head"><span>二级类目</span><span>MACD相位</span><span>日变动</span><span>近20日K线</span><span>近3月趋势 MA5</span><span>成交额</span><span>强度</span><span></span></div><div class="subject-tree">${group.items.map(item => renderRow(item, 'l2', 0, group.category_l1)).join('')}</div></section>`;
   const toggleRow = (row) => {
     const children = document.getElementById(row.dataset.target);
     if (!children) return;
@@ -437,6 +484,11 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     row.setAttribute('aria-expanded', String(!expanded));
     row.classList.toggle('is-expanded', !expanded);
     children.hidden = expanded;
+    const key = row.dataset.key;
+    if (key) {
+      if (expanded) expandedRows.delete(key);
+      else expandedRows.add(key);
+    }
   };
   board.addEventListener('click', (event) => {
     const row = event.target.closest('.subject-row.is-expandable');

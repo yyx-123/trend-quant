@@ -112,6 +112,105 @@ def macd(
     return pd.DataFrame({"dif": dif, "dea": dea, "hist": hist})
 
 
+def detect_macd_phase(
+    closes: list[float | None],
+    dates: list[str] | None = None,
+    fast_period: int = 12,
+    slow_period: int = 26,
+    signal_period: int = 9,
+) -> dict:
+    """Detect the current MACD golden/dead-cross phase.
+
+    金叉：DIF 上穿 DEA（hist = DIF - DEA 由负/零转正），转正当日为第 1 天；
+    死叉：hist 由正/零转负，转负当日为第 1 天。最新一根 hist == 0 视为
+    无相位（罕见，横盘极致情形）。
+
+    Parameters
+    ----------
+    closes: close prices in chronological order (None allowed — dropped
+        together with the aligned date). 盘中实时场景把合成K线的最新价
+        追加在末尾即可让「盘中金叉/死叉」当天可见。
+    dates: ISO date strings aligned with ``closes`` (for signal_date).
+
+    Returns a dict with keys:
+      phase: "golden" | "dead" | None
+      days: int (the cross bar is day 1, counted in bars)
+      change_pct: float (signal-day close → latest close % change)
+      signal_date: str | None (ISO date of the cross bar)
+    """
+    default: dict = {"phase": None, "days": None, "change_pct": None, "signal_date": None}
+    frame = pd.DataFrame({"close": pd.to_numeric(pd.Series(closes), errors="coerce")})
+    frame["date"] = list(dates) if dates is not None else [None] * len(frame)
+    frame = frame.dropna(subset=["close"]).reset_index(drop=True)
+    # MACD 需要足够的预热历史才能让 EMA26/DEA9 收敛，低于此长度不报相位。
+    min_bars = slow_period + signal_period + 10
+    if len(frame) < min_bars:
+        return default
+
+    result = macd(frame["close"], fast_period, slow_period, signal_period, warmup=True)
+    sign = (result["dif"] - result["dea"]).to_numpy(dtype=float)
+    if not np.isfinite(sign[-1]) or sign[-1] == 0.0:
+        return default
+    phase = "golden" if sign[-1] > 0 else "dead"
+
+    # Walk backwards while hist stays on the current side; the first bar of
+    # the run is the cross bar (day 1). hist == 0 bars break the run.
+    latest_idx = len(sign) - 1
+    signal_idx = latest_idx
+    for j in range(latest_idx - 1, -1, -1):
+        value = sign[j]
+        if not np.isfinite(value) or value == 0.0 or (value > 0) != (sign[-1] > 0):
+            break
+        signal_idx = j
+
+    latest_close = float(frame["close"].iloc[latest_idx])
+    signal_close = float(frame["close"].iloc[signal_idx])
+    if latest_close <= 0 or signal_close <= 0:
+        return default
+
+    return {
+        "phase": phase,
+        "days": latest_idx - signal_idx + 1,
+        "change_pct": round((latest_close / signal_close - 1.0) * 100.0, 2),
+        "signal_date": frame["date"].iloc[signal_idx],
+    }
+
+
+def kline_mini(bars: pd.DataFrame, count: int = 20) -> dict:
+    """Package the last ``count`` daily bars (OHLC + close MA5) for a mini chart.
+
+    ``bars`` must contain ``open, high, low, close`` columns in chronological
+    order. 盘中场景把当日合成K线追加在末尾再调用，末根即为实时K线。
+    Returns ``{"kline": [{o,h,l,c}...], "kline_ma5": [...]}`` — MA5 与 kline
+    对齐，不足 5 根的头部位置为 None。
+    """
+    empty: dict = {"kline": [], "kline_ma5": []}
+    if bars is None or bars.empty:
+        return empty
+    tail = bars.tail(count)
+    close = pd.to_numeric(tail["close"], errors="coerce")
+    ma5 = sma(close, 5, min_periods=5)
+    candles: list[dict] = []
+    ma5_values: list[float | None] = []
+    for (_, row), ma_value in zip(tail.iterrows(), ma5):
+        try:
+            candle = {
+                "o": float(row["open"]),
+                "h": float(row["high"]),
+                "l": float(row["low"]),
+                "c": float(row["close"]),
+            }
+        except (TypeError, ValueError):
+            continue
+        if not all(np.isfinite(v) for v in candle.values()):
+            continue
+        candles.append(candle)
+        ma5_values.append(float(ma_value) if np.isfinite(ma_value) else None)
+    if not candles:
+        return empty
+    return {"kline": candles, "kline_ma5": ma5_values}
+
+
 def bollinger(close: pd.Series, period: int = 20, std_mul: float = 2.0) -> pd.DataFrame:
     """Bollinger bands with population std (ddof=0)."""
     if close.empty:

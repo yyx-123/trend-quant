@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from data.indicator_store import get_series
+from core.indicators import detect_macd_phase, kline_mini
 from core.trend import _detect_trend_phase
 from data.storage.db import get_db
 from core.trend import TREND_FORMULA_VERSION
@@ -22,6 +23,9 @@ from services.market_indicators import compute_trend_indicator, trend_config
 
 DISPLAY_DAYS = 61
 SOURCE_HISTORY_DAYS = 90
+# MACD 相位/K线 mini 图的历史窗口：与盘中看板 (intraday_service) 同口径，
+# EMA26/DEA9 需要足够预热长度，且长趋势的金叉日可能远在 90 日窗口之前。
+MACD_HISTORY_DAYS = 365
 
 
 class RevisionCache:
@@ -191,6 +195,62 @@ def _assign_envelope(item: dict, components: list[dict]) -> None:
     item["trend_lower_history"] = lower
 
 
+def _empty_macd_kline() -> dict:
+    """类目聚合行的 MACD/K线占位：K线无聚合意义，看板显示「—」。"""
+    return {
+        "macd_phase": None,
+        "macd_phase_days": None,
+        "macd_phase_change_pct": None,
+        "macd_phase_signal_date": None,
+        "macd_golden_count": None,
+        "macd_dead_count": None,
+        "kline": [],
+        "kline_ma5": [],
+    }
+
+
+def _macd_counts(instruments: list[dict]) -> dict:
+    """金叉/死叉家数：类目行的 MACD 相位聚合口径（成员相位计数）。"""
+    golden = sum(1 for item in instruments if item.get("macd_phase") == "golden")
+    dead = sum(1 for item in instruments if item.get("macd_phase") == "dead")
+    return {"macd_golden_count": golden, "macd_dead_count": dead}
+
+
+def _macd_kline_payloads(db) -> dict[str, dict]:
+    """Per-symbol MACD cross phase + 10-day kline mini from the 1y qfq tail.
+
+    仅具体标的级使用。MACD 用与盘中看板同口径的 1 年尾部收盘价计算
+    （warmup=True，与 indicator_daily 缓存的 macd_dif/dea 一致）。
+    """
+    try:
+        rows = db.load_market_tail(days=MACD_HISTORY_DAYS)
+    except AttributeError:
+        return {}
+    if not rows:
+        return {}
+    frame = pd.DataFrame(rows)
+    frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+    frame = frame.dropna(subset=["time", "open", "high", "low", "close"])
+    for column in ("open", "high", "low", "close"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    payloads: dict[str, dict] = {}
+    for symbol, history in frame.groupby("symbol", sort=False):
+        history = history.sort_values("time").reset_index(drop=True)
+        dates = [pd.Timestamp(value).date().isoformat() for value in history["time"]]
+        phase = detect_macd_phase(list(history["close"]), dates)
+        payloads[str(symbol)] = {
+            "macd_phase": phase["phase"],
+            "macd_phase_days": phase["days"],
+            "macd_phase_change_pct": phase["change_pct"],
+            "macd_phase_signal_date": phase["signal_date"],
+            # 家数字段仅类目行使用，标的行恒为 None。
+            "macd_golden_count": None,
+            "macd_dead_count": None,
+            **kline_mini(history),
+        }
+    return payloads
+
+
 def _sort_items(items: list[dict], name_key: str) -> None:
     items.sort(
         key=lambda item: (
@@ -264,6 +324,15 @@ def build_subject_dashboard_payload(db=None) -> dict:
     l2_items = _build_level_summaries(calculated, l2_columns)
     l3_items = _build_level_summaries(calculated, l3_columns)
     instruments = _build_level_summaries(calculated, instrument_columns)
+
+    # MACD 金叉/死叉相位 + 近10日K线 mini 图：仅具体标的级；类目聚合行的
+    # 聚合口径（成交额加权 MACD 并无意义）待定义，先给占位（看板显示 —）。
+    macd_payloads = _macd_kline_payloads(db)
+    for item in instruments:
+        item.update(macd_payloads.get(str(item["symbol"])) or _empty_macd_kline())
+    for item in (*l2_items, *l3_items):
+        item.update(_empty_macd_kline())
+
     _assign_strength(l2_items, ("category_l1",))
     _assign_strength(l3_items, ("category_l1",))
     _assign_strength(instruments, ("category_l1",))
@@ -278,6 +347,7 @@ def build_subject_dashboard_payload(db=None) -> dict:
     for l3 in l3_items:
         l3["children"] = instruments_by_l3[(l3["category_l1"], l3["category_l2"], l3["category_l3"])]
         l3["child_count"] = len(l3["children"])
+        l3.update(_macd_counts(l3["children"]))
         _assign_envelope(l3, l3["children"])
         l3_by_l2[(l3["category_l1"], l3["category_l2"])].append(l3)
     for children in l3_by_l2.values():
@@ -287,6 +357,7 @@ def build_subject_dashboard_payload(db=None) -> dict:
     for l2 in l2_items:
         l2["children"] = l3_by_l2[(l2["category_l1"], l2["category_l2"])]
         l2["child_count"] = len(l2["children"])
+        l2.update(_macd_counts([inst for l3 in l2["children"] for inst in l3["children"]]))
         _assign_envelope(l2, l2["children"])
         l2_by_l1[l2["category_l1"]].append(l2)
     for children in l2_by_l1.values():

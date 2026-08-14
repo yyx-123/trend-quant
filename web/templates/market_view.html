@@ -1978,7 +1978,20 @@
     await runRuleBacktest();
   }
 
-  Promise.all([loadRuleMeta(), loadSymbols()]).then(initDrillMode).catch((err) => {
+  // URL 直达入口：?drill=1 走批次快照钻取；?symbol=XXX 直接加载该标的
+  //（标的看板「查看」按钮跳转）。
+  async function initFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('drill') === '1') return initDrillMode();
+    const symbol = (params.get('symbol') || '').trim().toUpperCase();
+    if (!symbol) return;
+    const matched = allSymbols.find((item) => (item.symbol || '').toUpperCase() === symbol) || null;
+    if (matched) applySelectedSymbol(matched);
+    else symbolInputEl.value = symbol;
+    await loadDaily(symbol);
+  }
+
+  Promise.all([loadRuleMeta(), loadSymbols()]).then(initFromUrl).catch((err) => {
     chartTitleEl.textContent = `加载失败：${err.message}`;
     rangeMetaEl.textContent = '';
   });

@@ -48,6 +48,9 @@ class SubjectMarketApiTest(unittest.TestCase):
                 self.days = days
                 return history_rows
 
+            def load_market_tail(self, days: int, price_mode: str = "qfq") -> list[dict]:
+                return history_rows
+
             def indicator_cache_info(self, symbol: str) -> dict:
                 # Cold cache → indicator_store falls back to live compute.
                 return {
@@ -118,6 +121,46 @@ class SubjectMarketApiTest(unittest.TestCase):
         latest_b = (100 + 0.2 * 89) / (100 + 0.2 * 88) - 1
         self.assertAlmostEqual(service["daily_change_pct"], (latest_a * 100 + latest_b * 300) / 4)
         self.assertEqual(service["strength"], 100)
+
+        # MACD 金叉/死叉相位 + 近10日K线：仅具体标的级有值，类目聚合行为占位。
+        instruments_by_symbol = {
+            item["symbol"]: item
+            for l3 in l2["children"]
+            for item in l3["children"]
+        }
+        aaa = instruments_by_symbol["AAA"]
+        ccc = instruments_by_symbol["CCC"]
+        # AAA 单调上涨 → 金叉；CCC 单调下跌 → 死叉。
+        self.assertEqual(aaa["macd_phase"], "golden")
+        self.assertEqual(ccc["macd_phase"], "dead")
+        self.assertGreaterEqual(aaa["macd_phase_days"], 1)
+        self.assertIsNotNone(aaa["macd_phase_signal_date"])
+        self.assertEqual(len(aaa["kline"]), 20)
+        self.assertEqual(len(aaa["kline_ma5"]), 20)
+        # 末根K线 = 最后一根日K；末位 MA5 = 最后 5 根收盘均值。
+        last_close = 100.0 + 0.5 * 89
+        self.assertAlmostEqual(aaa["kline"][-1]["c"], last_close)
+        self.assertAlmostEqual(aaa["kline"][0]["c"], 100.0 + 0.5 * 70)
+        self.assertAlmostEqual(
+            aaa["kline_ma5"][-1],
+            sum(100.0 + 0.5 * i for i in range(85, 90)) / 5,
+        )
+        for level_item in (l2, service):
+            self.assertIsNone(level_item["macd_phase"])
+            self.assertIsNone(level_item["macd_phase_days"])
+            self.assertIsNone(level_item["macd_phase_change_pct"])
+            self.assertEqual(level_item["kline"], [])
+            self.assertEqual(level_item["kline_ma5"], [])
+        # 类目行的 MACD 相位聚合 = 金叉/死叉家数：AAA/BBB 金叉、CCC 死叉。
+        self.assertEqual(service["macd_golden_count"], 2)
+        self.assertEqual(service["macd_dead_count"], 0)
+        self.assertEqual(chemical["macd_golden_count"], 0)
+        self.assertEqual(chemical["macd_dead_count"], 1)
+        self.assertEqual(l2["macd_golden_count"], 2)
+        self.assertEqual(l2["macd_dead_count"], 1)
+        # 标的行的家数字段恒为 None。
+        self.assertIsNone(aaa["macd_golden_count"])
+        self.assertIsNone(aaa["macd_dead_count"])
 
 
 if __name__ == "__main__":
