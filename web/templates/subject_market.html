@@ -40,6 +40,39 @@
     <div id="subjectBoard" class="index-board"></div>
   </div>
 </section>
+
+<!-- 仓位试算弹窗：与手工交易页试算同接口（/manual-trade/api/evaluate）、同口径 -->
+<div id="trialModal" class="instrument-modal" hidden>
+  <div class="instrument-dialog trial-dialog">
+    <div class="instrument-dialog-head">
+      <h3 id="trialTitle">仓位试算</h3>
+      <button id="trialCloseBtn" class="ghost-btn" type="button" aria-label="关闭试算弹窗">关闭</button>
+    </div>
+    <div class="bt-form-row trial-form">
+      <label>标的
+        <input id="trialSymbol" type="text" readonly>
+      </label>
+      <label>买入日期
+        <input id="trialBuyDate" type="date">
+      </label>
+      <label>买入价格
+        <input id="trialBuyPrice" type="number" min="0" step="0.0001" placeholder="如 4.025">
+      </label>
+      <label>风险预算（元）
+        <input id="trialRiskBudget" type="number" min="0" step="100" placeholder="选填，如 10000"
+          title="可承受的最大亏损金额：按硬止损触发的每股损失推算最大可买入份数（下取整到百位）">
+      </label>
+      <button id="trialRunBtn" type="button">试算</button>
+    </div>
+    <div id="trialPriceHint" class="mt-price-hint" hidden></div>
+    <p id="trialMessage" class="instrument-form-message" hidden></p>
+    <div id="trialResult" hidden>
+      <h3 id="trialSummaryTitle" class="trial-result-title">止损价</h3>
+      <div class="mt-stop-grid" id="trialStopStats"></div>
+      <div id="trialSizing" class="trial-sizing" hidden></div>
+    </div>
+  </div>
+</div>
 <script src="/static/echarts.min.js?v={{ request.app.state.asset_version|default('1', true) if request is defined else '1' }}"></script>
 <script>
   const board = document.getElementById('subjectBoard');
@@ -416,7 +449,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const lowerLine = pointsFor(lowerPoints);
     return `<div class="spark-plot">${yLabels}<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近三月趋势 MA5"><g class="spark-y-axis">${yGrid}</g><g class="spark-time-axis">${timeTicks.join('')}</g>${band ? `<polygon class="spark-range-band" points="${band}"/>` : ''}${upperLine ? `<polyline class="spark-bound spark-bound-upper" points="${upperLine}"/>` : ''}${lowerLine ? `<polyline class="spark-bound spark-bound-lower" points="${lowerLine}"/>` : ''}<line class="spark-zero-axis" x1="${plotLeft}" y1="${zeroY}" x2="100" y2="${zeroY}"/>${segments.join('')}</svg><span class="spark-latest-dot ${latestClass}" style="left:${latest.x.toFixed(1)}%;top:${y(latest.value).toFixed(1)}%" aria-label="最新趋势值"></span></div>`;
   };
-  // 近20日K线 mini 图：蜡烛（红涨绿跌）+ 5日均线。盘中模式下最后一根为
+  // 近30日K线 mini 图：蜡烛（红涨绿跌）+ 5日均线。盘中模式下最后一根为
   // 当日实时合成K线。仅具体标的行有数据，类目聚合行显示「—」。
   const klineSpark = (candles, ma5) => {
     if (!Array.isArray(candles) || !candles.length) return '<span class="spark-empty">—</span>';
@@ -453,7 +486,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       .map((value, i) => Number.isFinite(value) ? `${((i + 0.5) * step).toFixed(1)},${y(value).toFixed(1)}` : '')
       .filter(Boolean).join(' ');
     const maLine = maPoints ? `<polyline class="kspark-ma5" points="${maPoints}"/>` : '';
-    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近20日K线">${parts.join('')}${maLine}</svg>`;
+    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近30日K线">${parts.join('')}${maLine}</svg>`;
   };
   // MACD mini 图：红柱/绿柱（hist = DIF-DEA 两倍）+ DIF/DEA 双线，根数与
   // 近20日K线 mini 图一致（同一尾部窗口）。仅具体标的行有数据。
@@ -584,20 +617,23 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   window.addEventListener('scroll', requestActiveSync, { passive: true });
   window.addEventListener('resize', requestActiveSync);
 
-  // 具体标的行：列内容与改版前一致（相位/日变动/近20日K线/MACD/趋势MA5/强度/查看）。
+  // 具体标的行：相位/日变动/近30日K线/MACD/趋势MA5/强度/操作（查看+试算）。
   const renderInstrumentRow = (item) => {
     const viewBtn = item.symbol
       ? `<a class="index-view-btn" href="/market-view?symbol=${encodeURIComponent(item.symbol)}" title="在标的查看页打开 ${escHtml(item.symbol)}">查看</a>`
       : '';
+    const trialBtn = item.symbol
+      ? `<button type="button" class="index-view-btn index-trial-btn" data-symbol="${escHtml(item.symbol)}" title="试算 ${escHtml(item.symbol)} 的止损价与仓位">试算</button>`
+      : '';
     return `<div class="index-row subject-inst-row" data-symbol="${escHtml(item.symbol || '')}">
       <div class="index-name"><strong>${escHtml(item.name || item.symbol)}</strong><span>${escHtml(item.symbol)} · 具体标的</span></div>
-      <div class="index-phase">${fmtPhase(item)}</div>
-      <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
       <div class="index-kspark">${klineSpark(item.kline || [], item.kline_ma5 || [])}<div class="chart-cross" hidden></div></div>
-      <div class="index-mspark">${macdSpark(item.macd_dif || [], item.macd_dea || [], item.macd_hist || [])}<div class="chart-cross" hidden></div></div>
+      <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
+      <div class="index-mspark">${macdSpark(item.macd_dif || [], item.macd_dea || [], item.macd_hist || [])}</div>
+      <div class="index-phase">${fmtPhase(item)}</div>
       <div class="index-spark">${sparkline(item.trend_history || [], item.trend_dates || [], item.trend_upper_history || [], item.trend_lower_history || [])}</div>
       <div class="index-strength">${item.strength == null ? '—' : item.strength}</div>
-      <div class="index-view">${viewBtn}</div>
+      <div class="index-view">${viewBtn}${trialBtn}</div>
     </div>`;
   };
   const renderGroup = (group, sections) => {
@@ -611,7 +647,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       const rows = (l2.children || []).map((l3) => (l3.children || []).map(renderInstrumentRow).join('')).join('');
       return `<div class="subject-l2-head"${section ? ` id="${escHtml(section.id)}"` : ''}><strong>${escHtml(l2.category_l2)}</strong><span class="subject-l2-meta">${dividerCross}</span></div>${rows}`;
     }).join('');
-    return `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${escHtml(group.category_l1)}</h2><span>${headMeta}</span></div><div class="index-table-scroll"><div class="index-grid-head"><span>标的</span><span>MACD相位</span><span>日变动</span><span>近20日K线</span><span>MACD</span><span>近3月趋势 MA5</span><span>强度</span><span></span></div>${body}</div></section>`;
+    return `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${escHtml(group.category_l1)}</h2><span>${headMeta}</span></div><div class="index-table-scroll"><div class="index-grid-head"><span>标的</span><span>近30日K线</span><span>日变动</span><span>MACD</span><span>MACD相位</span><span>近3月趋势 MA5</span><span>强度</span><span></span></div>${body}</div></section>`;
   };
   const renderBoard = (data) => {
     boardSections = collectSections(data.groups || []);
@@ -631,7 +667,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     }
   };
 
-  // ---- mini 图悬停提示（日K / MACD）----------------------------------------
+  // ---- mini 图悬停提示（日K）----------------------------------------------
   const chartTip = document.createElement('div');
   chartTip.className = 'chart-tip';
   chartTip.hidden = true;
@@ -645,7 +681,6 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const cls = value >= 0 ? 'heat-tip-pos' : 'heat-tip-neg';
     return `<span class="${cls}">${value >= 0 ? '+' : ''}${value.toFixed(2)}%</span>`;
   };
-  const fmtMacdVal = (value) => value == null || !Number.isFinite(value) ? '—' : value.toFixed(4);
 
   const hideChartTip = () => {
     chartTip.hidden = true;
@@ -686,17 +721,8 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     if (k.a != null) rows.push(`<tr><td>成交额</td><td>${fmtAmount(k.a)}</td></tr>`);
     return `<div class="heat-tip-title">${escHtml(k.d || '')}</div><table class="heat-tip-table">${rows.join('')}</table>`;
   };
-  const macdTipHtml = (date, dif, dea, hist) => {
-    const histCls = hist != null && Number.isFinite(hist) ? (hist >= 0 ? 'heat-tip-pos' : 'heat-tip-neg') : '';
-    return `<div class="heat-tip-title">${escHtml(date || '')}</div><table class="heat-tip-table">` +
-      `<tr><td>DIF</td><td>${fmtMacdVal(dif)}</td></tr>` +
-      `<tr><td>DEA</td><td>${fmtMacdVal(dea)}</td></tr>` +
-      `<tr><td>MACD柱</td><td><span class="${histCls}">${fmtMacdVal(hist)}</span></td></tr>` +
-      `</table>`;
-  };
-
   board.addEventListener('mousemove', (event) => {
-    const svg = event.target.closest('.index-kspark svg, .index-mspark svg');
+    const svg = event.target.closest('.index-kspark svg');
     const row = event.target.closest('.subject-inst-row');
     if (!svg || !row) {
       hideChartTip();
@@ -708,8 +734,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       return;
     }
     const container = svg.parentElement;
-    const isKline = container.classList.contains('index-kspark');
-    const count = isKline ? (inst.kline || []).length : (inst.macd_hist || []).length;
+    const count = (inst.kline || []).length;
     if (!count) {
       hideChartTip();
       return;
@@ -717,10 +742,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const rect = svg.getBoundingClientRect();
     const ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0;
     const index = Math.max(0, Math.min(count - 1, Math.floor(ratio * count)));
-    const html = isKline
-      ? klineTipHtml(inst.kline[index])
-      : macdTipHtml((inst.macd_dates || [])[index], (inst.macd_dif || [])[index], (inst.macd_dea || [])[index], (inst.macd_hist || [])[index]);
-    showChartTip(event, container, html, index, count);
+    showChartTip(event, container, klineTipHtml(inst.kline[index]), index, count);
   });
   board.addEventListener('mouseleave', hideChartTip);
   window.addEventListener('scroll', hideChartTip, { passive: true });
@@ -833,6 +855,205 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       checkTradingStatus();
     }
   });
+
+  // ---- 仓位试算弹窗（与手工交易页同接口、同渲染口径；独立作用域避免命名冲突）----
+  (() => {
+    const modal = document.getElementById('trialModal');
+    const titleEl = document.getElementById('trialTitle');
+    const closeBtn = document.getElementById('trialCloseBtn');
+    const symbolEl = document.getElementById('trialSymbol');
+    const buyDateEl = document.getElementById('trialBuyDate');
+    const buyPriceEl = document.getElementById('trialBuyPrice');
+    const riskBudgetEl = document.getElementById('trialRiskBudget');
+    const runBtn = document.getElementById('trialRunBtn');
+    const hintEl = document.getElementById('trialPriceHint');
+    const msgEl = document.getElementById('trialMessage');
+    const resultEl = document.getElementById('trialResult');
+    const summaryTitleEl = document.getElementById('trialSummaryTitle');
+    const stopStatsEl = document.getElementById('trialStopStats');
+    const sizingEl = document.getElementById('trialSizing');
+    const STOP_MODE = 'tight'; // 与手工交易页默认口径一致
+    let dayRange = null;
+    let rangeSeq = 0;
+
+    const fmtPrice3 = (v) => Number(v).toFixed(3);
+    const fmtPctS = (v) => { const n = Number(v); return (n > 0 ? '+' : '') + n.toFixed(2) + '%'; };
+    const pctCls = (v) => Number(v) > 0 ? 'metric-positive' : (Number(v) < 0 ? 'metric-negative' : '');
+    const withTip = (html, tip) => tip ? `<span class="mt-tip" title="${escHtml(tip)}">${html}</span>` : html;
+    const localIso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const showMsg = (text, isError) => {
+      msgEl.textContent = text || '';
+      msgEl.classList.toggle('is-error', !!isError);
+      msgEl.hidden = !text;
+    };
+
+    const stopPill = (triggered, okText, dangerText) =>
+      `<span class="mt-stop-pill ${triggered ? 'is-danger' : 'is-ok'}">${escHtml(triggered ? dangerText : okText)}</span>`;
+    const stopModeLabel = (stops) => stops.stop_mode === 'tight' ? '紧止损' : '松止损';
+    const hardStopTip = (stops) => stops.atr_at_buy == null ? '' :
+      `硬止损价（${stopModeLabel(stops)}口径）= 买入价 ${fmtPrice3(stops.buy_price)} − ${stops.hard_stop_atr_mul} × ATR(买入日) ${fmtPrice3(stops.atr_at_buy)} = ${fmtPrice3(stops.hard_stop_price)}`;
+    const chandelierStopTip = (stops) => (stops.highest_since_buy == null || stops.current_atr == null) ? '' :
+      `吊灯止损价（${stopModeLabel(stops)}口径）= 买入以来最高价 ${fmtPrice3(stops.highest_since_buy)}${stops.highest_since_buy_date ? `（${stops.highest_since_buy_date}）` : ''} − ${stops.chandelier_stop_atr_mul} × ATR(最新) ${fmtPrice3(stops.current_atr)} = ${fmtPrice3(stops.chandelier_stop_price)}`;
+    const ratchetStopTip = (stops) => {
+      const price = Number(stops.chandelier_stop_ratchet_price);
+      if (!isFinite(price) || price <= 0) return '';
+      return `棘轮吊灯止损价（${stopModeLabel(stops)}口径）= max(逐日：截至当日最高价 − ${stops.chandelier_stop_atr_mul} × 当日ATR)，只上移不下移 = ${fmtPrice3(price)}`;
+    };
+    const stopDistanceTip = (label, stops, priceKey, pctKey) => {
+      const price = Number(stops[priceKey]);
+      if (!isFinite(price) || price <= 0 || stops.latest_price == null) return '';
+      return `${label} = 最新价 ${fmtPrice3(stops.latest_price)} / 止损价 ${fmtPrice3(price)} − 1 = ${fmtPctS(stops[pctKey])}`;
+    };
+
+    function renderStopStats(container, stops) {
+      const hardTriggered = !!stops.hard_stop_triggered;
+      const chandTriggered = !!stops.chandelier_stop_triggered;
+      const ratchetPrice = Number(stops.chandelier_stop_ratchet_price) || 0;
+      const ratchetTriggered = !!stops.chandelier_stop_ratchet_triggered;
+      const ratchetCard = ratchetPrice > 0 ?
+        `<div class="mt-stop-card mt-stop-chandelier"><div class="mt-stop-card-head"><span class="mt-stat-label">棘轮吊灯止损价</span>${stopPill(ratchetTriggered, '未跌破', '⚠ 已跌破')}</div>${withTip(`<span class="mt-stop-price">${escHtml(fmtPrice3(ratchetPrice))}</span>`, ratchetStopTip(stops))}<span class="mt-stat-note">同吊灯公式但只上移不下移 · 现价距 ${escHtml(fmtPctS(stops.chandelier_stop_ratchet_distance_pct))}</span></div>` : '';
+      container.innerHTML =
+        `<div class="mt-stop-card mt-stop-hard"><div class="mt-stop-card-head"><span class="mt-stat-label">硬止损价</span>${stopPill(hardTriggered, '未击穿', '⚠ 已击穿')}</div>${withTip(`<span class="mt-stop-price">${escHtml(fmtPrice3(stops.hard_stop_price))}</span>`, hardStopTip(stops))}<span class="mt-stat-note">买入价 − ${escHtml(stops.hard_stop_atr_mul)}×ATR(买入日) · 距买入价 ${escHtml(fmtPctS(stops.hard_stop_pct))}${hardTriggered ? ` · 于 ${escHtml(stops.hard_stop_trigger_date)} 被击穿` : ''}</span></div>` +
+        `<div class="mt-stop-card mt-stop-chandelier"><div class="mt-stop-card-head"><span class="mt-stat-label">吊灯止损价</span>${stopPill(chandTriggered, '未跌破', '⚠ 已跌破')}</div>${withTip(`<span class="mt-stop-price">${escHtml(fmtPrice3(stops.chandelier_stop_price))}</span>`, chandelierStopTip(stops))}<span class="mt-stat-note">买入以来最高价 − ${escHtml(stops.chandelier_stop_atr_mul)}×ATR(最新) · 距最高价 ${escHtml(fmtPctS(stops.chandelier_stop_pct_from_high))}</span></div>` +
+        ratchetCard +
+        `<div class="mt-stop-card mt-stop-dist"><div class="mt-stop-card-head"><span class="mt-stat-label">现价距硬止损</span></div>${withTip(`<span class="mt-stop-price ${pctCls(stops.hard_stop_distance_pct)}">${escHtml(fmtPctS(stops.hard_stop_distance_pct))}</span>`, stopDistanceTip('现价距硬止损', stops, 'hard_stop_price', 'hard_stop_distance_pct'))}<span class="mt-stat-note">最新价 ${escHtml(fmtPrice3(stops.latest_price))} / 止损价 ${escHtml(fmtPrice3(stops.hard_stop_price))}</span></div>` +
+        `<div class="mt-stop-card mt-stop-dist"><div class="mt-stop-card-head"><span class="mt-stat-label">现价距吊灯止损</span></div>${withTip(`<span class="mt-stop-price ${pctCls(stops.chandelier_stop_distance_pct)}">${escHtml(fmtPctS(stops.chandelier_stop_distance_pct))}</span>`, stopDistanceTip('现价距吊灯止损', stops, 'chandelier_stop_price', 'chandelier_stop_distance_pct'))}<span class="mt-stat-note">最新价 ${escHtml(fmtPrice3(stops.latest_price))} / 止损价 ${escHtml(fmtPrice3(stops.chandelier_stop_price))}</span></div>`;
+    }
+
+    const positionSizingTip = (data) => {
+      const ps = data.position_sizing || {};
+      const stops = data.stops || {};
+      if (ps.risk_per_share == null) return '';
+      return `每股风险 = 买入价 ${fmtPrice3(data.buy_price)} − 硬止损价 ${fmtPrice3(stops.hard_stop_price)} = ${fmtPrice3(ps.risk_per_share)}；可买份数 = 风险预算 ¥${Number(ps.risk_budget).toFixed(2)} ÷ 每股风险 ${fmtPrice3(ps.risk_per_share)}，下取整到百位 = ${ps.max_qty} 份；若硬止损触发亏损约 ¥${Number(ps.max_loss).toFixed(2)}，按买入价计持仓约 ¥${Number(ps.position_value).toFixed(2)}`;
+    };
+    function renderSizingLine(data) {
+      const ps = data.position_sizing;
+      if (!ps) {
+        sizingEl.hidden = true;
+        sizingEl.innerHTML = '';
+        return;
+      }
+      sizingEl.innerHTML = withTip(
+        `最大可买入份数 <b>${ps.max_qty} 份</b><span class="mt-stat-note">（风险预算 ¥${Number(ps.risk_budget).toFixed(2)}）</span>　｜　最大可买入金额 <b>¥${Number(ps.position_value).toFixed(2)}</b><span class="mt-stat-note">＝ ${ps.max_qty} 份 × 买入价 ${escHtml(fmtPrice3(data.buy_price))}</span>`,
+        positionSizingTip(data));
+      sizingEl.hidden = false;
+    }
+
+    async function postJson(url, body) {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || '请求失败');
+      return data;
+    }
+    // 当日K线（含盘中合成）：无K线返回 null（非交易日），请求失败抛错。
+    async function fetchDayCandle(symbol, date) {
+      const params = new URLSearchParams({ symbol, start_date: date, end_date: date, limit: '1', intraday: 'true' });
+      const resp = await fetch(`/market-view/api/daily?${params.toString()}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || '无法获取当日行情');
+      const candle = (data.candles || [])[0]; // [open, close, low, high]
+      if (!candle) return null;
+      return { low: Number(candle[2]), high: Number(candle[3]), close: Number(candle[1]) };
+    }
+
+    async function refreshRangeHint() {
+      const symbol = symbolEl.value.trim();
+      const buyDate = buyDateEl.value;
+      dayRange = null;
+      hintEl.hidden = true;
+      if (!symbol || !buyDate) return;
+      const seq = ++rangeSeq;
+      try {
+        const candle = await fetchDayCandle(symbol, buyDate);
+        if (seq !== rangeSeq) return;
+        if (!candle) {
+          hintEl.textContent = `${buyDate} 无K线数据（非交易日或未入库），买入价将按下一交易日口径计算`;
+          hintEl.hidden = false;
+          return;
+        }
+        dayRange = { date: buyDate, low: candle.low, high: candle.high, close: candle.close };
+        hintEl.innerHTML = `${buyDate} 价格区间：<b>${fmtPrice3(dayRange.low)} ~ ${fmtPrice3(dayRange.high)}</b>（收盘 ${fmtPrice3(dayRange.close)}），价格需落在区间内`;
+        hintEl.hidden = false;
+      } catch (err) {
+        if (seq !== rangeSeq) return;
+        hintEl.textContent = err.message || '无法获取当日行情';
+        hintEl.hidden = false;
+      }
+    }
+
+    async function openTrial(symbol) {
+      const inst = chartData[symbol] || {};
+      resultEl.hidden = true;
+      hintEl.hidden = true;
+      showMsg('');
+      symbolEl.value = symbol;
+      riskBudgetEl.value = '';
+      titleEl.textContent = `仓位试算 — ${inst.name || symbol}`;
+      const candles = inst.kline || [];
+      const last = candles[candles.length - 1] || {};
+      buyDateEl.value = last.d || localIso(new Date());
+      buyPriceEl.value = last.c != null ? last.c : '';
+      modal.hidden = false;
+      // 默认买入日期=当天（今天是交易日时）、价格=最新价：当日K线未落库时
+      // 由实时报价合成；今天非交易日则保留看板末日K（最新交易日）默认值。
+      const seq = ++rangeSeq;
+      try {
+        const candle = await fetchDayCandle(symbol, localIso(new Date()));
+        if (candle && seq === rangeSeq && !modal.hidden) {
+          buyDateEl.value = localIso(new Date());
+          buyPriceEl.value = candle.close;
+        }
+      } catch (err) { /* 拉取失败则保留看板默认值 */ }
+      refreshRangeHint();
+    }
+
+    async function runTrial() {
+      const symbol = symbolEl.value.trim();
+      const buyDate = buyDateEl.value;
+      const buyPrice = parseFloat(buyPriceEl.value);
+      const riskBudget = parseFloat(riskBudgetEl.value);
+      if (!symbol) { showMsg('请输入标的代码', true); return; }
+      if (!buyDate) { showMsg('请选择买入日期', true); return; }
+      if (!(buyPrice > 0)) { showMsg('请输入大于 0 的买入价格', true); return; }
+      if (riskBudgetEl.value.trim() && !(riskBudget > 0)) { showMsg('风险预算需为大于 0 的金额（选填）', true); return; }
+      if (dayRange && dayRange.date === buyDate && (buyPrice < dayRange.low || buyPrice > dayRange.high)) {
+        showMsg(`买入价格 ${fmtPrice3(buyPrice)} 超出 ${buyDate} 当日价格区间 [${fmtPrice3(dayRange.low)}, ${fmtPrice3(dayRange.high)}]`, true);
+        return;
+      }
+      const form = { symbol, buy_date: buyDate, buy_price: buyPrice, stop_mode: STOP_MODE };
+      if (riskBudget > 0) form.risk_budget = riskBudget;
+      runBtn.disabled = true;
+      showMsg('计算中…', false);
+      try {
+        const data = await postJson('/manual-trade/api/evaluate', form);
+        const stops = data.stops || {};
+        const intradayTime = data.intraday_ts ? String(data.intraday_ts).slice(11, 16) : '';
+        summaryTitleEl.textContent = `止损价 — ${data.name ? data.name + ' ' : ''}${data.symbol} · ${data.buy_date} 买入 @ ${fmtPrice3(data.buy_price)}${data.is_intraday ? `（含今日盘中实时数据 ${intradayTime}）` : ''}`;
+        renderStopStats(stopStatsEl, stops);
+        renderSizingLine(data);
+        resultEl.hidden = false;
+        showMsg('');
+      } catch (err) {
+        resultEl.hidden = true;
+        showMsg(err.message || '计算失败', true);
+      } finally {
+        runBtn.disabled = false;
+      }
+    }
+
+    board.addEventListener('click', (event) => {
+      const btn = event.target.closest('.index-trial-btn');
+      if (btn) openTrial(btn.dataset.symbol);
+    });
+    closeBtn.addEventListener('click', () => { modal.hidden = true; });
+    modal.addEventListener('click', (event) => { if (event.target === modal) modal.hidden = true; });
+    buyDateEl.addEventListener('change', refreshRangeHint);
+    runBtn.addEventListener('click', runTrial);
+  })();
 
   // Init.
   loadBoard();

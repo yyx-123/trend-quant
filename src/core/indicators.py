@@ -176,7 +176,7 @@ def detect_macd_phase(
     }
 
 
-def kline_mini(bars: pd.DataFrame, count: int = 20) -> dict:
+def kline_mini(bars: pd.DataFrame, count: int = 30) -> dict:
     """Package the last ``count`` daily bars (OHLC + close MA5) for a mini chart.
 
     ``bars`` must contain ``open, high, low, close`` columns in chronological
@@ -226,7 +226,7 @@ def kline_mini(bars: pd.DataFrame, count: int = 20) -> dict:
     return {"kline": candles, "kline_ma5": ma5_values}
 
 
-def macd_mini(bars: pd.DataFrame, count: int = 20) -> dict:
+def macd_mini(bars: pd.DataFrame, count: int = 30) -> dict:
     """Package the last ``count`` bars' MACD (DIF/DEA/hist) for a mini chart.
 
     与 ``kline_mini`` 同一尾部窗口（根数一致、逐根对齐），EMA 预热口径与
