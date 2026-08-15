@@ -4417,3 +4417,154 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   width: 100%;
   height: 520px;
 }
+
+/* ────────────────────────────────────────────────────────────────
+   手机端窄屏适配（仅标的看板 / 手工交易两页）
+   全部为 @media (max-width:768px) 内的追加覆盖：桌面视口（>768px）
+   不命中本块任何规则，桌面渲染零影响。触屏无 hover，手机端主动放弃
+   mini 图悬停 OHLC 提示、title 悬停明细，不做 JS 降级（既定取舍）。
+   ──────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+
+  /* ── 标的看板：8 列横排表格行 → 卡片式三段布局 ─────────────
+     三段依次为：名称+操作 / 相位+日变动+强度 / 三张 mini 图。
+     列表头与新布局不再对应，直接隐藏。 */
+  .index-board-page .index-table-scroll {
+    overflow-x: visible;
+  }
+
+  .index-board-page .index-table-scroll .index-grid-head,
+  .index-board-page .index-table-scroll .index-row,
+  .index-board-page .index-table-scroll .subject-l2-head {
+    min-width: 0;
+  }
+
+  .index-board-page .index-grid-head {
+    display: none;
+  }
+
+  .index-board-page .index-row {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-areas:
+      "name name name name view view"
+      "phase phase phase change change strength"
+      "kspark kspark mspark mspark spark spark";
+    gap: 10px;
+    min-height: 0;
+    padding: 12px 14px;
+  }
+
+  .index-board-page .index-name { grid-area: name; }
+  .index-board-page .index-kspark { grid-area: kspark; }
+  .index-board-page .index-mspark { grid-area: mspark; }
+  .index-board-page .index-spark { grid-area: spark; }
+  .index-board-page .index-view { grid-area: view; }
+
+  .index-board-page .index-phase {
+    grid-area: phase;
+    font-size: 12px;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .index-board-page .index-change {
+    grid-area: change;
+    align-self: center;
+    justify-self: center;
+  }
+
+  .index-board-page .index-strength {
+    grid-area: strength;
+    align-self: center;
+  }
+
+  /* 分类目录：吸顶偏移按桌面导航高度设定，手机端导航高得多，
+     吸顶会藏到导航栏下面，改为随页面滚动的普通块 */
+  .index-board-page .instrument-side-nav {
+    position: static;
+    max-height: 200px;
+  }
+
+  /* 锚点跳转偏移改用实测导航高度，避免分类标题跳到吸顶导航下面 */
+  .index-board-page .subject-l2-head {
+    scroll-margin-top: calc(var(--site-header-h, 0px) + 12px);
+    padding: 8px 14px;
+  }
+
+  /* ── 手工交易 ───────────────────────────────────────────── */
+  /* 试算 / 登录表单：标签整行、输入框铺满 */
+  .manual-trade-page .bt-form-row label {
+    width: 100%;
+  }
+
+  .manual-trade-page .bt-form-row label input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* 交易表格：桌面端为让表头吸顶用了 overflow-x:clip（窄屏裁切），
+     手机端恢复横向滚动兜底；表头在滚动容器内吸顶会失效，改静态 */
+  .manual-trade-page .mt-trade-table-wrap {
+    overflow-x: auto;
+  }
+
+  .manual-trade-page .mt-trade-table thead th {
+    position: static;
+  }
+
+  .manual-trade-page .mt-trade-table th,
+  .manual-trade-page .mt-trade-table td {
+    padding: 6px 7px;
+  }
+
+  .manual-trade-page .mt-trade-table tbody td {
+    font-size: 12px;
+  }
+
+  .manual-trade-page .mt-trade-name {
+    font-size: 12.5px;
+  }
+
+  /* 窄屏隐藏次要列（按列序号，日后调整列顺序时需同步此处）。
+     持仓表保留：标的 / 现价 / 涨跌幅 / 盈亏 / 硬止损价 / 吊灯止损价 / 操作。
+     td[colspan] 是错误行的整行提示单元格，不参与隐藏，避免误藏错误信息；
+     被隐藏列的表头排序入口在手机上不可点，属既定取舍。 */
+  #mtTradeList .mt-trade-table th:nth-child(2),
+  #mtTradeList .mt-trade-table th:nth-child(3),
+  #mtTradeList .mt-trade-table th:nth-child(4),
+  #mtTradeList .mt-trade-table th:nth-child(7),
+  #mtTradeList .mt-trade-table th:nth-child(8),
+  #mtTradeList .mt-trade-table th:nth-child(10),
+  #mtTradeList .mt-trade-table th:nth-child(11),
+  #mtTradeList .mt-trade-table th:nth-child(14),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(2),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(3),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(4),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(7),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(8),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(10),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(11),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(14) {
+    display: none;
+  }
+
+  /* 清仓表保留：标的 / 买入日期 / 卖出日期 / 收益 / 收益率 */
+  #mtClosedList .mt-trade-table th:nth-child(2),
+  #mtClosedList .mt-trade-table th:nth-child(5),
+  #mtClosedList .mt-trade-table th:nth-child(6),
+  #mtClosedList .mt-trade-table th:nth-child(7),
+  #mtClosedList .mt-trade-table th:nth-child(8),
+  #mtClosedList .mt-trade-table th:nth-child(11),
+  #mtClosedList .mt-trade-table th:nth-child(12),
+  #mtClosedList .mt-trade-table th:nth-child(13),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(2),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(5),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(6),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(7),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(8),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(11),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(12),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(13) {
+    display: none;
+  }
+}
