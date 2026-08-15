@@ -276,7 +276,7 @@
   }
 
   function todayStr() {
-    return new Date().toISOString().slice(0, 10);
+    return localIso(new Date());
   }
 
   // 本地日期 → 'YYYY-MM-DD'（不用 toISOString，避免时区把今天变成昨天）

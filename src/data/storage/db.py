@@ -73,8 +73,8 @@ class Database:
                     trade_mode TEXT NOT NULL DEFAULT 'single_symbol_all_in',
                     payload_json TEXT NOT NULL,
                     is_active INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_rule_strategies_active_updated
                     ON rule_strategies(is_active, updated_at);
@@ -86,8 +86,8 @@ class Database:
                     sizer_type TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     is_active INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_position_strategies_active_updated
                     ON position_strategies(is_active, updated_at);
@@ -102,7 +102,7 @@ class Database:
                     volume REAL,
                     amount REAL,
                     provider TEXT,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (symbol, time)
                 );
                 CREATE INDEX IF NOT EXISTS idx_market_data_raw_symbol_time
@@ -118,7 +118,7 @@ class Database:
                     volume REAL,
                     amount REAL,
                     provider TEXT,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (symbol, time)
                 );
                 CREATE INDEX IF NOT EXISTS idx_market_data_qfq_symbol_time
@@ -129,7 +129,7 @@ class Database:
                     time TEXT NOT NULL,
                     factor REAL NOT NULL,
                     provider TEXT,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (symbol, time)
                 );
                 CREATE INDEX IF NOT EXISTS idx_ex_factors_symbol_time
@@ -153,7 +153,7 @@ class Database:
                     risk_budget_pct REAL,
                     asset_type TEXT,
                     start_date TEXT,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_instrument_metadata_category
                     ON instrument_metadata(category_l1, category_l2, category_l3);
@@ -166,7 +166,7 @@ class Database:
                     name TEXT NOT NULL,
                     parent_path TEXT,
                     priority INTEGER,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_instrument_categories_parent
                     ON instrument_categories(parent_path, priority, name);
@@ -177,7 +177,7 @@ class Database:
                     run_date TEXT,
                     status TEXT,
                     payload TEXT,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT DEFAULT (datetime('now','localtime'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_job_runs_type_id
                     ON job_runs(job_type, id);
@@ -194,7 +194,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS app_config (
                     key TEXT PRIMARY KEY,
                     value TEXT,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS trend_param_sets (
@@ -244,7 +244,7 @@ class Database:
                     username TEXT NOT NULL UNIQUE,
                     password TEXT NOT NULL,
                     is_admin INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT DEFAULT (datetime('now','localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS manual_trades (
@@ -257,8 +257,8 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'open',
                     sell_date TEXT,
                     sell_price REAL,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_manual_trades_user_status
                     ON manual_trades(user_id, status, id);
@@ -279,7 +279,7 @@ class Database:
                     data_anchor_date TEXT,
                     data_version TEXT,
                     engine_version TEXT NOT NULL DEFAULT '1.0',
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
                     finished_at TEXT,
                     error TEXT
                 );
@@ -319,7 +319,7 @@ class Database:
                     trades_json TEXT,
                     skipped_buys_json TEXT,
                     monthly_nav_json TEXT,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (batch_id, symbol, strategy_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_batch_cells_batch
@@ -336,7 +336,7 @@ class Database:
                     trend_score_avg REAL,
                     amount_ma20 REAL,
                     bar_count INTEGER,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (batch_id, symbol)
                 );
 
@@ -391,8 +391,10 @@ class Database:
 
             conn.execute(
                 """INSERT INTO rule_strategies
-                   (id, name, description, schema_version, trade_mode, payload_json, is_active)
-                   VALUES (?, ?, ?, ?, ?, ?, 1)
+                   (id, name, description, schema_version, trade_mode, payload_json, is_active,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 1,
+                    datetime('now','localtime'), datetime('now','localtime'))
                    ON CONFLICT(id) DO UPDATE SET
                      name=excluded.name,
                      description=excluded.description,
@@ -400,7 +402,7 @@ class Database:
                      trade_mode=excluded.trade_mode,
                      payload_json=excluded.payload_json,
                      is_active=1,
-                     updated_at=CURRENT_TIMESTAMP""",
+                     updated_at=datetime('now','localtime')""",
                 (
                     strategy_id,
                     str(strategy.get("name", strategy_id) or strategy_id),
@@ -447,7 +449,7 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute(
                 """UPDATE rule_strategies
-                   SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+                   SET is_active = 0, updated_at = datetime('now','localtime')
                    WHERE id = ? AND is_active = 1""",
                 (strategy_id,),
             )
@@ -479,15 +481,17 @@ class Database:
 
             conn.execute(
                 """INSERT INTO position_strategies
-                   (id, name, description, sizer_type, payload_json, is_active)
-                   VALUES (?, ?, ?, ?, ?, 1)
+                   (id, name, description, sizer_type, payload_json, is_active,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 1,
+                    datetime('now','localtime'), datetime('now','localtime'))
                    ON CONFLICT(id) DO UPDATE SET
                      name=excluded.name,
                      description=excluded.description,
                      sizer_type=excluded.sizer_type,
                      payload_json=excluded.payload_json,
                      is_active=1,
-                     updated_at=CURRENT_TIMESTAMP""",
+                     updated_at=datetime('now','localtime')""",
                 (
                     strategy_id,
                     str(strategy.get("name", strategy_id) or strategy_id),
@@ -523,7 +527,7 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute(
                 """UPDATE position_strategies
-                   SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+                   SET is_active = 0, updated_at = datetime('now','localtime')
                    WHERE id = ? AND is_active = 1""",
                 (strategy_id,),
             )
@@ -613,8 +617,9 @@ class Database:
                 """INSERT INTO instrument_metadata
                    (symbol, name, category_l1, category_l2, category_l3, factor_tags,
                     region_tag, priority_l1, priority_l2, priority_l3, sort_order, source,
-                    enabled, stop_atr_mul, risk_budget_pct, asset_type, start_date)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    enabled, stop_atr_mul, risk_budget_pct, asset_type, start_date, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    datetime('now','localtime'))
                    ON CONFLICT(symbol) DO UPDATE SET
                      name=excluded.name,
                      category_l1=excluded.category_l1,
@@ -632,7 +637,7 @@ class Database:
                      risk_budget_pct=COALESCE(excluded.risk_budget_pct, instrument_metadata.risk_budget_pct),
                      asset_type=COALESCE(excluded.asset_type, instrument_metadata.asset_type),
                      start_date=COALESCE(excluded.start_date, instrument_metadata.start_date),
-                     updated_at=CURRENT_TIMESTAMP""",
+                     updated_at=datetime('now','localtime')""",
                 records,
             )
         return len(records)
@@ -752,14 +757,14 @@ class Database:
         with self._connect() as conn:
             conn.executemany(
                 """INSERT INTO instrument_categories
-                   (path, level, name, parent_path, priority)
-                   VALUES (?, ?, ?, ?, ?)
+                   (path, level, name, parent_path, priority, updated_at)
+                   VALUES (?, ?, ?, ?, ?, datetime('now','localtime'))
                    ON CONFLICT(path) DO UPDATE SET
                      level=excluded.level,
                      name=excluded.name,
                      parent_path=excluded.parent_path,
                      priority=excluded.priority,
-                     updated_at=CURRENT_TIMESTAMP""",
+                     updated_at=datetime('now','localtime')""",
                 records,
             )
         return len(records)
@@ -859,8 +864,8 @@ class Database:
         with self._connect() as conn:
             conn.executemany(
                 f"""INSERT OR REPLACE INTO {table}
-                   (symbol, time, open, high, low, close, volume, amount, provider)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (symbol, time, open, high, low, close, volume, amount, provider, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
                 records,
             )
             self._bump_data_version_conn(conn, table)
@@ -876,8 +881,8 @@ class Database:
             if records:
                 conn.executemany(
                     f"""INSERT OR REPLACE INTO {table}
-                       (symbol, time, open, high, low, close, volume, amount, provider)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (symbol, time, open, high, low, close, volume, amount, provider, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
                     records,
                 )
             # 原位重写也要推进版本：除权重物化后行数/日期不变，
@@ -957,8 +962,8 @@ class Database:
             return
         with self._connect() as conn:
             conn.executemany(
-                """INSERT OR REPLACE INTO ex_factors (symbol, time, factor, provider)
-                   VALUES (?, ?, ?, ?)""",
+                """INSERT OR REPLACE INTO ex_factors (symbol, time, factor, provider, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now','localtime'))""",
                 records,
             )
 
@@ -997,7 +1002,8 @@ class Database:
             raise ValueError("username is required")
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO users (username, password, is_admin) VALUES (?, ?, ?)",
+                "INSERT INTO users (username, password, is_admin, created_at)"
+                " VALUES (?, ?, ?, datetime('now','localtime'))",
                 (username, str(password), 1 if is_admin else 0),
             )
             user_id = int(cur.lastrowid or 0)
@@ -1039,8 +1045,10 @@ class Database:
     ) -> dict:
         with self._connect() as conn:
             cur = conn.execute(
-                """INSERT INTO manual_trades (user_id, symbol, buy_date, buy_price, shares)
-                   VALUES (?, ?, ?, ?, ?)""",
+                """INSERT INTO manual_trades
+                   (user_id, symbol, buy_date, buy_price, shares, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?,
+                    datetime('now','localtime'), datetime('now','localtime'))""",
                 (int(user_id), str(symbol), str(buy_date), float(buy_price), float(shares)),
             )
             trade_id = int(cur.lastrowid or 0)
@@ -1072,7 +1080,7 @@ class Database:
             cur = conn.execute(
                 """UPDATE manual_trades
                    SET status = 'closed', sell_date = ?, sell_price = ?,
-                       updated_at = CURRENT_TIMESTAMP
+                       updated_at = datetime('now','localtime')
                    WHERE id = ? AND status = 'open'""",
                 (str(sell_date), float(sell_price), int(trade_id)),
             )
@@ -1092,8 +1100,8 @@ class Database:
     ) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
-                """INSERT INTO job_runs (job_type, run_date, status, payload)
-                   VALUES (?, ?, ?, ?)""",
+                """INSERT INTO job_runs (job_type, run_date, status, payload, created_at)
+                   VALUES (?, ?, ?, ?, datetime('now','localtime'))""",
                 (
                     str(job_type),
                     run_date,
@@ -1151,7 +1159,7 @@ class Database:
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO app_config (key, value, updated_at)
-                   VALUES (?, ?, CURRENT_TIMESTAMP)
+                   VALUES (?, ?, datetime('now','localtime'))
                    ON CONFLICT(key) DO UPDATE SET
                        value = excluded.value,
                        updated_at = excluded.updated_at""",
@@ -1185,7 +1193,7 @@ class Database:
                 conn.execute("UPDATE trend_param_sets SET is_default = 0")
             conn.execute(
                 """INSERT INTO trend_param_sets (param_set, params_json, is_default, formula_version, created_at)
-                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                   VALUES (?, ?, ?, ?, datetime('now','localtime'))
                    ON CONFLICT(param_set) DO UPDATE SET
                        params_json = excluded.params_json,
                        is_default = excluded.is_default,
@@ -1232,7 +1240,7 @@ class Database:
                     boll_mid, boll_up, boll_dn,
                     rsi_avg_gain, rsi_avg_loss, macd_ema12, macd_ema26,
                     price_mode, formula_version, data_version, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
                 records,
             )
         return len(records)
@@ -1273,7 +1281,7 @@ class Database:
                 """INSERT INTO trend_daily
                    (symbol, time, param_set, trend_score, trend_ma5, trend_ma10,
                     price_direction, confidence, price_mode, formula_version, data_version, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
                 records,
             )
         return len(records)
@@ -1380,8 +1388,9 @@ class Database:
             conn.execute(
                 """INSERT INTO batch_backtest_runs
                    (batch_id, name, status, categories_json, strategy_snapshot_json,
-                    config_json, total_cells, data_anchor_date, data_version, engine_version)
-                   VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)""",
+                    config_json, total_cells, data_anchor_date, data_version, engine_version,
+                    created_at)
+                   VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
                 (
                     batch["batch_id"],
                     batch.get("name", ""),
@@ -1441,7 +1450,7 @@ class Database:
             cur = conn.execute(
                 """UPDATE batch_backtest_runs
                    SET status = 'interrupted', error = '服务重启导致批次中断',
-                       finished_at = CURRENT_TIMESTAMP
+                       finished_at = datetime('now','localtime')
                    WHERE status = 'running'"""
             )
             return cur.rowcount
@@ -1459,8 +1468,8 @@ class Database:
                     win_rate, profit_factor, trade_count, final_equity,
                     benchmark_total_return, benchmark_annual_return, excess_annual_return,
                     annual_returns_json, monthly_heatmap_json, trades_json,
-                    skipped_buys_json, monthly_nav_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    skipped_buys_json, monthly_nav_json, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                 (
                     cell["batch_id"], cell["symbol"], cell["strategy_id"],
                     cell.get("symbol_name"), cell.get("strategy_name"),
@@ -1520,8 +1529,8 @@ class Database:
             conn.execute(
                 """INSERT OR REPLACE INTO batch_backtest_symbol_features
                    (batch_id, symbol, ann_volatility, momentum_250, bh_max_drawdown,
-                    trend_score_avg, amount_ma20, bar_count)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                    trend_score_avg, amount_ma20, bar_count, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                 (
                     batch_id, symbol,
                     features.get("ann_volatility"), features.get("momentum_250"),
