@@ -443,7 +443,10 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   };
   // 近30日K线 mini 图：蜡烛（红涨绿跌）+ 5日均线。盘中模式下最后一根为
   // 当日实时合成K线。仅具体标的行有数据，类目聚合行显示「—」。
-  const klineSpark = (candles, ma5) => {
+  // dif/dea 与 candles 同窗口逐根对齐（同一 tail(30)）：据此在图内标注窗口
+  // 内全部金叉（橙色小上箭头，置于该根K线低点下方）与死叉（黑色小下箭头，
+  // 置于高点上方），而非仅最新一次。
+  const klineSpark = (candles, ma5, dif, dea) => {
     if (!Array.isArray(candles) || !candles.length) return '<span class="spark-empty">—</span>';
     const n = candles.length;
     const values = [];
@@ -460,7 +463,8 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const pad = (vMax - vMin) * 0.06;
     vMin -= pad;
     vMax += pad;
-    const y = (value) => 100 - ((Math.min(vMax, Math.max(vMin, value)) - vMin) / (vMax - vMin) * 100);
+    // 上下各留 7% 头部空间，给金叉/死叉箭头留位。
+    const y = (value) => 100 - ((Math.min(vMax, Math.max(vMin, value)) - vMin) / (vMax - vMin) * 86 + 7);
     const step = 100 / n;
     const bodyW = step * 0.62;
     const parts = [];
@@ -474,6 +478,48 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       parts.push(`<rect x="${(cx - bodyW / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${height.toFixed(1)}" fill="${color}"/>`);
     });
     if (!parts.length) return '<span class="spark-empty">—</span>';
+    // 金叉/死叉标注：与 detect_macd_phase 同口径——sign = DIF-DEA，
+    // 由负/零转正当根为金叉，由正/零转负当根为死叉。窗口内逐根扫描，
+    // 多次交叉全部标注。candles 有剔根时按尾部对齐 dif/dea。
+    if (Array.isArray(dif) && Array.isArray(dea)) {
+      const offset = Math.max(dif.length, dea.length) - n;
+      const signAt = (i) => {
+        const d = dif[offset + i], e = dea[offset + i];
+        return Number.isFinite(d) && Number.isFinite(e) ? d - e : NaN;
+      };
+      // ⬆/⬇ 式描边箭头：竖线杆 + 两根斜线箭头羽，白色描边底衬 + 彩色主线
+      // 双层绘制，压在蜡烛上也清晰。全部用 stroke 绘制并配合
+      // vector-effect:non-scaling-stroke，在 mini 图的非均匀缩放下保持锐利。
+      const stemLen = 13;
+      const headDx = 1.0;
+      const headDy = 3.5;
+      const gap = 8;
+      const arrow = (cx, tipY, dir, cls) => {
+        const s = dir === 'up' ? 1 : -1;
+        const stemEnd = (tipY + s * stemLen).toFixed(1);
+        const headY = (tipY + s * headDy).toFixed(1);
+        const x0 = cx.toFixed(1), y0 = tipY.toFixed(1);
+        const xl = (cx - headDx).toFixed(1), xr = (cx + headDx).toFixed(1);
+        const lines = `<line x1="${x0}" y1="${y0}" x2="${x0}" y2="${stemEnd}"/><line x1="${x0}" y1="${y0}" x2="${xl}" y2="${headY}"/><line x1="${x0}" y1="${y0}" x2="${xr}" y2="${headY}"/>`;
+        return `<g class="kspark-arrow-halo">${lines}</g><g class="kspark-arrow ${cls}">${lines}</g>`;
+      };
+      for (let i = 1; i < n; i += 1) {
+        const prev = signAt(i - 1), curr = signAt(i);
+        if (!Number.isFinite(prev) || !Number.isFinite(curr) || curr === 0) continue;
+        const k = candles[i];
+        if (!Number.isFinite(k?.h) || !Number.isFinite(k?.l)) continue;
+        const cx = (i + 0.5) * step;
+        if (prev <= 0 && curr > 0) {
+          // 金叉：橙色 ⬆，尖端指向该根K线低点（留 gap 间距）；贴底时上移保证完整可见。
+          const tipY = Math.min(y(k.l) + gap, 100 - stemLen - 0.5);
+          parts.push(arrow(cx, tipY, 'up', 'kspark-cross-golden'));
+        } else if (prev >= 0 && curr < 0) {
+          // 死叉：黑色 ⬇，尖端指向该根K线高点（留 gap 间距）；贴顶时下移保证完整可见。
+          const tipY = Math.max(y(k.h) - gap, stemLen + 0.5);
+          parts.push(arrow(cx, tipY, 'down', 'kspark-cross-dead'));
+        }
+      }
+    }
     const maPoints = (Array.isArray(ma5) ? ma5 : [])
       .map((value, i) => Number.isFinite(value) ? `${((i + 0.5) * step).toFixed(1)},${y(value).toFixed(1)}` : '')
       .filter(Boolean).join(' ');
@@ -656,7 +702,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       : '';
     return `<div class="index-row subject-inst-row" data-symbol="${escHtml(item.symbol || '')}">
       <div class="index-name"><strong>${escHtml(item.name || item.symbol)}</strong><span>${escHtml(item.symbol)} · 具体标的</span></div>
-      <div class="index-kspark">${klineSpark(item.kline || [], item.kline_ma5 || [])}<div class="chart-cross" hidden></div></div>
+      <div class="index-kspark">${klineSpark(item.kline || [], item.kline_ma5 || [], item.macd_dif || [], item.macd_dea || [])}<div class="chart-cross" hidden></div></div>
       <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
       <div class="index-mspark">${macdSpark(item.macd_dif || [], item.macd_dea || [], item.macd_hist || [])}</div>
       <div class="index-phase">${fmtPhase(item)}</div>
