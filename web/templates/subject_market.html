@@ -1,17 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="index-board-page">
-  <header class="index-board-hero">
-    <div>
-      <p class="index-board-kicker">SUBJECT MARKET / DAILY</p>
-      <h1>标的看板</h1>
-      <p>每行一个标的，按一级 / 二级类目分组平铺；左侧分类目录可快速跳转，类目行仅统计金叉 / 死叉家数。</p>
-    </div>
-    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px;">
-      <div class="index-board-legend"><span class="dot positive"></span>强势 <span class="dot negative"></span>弱势</div>
-      <button id="intradayBtn" class="intraday-btn" disabled title="仅交易时段可用">🟠 获取盘中实时看板</button>
-    </div>
-  </header>
   <section id="heatmapPanel" class="heatmap-panel" hidden>
     <div class="heatmap-head">
       <div id="heatmapTabs" class="heatmap-tabs" role="tablist" aria-label="一级类目切换"></div>
@@ -31,7 +20,10 @@
     <progress id="intradayProgressBar" max="100" value="0" aria-label="盘中计算进度"></progress>
     <span id="intradayProgressText">准备中…</span>
   </div>
-  <div id="subjectBoardStatus" class="context-hint">正在加载本地标的日K数据…</div>
+  <div class="subject-status-row">
+    <div id="subjectBoardStatus" class="context-hint">正在加载本地标的日K数据…</div>
+    <button id="intradayBtn" class="intraday-btn" disabled title="仅交易时段可用">🟠 获取盘中实时看板</button>
+  </div>
   <div class="instrument-content-layout">
     <aside class="instrument-side-nav" aria-label="标的分类目录">
       <div class="instrument-side-nav-title">分类目录</div>
@@ -617,6 +609,43 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   window.addEventListener('scroll', requestActiveSync, { passive: true });
   window.addEventListener('resize', requestActiveSync);
 
+  // ---- 类目内排序（强度 / 金叉·死叉相位）------------------------------------
+  // 交互与手工交易持仓表一致：点击表头循环 降序 → 升序 → 原始顺序，
+  // 缺失值恒排最后、同值保持原始相对顺序（稳定）。排序只重排每个类目行
+  // （页面上带金叉/死叉计数的那一级）内部的标的行，类目分组顺序不变。
+  // key: null=原始顺序 | 'strength'=强度 | 'phase'=MACD 相位。
+  // 相位排序是「强弱序」而非纯天数序：金叉按天数降序在前、死叉按天数升序
+  // 在后（金叉5天 > 金叉1天 > 死叉1天 > 死叉5天），用 金叉=+天数 / 死叉=-天数
+  // 的秩实现，升序即整体反转。
+  let boardSort = { key: null, dir: 0 };
+  let boardData = null;
+  const sortValueFor = (item, key) => {
+    if (key === 'strength') return Number.isFinite(item.strength) ? item.strength : null;
+    if (key === 'phase') {
+      if (!Number.isFinite(item.macd_phase_days)) return null;
+      return item.macd_phase === 'golden' ? item.macd_phase_days : -item.macd_phase_days;
+    }
+    return null;
+  };
+  const compareInstruments = (a, b) => {
+    const av = sortValueFor(a, boardSort.key);
+    const bv = sortValueFor(b, boardSort.key);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1; // 无数据恒排末位
+    if (bv == null) return -1;
+    return (av - bv) * boardSort.dir;
+  };
+  const cycleBoardSort = (key) => {
+    if (boardSort.key !== key) boardSort = { key, dir: -1 };
+    else if (boardSort.dir === -1) boardSort = { key, dir: 1 };
+    else boardSort = { key: null, dir: 0 };
+    if (boardData) renderBoard(boardData);
+  };
+  const sortHeadHtml = (key, label, tip) => {
+    const active = boardSort.key === key && boardSort.dir !== 0;
+    const arrow = active ? (boardSort.dir === -1 ? '⬇️' : '⬆️') : '';
+    return `<span class="sort-head${active ? ' is-sorted' : ''}" data-sort-key="${key}" title="点击排序（${escHtml(tip)}）：降序 → 升序 → 原始顺序">${label}<span class="sort-arrow">${arrow}</span></span>`;
+  };
   // 具体标的行：相位/日变动/近30日K线/MACD/趋势MA5/强度/操作（查看+试算）。
   const renderInstrumentRow = (item) => {
     const viewBtn = item.symbol
@@ -644,12 +673,18 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const body = (group.items || []).map((l2) => {
       const section = sections.find((s) => s.l1 === group.category_l1 && s.l2 === l2.category_l2);
       const dividerCross = fmtCrossCounts(l2.macd_golden_count, l2.macd_dead_count);
-      const rows = (l2.children || []).map((l3) => (l3.children || []).map(renderInstrumentRow).join('')).join('');
+      // 类目行下挂的所有标的整体参与排序（L3 在页面上无分隔行，用户视角的
+      // 「三级类目」就是这个类目行下的全部行）。
+      const children = (l2.children || []).flatMap((l3) => l3.children || []);
+      const ordered = boardSort.key ? children.slice().sort(compareInstruments) : children;
+      const rows = ordered.map(renderInstrumentRow).join('');
       return `<div class="subject-l2-head"${section ? ` id="${escHtml(section.id)}"` : ''}><strong>${escHtml(l2.category_l2)}</strong><span class="subject-l2-meta">${dividerCross}</span></div>${rows}`;
     }).join('');
-    return `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${escHtml(group.category_l1)}</h2><span>${headMeta}</span></div><div class="index-table-scroll"><div class="index-grid-head"><span>标的</span><span>近30日K线</span><span>日变动</span><span>MACD</span><span>MACD相位</span><span>近3月趋势 MA5</span><span>强度</span><span></span></div>${body}</div></section>`;
+    const gridHead = `<div class="index-grid-head"><span>标的</span><span>近30日K线</span><span>日变动</span><span>MACD</span>${sortHeadHtml('phase', 'MACD相位', '金叉久 > 金叉新 > 死叉新 > 死叉久，各类目内')}<span>近3月趋势 MA5</span>${sortHeadHtml('strength', '强度', '按强度，各类目内')}<span></span></div>`;
+    return `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${escHtml(group.category_l1)}</h2><span>${headMeta}</span></div><div class="index-table-scroll">${gridHead}${body}</div></section>`;
   };
   const renderBoard = (data) => {
+    boardData = data;
     boardSections = collectSections(data.groups || []);
     board.innerHTML = (data.groups || []).map((group) => renderGroup(group, boardSections)).join('');
     renderSideNav(boardSections);
@@ -746,6 +781,11 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   });
   board.addEventListener('mouseleave', hideChartTip);
   window.addEventListener('scroll', hideChartTip, { passive: true });
+  // 排序表头点击（与手工交易持仓表同一交互：降序 → 升序 → 原始顺序）。
+  board.addEventListener('click', (event) => {
+    const head = event.target.closest('.sort-head[data-sort-key]');
+    if (head) cycleBoardSort(head.dataset.sortKey);
+  });
   async function loadBoard() {
     try {
       const response = await fetch('/subject-market/api/dashboard');

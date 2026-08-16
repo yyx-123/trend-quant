@@ -3066,6 +3066,37 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
 .subject-l2-head .subject-l2-meta { font-size: 12px; font-weight: 700; }
 .subject-inst-row .index-name strong { font-size: 15px; }
 
+/* 可排序表头（MACD相位 / 强度）：与手工交易持仓表同一交互，
+   点击循环 降序 → 升序 → 原始顺序，⬇️/⬆️ 指示方向。 */
+.index-grid-head .sort-head { cursor: pointer; user-select: none; }
+.index-grid-head .sort-head:hover { color: var(--text); }
+.index-grid-head .sort-head.is-sorted { color: var(--accent); }
+.index-grid-head .sort-arrow { display: inline-block; margin-left: 2px; font-size: 10px; line-height: 1; }
+
+/* 标的看板表头吸顶：长一级类目（如行业）下滚到制造工业等靠后类目时
+   表头仍钉在导航栏下方，随时可点排序。同手工交易页口径：sticky 相对
+   视口生效要求祖先链不出现 hidden/auto 滚动容器，故 L1 卡片与横向
+   滚动容器都改用 clip（clip 同样裁剪圆角/溢出但不创建滚动容器）；
+   top 偏移站点头部实测高度（--site-header-h 由 base.html 脚本写入）。
+   背景本就是不透明色，吸顶时不会与下方行叠影。 */
+.index-board-page .subject-l1 { overflow: clip; }
+.index-board-page .index-table-scroll { overflow-x: clip; }
+.index-board-page .index-grid-head {
+  position: sticky;
+  top: var(--site-header-h, 0px);
+  z-index: 5;
+}
+
+/* 状态行：左侧加载/盘中状态胶囊，右侧盘中实时看板按钮（hero 块删除后的新位置）。 */
+.subject-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.subject-status-row .intraday-btn { margin-left: 0; }
+
 /* Intraday (real-time) indicators ----------------------------------------- */
 .intraday-btn {
   background: linear-gradient(135deg, #d98b3a 0%, #c7782a 100%);
