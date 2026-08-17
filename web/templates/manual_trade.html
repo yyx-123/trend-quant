@@ -622,7 +622,7 @@
   }
 
   // 统一表格展示：各值的格式与原卡片保持一致，持有天数挪到外层后无需再展开详情
-  const TRADE_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '买价', '现价', '涨跌幅', '份数', '持仓金额',
+  const TRADE_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '买价', '现价', '仓位占比', '涨跌幅', '份数', '持仓金额',
     '盈亏', '最大浮盈', '最大回撤', '硬止损价', '吊灯止损价', '持有天数', '操作'];
 
   // 清仓交易表：体现一笔完整交易的结果（收益金额与收益率分列），不展示现价/持仓金额/止损价/操作
@@ -642,6 +642,11 @@
     '现价': function(t) {
       if (t.error) return null;
       return numOrNull(t.latest_price);
+    },
+    // _weight 由 renderTradeList 在排序前按「持仓金额 / 全部持仓总资产」预计算
+    '仓位占比': function(t) {
+      if (t.error) return null;
+      return numOrNull(t._weight);
     },
     '涨跌幅': function(t) {
       if (t.error) return null;
@@ -896,7 +901,15 @@
     return badges;
   }
 
-  function renderTradeRow(t) {
+  // 仓位占比 = 该标的持仓金额 / 全部持仓总资产（悬停展示计算过程）
+  function positionWeightTip(t, totalValue) {
+    if (t._weight == null || !(totalValue > 0)) return '';
+    return '仓位占比 = 持仓金额 ¥' + Number(t.position_value).toFixed(2) +
+      ' / 全部持仓总资产 ¥' + totalValue.toFixed(2) +
+      ' = ' + Number(t._weight).toFixed(2) + '%';
+  }
+
+  function renderTradeRow(t, totalValue) {
     const holding = t.holding || {};
     const badges = [];
     if (t.is_intraday) badges.push('<span class="mt-badge mt-badge-live">实时</span>');
@@ -911,6 +924,7 @@
     if (t.error) {
       cells += '<td>—</td>' +
         '<td>—</td>' +
+        '<td>—</td>' +
         '<td>' + esc(fmtShares(t.shares)) + '</td>' +
         '<td colspan="7"><span class="mt-trade-error">指标计算失败：' + esc(t.error) + '</span></td>';
     } else {
@@ -921,6 +935,9 @@
       const chandDominant = isFinite(chandPrice) && (!isFinite(hardPrice) || chandPrice >= hardPrice);
       cells +=
         '<td>' + esc(fmtPrice(t.latest_price)) + '</td>' +
+        '<td>' + (t._weight != null
+          ? withTip(esc(Number(t._weight).toFixed(2) + '%'), positionWeightTip(t, totalValue))
+          : '—') + '</td>' +
         '<td>' + (t.daily_change_pct != null
           ? withTip('<span class="' + pctClass(t.daily_change_pct) + '">' +
             esc(fmtPct(t.daily_change_pct)) + '</span>', dailyChangeTip(t))
@@ -993,9 +1010,19 @@
       tradeListEl.innerHTML = '';
       return;
     }
+    // 仓位占比的分母：全部持仓交易的资产总和（指标失败的行无持仓金额，不计入）
+    const totalValue = trades.reduce(function(sum, t) {
+      return sum + (t.error ? 0 : (numOrNull(t.position_value) || 0));
+    }, 0);
+    trades.forEach(function(t) {
+      const v = t.error ? null : numOrNull(t.position_value);
+      t._weight = (v != null && totalValue > 0) ? (v / totalValue * 100) : null;
+    });
     tradeListEl.innerHTML = '<div class="mt-trade-table-wrap"><table class="mt-trade-table"><thead><tr>' +
       TRADE_TABLE_HEADERS.map(function(h) { return tradeHeaderHtml(h, sortState, SORTABLE_COLUMNS); }).join('') +
-      '</tr></thead><tbody>' + sortedWith(trades, sortState, SORTABLE_COLUMNS).map(renderTradeRow).join('') +
+      '</tr></thead><tbody>' + sortedWith(trades, sortState, SORTABLE_COLUMNS).map(function(t) {
+        return renderTradeRow(t, totalValue);
+      }).join('') +
       '</tbody></table></div>';
   }
 

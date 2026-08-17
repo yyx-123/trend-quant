@@ -4516,25 +4516,25 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   }
 
   /* 窄屏隐藏次要列（按列序号，日后调整列顺序时需同步此处）。
-     持仓表保留：标的 / 现价 / 涨跌幅 / 盈亏 / 硬止损价 / 吊灯止损价 / 操作。
+     持仓表保留：标的 / 现价 / 仓位占比 / 涨跌幅 / 盈亏 / 硬止损价 / 吊灯止损价 / 操作。
      td[colspan] 是错误行的整行提示单元格，不参与隐藏，避免误藏错误信息；
      被隐藏列的表头排序入口在手机上不可点，属既定取舍。 */
   #mtTradeList .mt-trade-table th:nth-child(2),
   #mtTradeList .mt-trade-table th:nth-child(3),
   #mtTradeList .mt-trade-table th:nth-child(4),
-  #mtTradeList .mt-trade-table th:nth-child(7),
   #mtTradeList .mt-trade-table th:nth-child(8),
-  #mtTradeList .mt-trade-table th:nth-child(10),
+  #mtTradeList .mt-trade-table th:nth-child(9),
   #mtTradeList .mt-trade-table th:nth-child(11),
-  #mtTradeList .mt-trade-table th:nth-child(14),
+  #mtTradeList .mt-trade-table th:nth-child(12),
+  #mtTradeList .mt-trade-table th:nth-child(15),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(2),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(3),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(4),
-  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(7),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(8),
-  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(10),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(9),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(11),
-  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(14) {
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(12),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(15) {
     display: none;
   }
 
