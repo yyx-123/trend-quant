@@ -187,6 +187,7 @@
     { key: 'win_rate', label: '胜率', fmt: pct },
     { key: 'profit_factor', label: '盈亏比', fmt: num2 },
     { key: 'trade_count', label: '交易数', fmt: int },
+    { key: 'avg_holding_days', label: '平均持仓', fmt: days1 },
     { key: 'error', label: '备注', fmt: text }
   ];
 
@@ -194,6 +195,8 @@
   function text(v) { return v == null || v === '' ? '—' : String(v); }
   function int(v) { return v == null ? '—' : String(v); }
   function num2(v) { return v == null || !isFinite(v) ? '—' : Number(v).toFixed(2); }
+  // 平均持仓天数：0 表示无已平仓交易，与缺失（null）区分展示
+  function days1(v) { return v == null || !isFinite(v) ? '—' : Number(v).toFixed(1) + '天'; }
   function pct(v) { return v == null || !isFinite(v) ? '—' : (v * 100).toFixed(1) + '%'; }
   function pctSigned(v) {
     if (v == null || !isFinite(v)) return '—';

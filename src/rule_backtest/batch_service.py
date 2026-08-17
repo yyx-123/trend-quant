@@ -219,6 +219,7 @@ def extract_cell(result: dict, monthly_nav: list[dict]) -> dict:
         "win_rate": summary.get("win_rate"),
         "profit_factor": summary.get("profit_factor"),
         "trade_count": summary.get("trade_count"),
+        "avg_holding_days": summary.get("avg_holding_days"),
         "final_equity": result.get("final_equity"),
         "benchmark_total_return": bench.get("total_return"),
         "benchmark_annual_return": bench_annual,

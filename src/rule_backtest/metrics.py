@@ -36,6 +36,7 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
             "win_rate": 0.0,
             "profit_factor": 0.0,
             "trade_count": 0,
+            "avg_holding_days": 0.0,
             "avg_win": 0.0,
             "avg_loss": 0.0,
             "payoff_ratio": 0.0,
@@ -95,6 +96,24 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
     total_commission = sum(float(t.get("commission", 0.0) or 0.0) for t in trades)
     total_stamp_tax = sum(float(t.get("stamp_tax", 0.0) or 0.0) for t in trades)
 
+    # 持仓天数：单仓位引擎 BUY→SELL 顺序配对，按交易日计（daily_nav 索引差），
+    # 日期不在净值序列时回退自然日；期末仍持有的未平仓交易不计入。
+    nav_index = {str(row.get("date", ""))[:10]: i for i, row in enumerate(daily_nav)}
+    holding_days: list[float] = []
+    last_buy_date: str | None = None
+    for t in trades:
+        side = str(t.get("side", "")).upper()
+        day = str(t.get("date", ""))[:10]
+        if side == "BUY":
+            last_buy_date = day
+        elif side == "SELL" and last_buy_date:
+            if day in nav_index and last_buy_date in nav_index:
+                holding_days.append(float(nav_index[day] - nav_index[last_buy_date]))
+            else:
+                holding_days.append(float((pd.Timestamp(day) - pd.Timestamp(last_buy_date)).days))
+            last_buy_date = None
+    avg_holding_days = sum(holding_days) / len(holding_days) if holding_days else 0.0
+
     return {
         "total_return": float(total_return),
         "annual_return": float(annual_return),
@@ -114,6 +133,7 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
         "profit_factor": float(profit_factor),
         "trade_count": int(len(trades)),
         "closed_trade_count": int(len(sell_pnls)),
+        "avg_holding_days": float(avg_holding_days),
         "avg_win": float(avg_win),
         "avg_loss": float(avg_loss),
         "payoff_ratio": float(payoff_ratio),

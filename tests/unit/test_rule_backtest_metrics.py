@@ -52,6 +52,37 @@ class TestComputeSummary:
         assert summary["win_rate"] == 0.0
         assert summary["trade_count"] == 0
 
+    def test_avg_holding_days_trading_day_basis(self) -> None:
+        """BUY→SELL 顺序配对，按交易日（nav 索引差）计持仓天数。"""
+        nav = _make_nav([100_000, 101_000, 102_000, 103_000, 104_000, 105_000],
+                        start_date="2025-01-02")
+        dates = [row["date"] for row in nav]
+        trades = [
+            {"date": dates[0], "side": "BUY", "pnl": 0.0},
+            {"date": dates[2], "side": "SELL", "pnl": 100.0},   # 持有 2 个交易日
+            {"date": dates[3], "side": "BUY", "pnl": 0.0},
+            {"date": dates[5], "side": "SELL", "pnl": -50.0},    # 持有 2 个交易日
+        ]
+        summary = compute_summary(nav, trades, 0.0)
+        assert summary["avg_holding_days"] == pytest.approx(2.0)
+        assert summary["trade_count"] == 4
+        assert summary["closed_trade_count"] == 2
+
+    def test_avg_holding_days_skips_open_position_and_unmatched(self) -> None:
+        """期末未平仓（只有 BUY）不计入；无已平仓交易时为 0。"""
+        nav = _make_nav([100_000, 101_000, 102_000, 103_000], start_date="2025-01-02")
+        dates = [row["date"] for row in nav]
+        trades = [
+            {"date": dates[0], "side": "BUY", "pnl": 0.0},
+            {"date": dates[1], "side": "SELL", "pnl": 10.0},     # 1 个交易日
+            {"date": dates[2], "side": "BUY", "pnl": 0.0},       # 未平仓，不计
+        ]
+        summary = compute_summary(nav, trades, 0.0)
+        assert summary["avg_holding_days"] == pytest.approx(1.0)
+
+        assert compute_summary(nav, [], 0.0)["avg_holding_days"] == 0.0
+        assert compute_summary([], [], 0.0)["avg_holding_days"] == 0.0
+
     def test_detail_keys_for_hover_tips(self) -> None:
         """悬停计算明细键：日收益统计与最大回撤峰/谷。"""
         nav = _make_nav([100_000, 110_000, 99_000, 105_000])

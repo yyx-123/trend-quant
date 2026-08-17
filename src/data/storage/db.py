@@ -322,6 +322,7 @@ class Database:
                     win_rate REAL,
                     profit_factor REAL,
                     trade_count INTEGER,
+                    avg_holding_days REAL,
                     final_equity REAL,
                     benchmark_total_return REAL,
                     benchmark_annual_return REAL,
@@ -370,10 +371,12 @@ class Database:
         # 指标/趋势缓存记录构建时的行情内容版本（见 data_versions），
         # 用于识别「日期没变但价格口径变了」的陈旧缓存。
         cache_columns = {"data_version": "INTEGER NOT NULL DEFAULT 0"}
+        batch_cell_columns = {"avg_holding_days": "REAL"}
         targets = {
             "instrument_metadata": metadata_columns,
             "indicator_daily": cache_columns,
             "trend_daily": cache_columns,
+            "batch_backtest_cells": batch_cell_columns,
         }
         with self._connect() as conn:
             for table, new_columns in targets.items():
@@ -1521,11 +1524,11 @@ class Database:
                     category_l1, category_l2, category_l3, asset_type,
                     status, error, start_date, end_date, bar_count,
                     total_return, annual_return, max_drawdown, sharpe, sortino, calmar,
-                    win_rate, profit_factor, trade_count, final_equity,
+                    win_rate, profit_factor, trade_count, avg_holding_days, final_equity,
                     benchmark_total_return, benchmark_annual_return, excess_annual_return,
                     annual_returns_json, monthly_heatmap_json, trades_json,
                     skipped_buys_json, monthly_nav_json, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                 (
                     cell["batch_id"], cell["symbol"], cell["strategy_id"],
                     cell.get("symbol_name"), cell.get("strategy_name"),
@@ -1535,7 +1538,7 @@ class Database:
                     cell.get("total_return"), cell.get("annual_return"), cell.get("max_drawdown"),
                     cell.get("sharpe"), cell.get("sortino"), cell.get("calmar"),
                     cell.get("win_rate"), cell.get("profit_factor"), cell.get("trade_count"),
-                    cell.get("final_equity"),
+                    cell.get("avg_holding_days"), cell.get("final_equity"),
                     cell.get("benchmark_total_return"), cell.get("benchmark_annual_return"),
                     cell.get("excess_annual_return"),
                     cell.get("annual_returns_json"), cell.get("monthly_heatmap_json"),
@@ -1549,7 +1552,7 @@ class Database:
         " c.category_l1, c.category_l2, c.category_l3, c.asset_type,"
         " c.status, c.error, c.start_date, c.end_date, c.bar_count,"
         " c.total_return, c.annual_return, c.max_drawdown, c.sharpe, c.sortino, c.calmar,"
-        " c.win_rate, c.profit_factor, c.trade_count, c.final_equity,"
+        " c.win_rate, c.profit_factor, c.trade_count, c.avg_holding_days, c.final_equity,"
         " c.benchmark_total_return, c.benchmark_annual_return, c.excess_annual_return"
     )
 
