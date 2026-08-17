@@ -303,12 +303,22 @@ def symbol_detail(symbol: str, days: int = 60, rsi_period: int = 14, intraday: b
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def calc_stop_loss(symbol: str, buy_date: str, buy_price: float) -> dict:
+def calc_stop_loss(
+    symbol: str,
+    buy_date: str,
+    buy_price: float,
+    stop_mode: str | None = None,
+) -> dict:
     """计算给定买入的硬止损价和吊灯止损价。
 
-    硬止损公式: 买入价 − 买入当日 ATR(20) × hard_stop_atr_mul (默认 1.5)
-    吊灯止损公式: 买入以来最高价 − 最新 ATR(20) × chandelier_stop_atr_mul (默认 2.5)
+    硬止损公式: 买入价 − 买入当日 ATR(20) × hard_stop_atr_mul
+    吊灯止损公式: 买入以来最高价 − 最新 ATR(20) × chandelier_stop_atr_mul
     棘轮吊灯止损: 同公式但只上移不下移（chandelier_stop_ratchet_price）
+
+    stop_mode 松紧档位（与网页端手工交易同一口径）:
+      - "tight" 紧止损: 固定 1×ATR / 2×ATR，忽略标的级 stop_atr_mul 覆盖
+      - "loose" 或不传（默认）: 1.5×ATR / 2.5×ATR，可被标的级覆盖调整
+    返回的 stop_mode 字段标识本次计算所用口径。
 
     交易时段（9:30-15:00，含午间休盘）内自动叠加实时报价合成的当日K线：
     最高价 / 最新价 / 止损触发判断均含今日盘中数据（is_intraday=True 标记）；
@@ -318,12 +328,13 @@ def calc_stop_loss(symbol: str, buy_date: str, buy_price: float) -> dict:
         symbol: 标的代码，如 510300.SS
         buy_date: 买入日期，格式 YYYY-MM-DD
         buy_price: 买入均价
+        stop_mode: 止损松紧档位 "tight"（紧）/ "loose"（松，默认）
 
     Returns:
         硬止损价、吊灯止损价、ATR 参数、距买入价的百分比等。
     """
     try:
-        payload = compute_stop_loss(symbol, buy_date, buy_price)
+        payload = compute_stop_loss(symbol, buy_date, buy_price, stop_mode=stop_mode)
     except StopLossError as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, **payload}
@@ -448,7 +459,7 @@ def add_trade(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def open_positions(username: str, password: str) -> dict:
+def open_positions(username: str, password: str, stop_mode: str | None = None) -> dict:
     """返回指定用户当前持仓（未清仓交易）的实时概览。
 
     与网页端手工交易同一口径：交易时段（9:30-15:00，含午间休盘）内
@@ -458,6 +469,8 @@ def open_positions(username: str, password: str) -> dict:
     Args:
         username: 手工交易账号用户名
         password: 手工交易账号密码
+        stop_mode: 止损松紧档位 "tight"（紧：1×ATR/2×ATR）/
+            "loose"（松：1.5×ATR/2.5×ATR，默认）
 
     Returns:
         - positions: 每笔持仓的概览（按持仓金额降序），含买入信息、
@@ -467,7 +480,7 @@ def open_positions(username: str, password: str) -> dict:
         - is_intraday / intraday_ts: 数据口径标记
     """
     try:
-        payload = tr.list_trades(username, password, intraday=True)
+        payload = tr.list_trades(username, password, intraday=True, stop_mode=stop_mode)
     except (tr.TradeAuthError, tr.TradePermissionError, tr.TradeRecordError) as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -519,6 +532,7 @@ def open_positions(username: str, password: str) -> dict:
                 "chandelier_stop_triggered": stops.get("chandelier_stop_triggered"),
                 "chandelier_stop_ratchet_price": stops.get("chandelier_stop_ratchet_price"),
                 "chandelier_stop_ratchet_triggered": stops.get("chandelier_stop_ratchet_triggered"),
+                "stop_mode": stops.get("stop_mode"),
             }
         )
         total_value += float(t.get("position_value") or 0.0)
