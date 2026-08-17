@@ -113,6 +113,14 @@ async def lifespan(app: FastAPI):
         finally:
             _update_job_lock.release()
 
+    def intraday_snapshot_job() -> None:
+        """盘中看板快照定时入口：单例运行器内部完成交易日/时段/并发守卫。"""
+        from services.dashboard_snapshot import snapshot_runner
+
+        result = snapshot_runner.ensure_running(trigger="schedule")
+        if result.get("status") != "skipped":
+            logger.info("Intraday snapshot scheduled trigger: %s", result.get("status"))
+
     def _run_daily_update(force: bool = False) -> None:
         payload = daily_market_update_job(settings, force=force)
         logger.info(
@@ -195,7 +203,10 @@ async def lifespan(app: FastAPI):
     if disable_scheduler:
         logger.warning("Scheduler disabled by TREND_QUANT_DISABLE_SCHEDULER")
     else:
-        scheduler_manager.start(update_job=update_job)
+        scheduler_manager.start(
+            update_job=update_job,
+            intraday_snapshot_job=intraday_snapshot_job,
+        )
         threading.Thread(target=_daily_update_catchup, daemon=True).start()
 
     app.state.settings = settings

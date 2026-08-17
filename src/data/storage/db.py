@@ -197,6 +197,18 @@ class Database:
                     updated_at TEXT DEFAULT (datetime('now','localtime'))
                 );
 
+                -- 标的大盘盘中实时看板的最新快照（单行，id 固定为 1）。
+                -- 仅用于看板展示，与 market_data_* 日K库完全隔离：盘中合成
+                -- K线/指标只存在于本表的 payload 里，日K库只由收盘后的
+                -- 补库任务写入稳定数据。
+                CREATE TABLE IF NOT EXISTS dashboard_snapshot (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    kind TEXT NOT NULL,
+                    as_of TEXT,
+                    computed_at TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS trend_param_sets (
                     param_set TEXT PRIMARY KEY,
                     params_json TEXT NOT NULL,
@@ -734,6 +746,50 @@ class Database:
     def _bump_free_version(conn, name: str) -> int:
         row = conn.execute("SELECT version FROM data_versions WHERE name = ?", (name,)).fetchone()
         return int(row["version"] or 0) if row else 0
+
+    def save_dashboard_snapshot(self, kind: str, as_of: str | None, payload: dict) -> str:
+        """Persist the latest subject-dashboard snapshot (single-row replace).
+
+        返回写入的 computed_at（本地时间 ISO 字符串）。payload  JSON 序列化
+        存入独立快照表，与日K库无任何交集。
+        """
+        computed_at = datetime.now().isoformat(timespec="seconds")
+        blob = json.dumps(payload, ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO dashboard_snapshot (id, kind, as_of, computed_at, payload)
+                VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    as_of = excluded.as_of,
+                    computed_at = excluded.computed_at,
+                    payload = excluded.payload
+                """,
+                (kind, as_of, computed_at, blob),
+            )
+        return computed_at
+
+    def load_dashboard_snapshot(self) -> dict | None:
+        """Load the persisted snapshot, or None if none has been saved yet."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT kind, as_of, computed_at, payload FROM dashboard_snapshot WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            _logger.warning("Corrupt dashboard_snapshot payload; ignoring")
+            return None
+        return {
+            "kind": row["kind"],
+            "as_of": row["as_of"],
+            "computed_at": row["computed_at"],
+            "payload": payload,
+        }
+
 
     def save_instrument_categories(self, categories: list[dict[str, Any]]) -> int:
         records: list[tuple] = []

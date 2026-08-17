@@ -16,13 +16,8 @@
     <div id="heatmapCrumb" class="heatmap-crumb" hidden></div>
     <p class="heatmap-note">面积 = 等大面积（同级色块面积相同，与成交额无关） · 颜色 = 最新趋势值 MA5（红涨绿跌，类目为成员成交额加权） · 点击色块下钻，底部面包屑返回 · 悬停查看详情</p>
   </section>
-  <div id="intradayProgress" class="intraday-progress-wrap" hidden>
-    <progress id="intradayProgressBar" max="100" value="0" aria-label="盘中计算进度"></progress>
-    <span id="intradayProgressText">准备中…</span>
-  </div>
   <div class="subject-status-row">
-    <div id="subjectBoardStatus" class="context-hint">正在加载本地标的日K数据…</div>
-    <button id="intradayBtn" class="intraday-btn" disabled title="仅交易时段可用">🟠 获取盘中实时看板</button>
+    <div id="subjectBoardStatus" class="context-hint">正在加载标的看板…</div>
   </div>
   <div class="instrument-content-layout">
     <aside class="instrument-side-nav" aria-label="标的分类目录">
@@ -70,11 +65,8 @@
   const board = document.getElementById('subjectBoard');
   const statusEl = document.getElementById('subjectBoardStatus');
   const sideNavEl = document.getElementById('subjectSideNav');
-  const intradayBtn = document.getElementById('intradayBtn');
-  const intradayProgress = document.getElementById('intradayProgress');
-  const intradayProgressBar = document.getElementById('intradayProgressBar');
-  const intradayProgressText = document.getElementById('intradayProgressText');
-  let isIntradayMode = false;
+  // 当前已渲染快照的 computed_at（EOD 数据为 null），用于识别后台重算出的新快照。
+  let renderedSnapshotTs = null;
   // 当前看板的二级类目锚点清单（侧栏跳转/滚动高亮用），随整表重载重建。
   let boardSections = [];
   let activeSyncPending = false;
@@ -832,115 +824,101 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const head = event.target.closest('.sort-head[data-sort-key]');
     if (head) cycleBoardSort(head.dataset.sortKey);
   });
+  const fmtClock = (ts) => {
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const boardCountsText = (data) =>
+    `${data.groups.length || 0} 个一级类目、${data.secondary_count || 0} 个二级类目、${data.category_count || 0} 个三级类目`;
+  function renderStatus(data) {
+    if (!board.children.length) {
+      statusEl.textContent = '暂无具备完整三级分类和本地日K数据的标的。';
+      statusEl.className = 'context-hint';
+      return;
+    }
+    if (data.is_intraday) {
+      // 盘中/收盘快照：基于快照时刻的实时报价估算，非盘后确认值。
+      statusEl.innerHTML = `<span class="intraday-dot"></span> 实时快照 ${fmtClock(data.snapshot_ts || data.intraday_ts)}（${data.as_of || ''}）· ${boardCountsText(data)}。⚠️ 基于快照时刻实时报价估算，盘后将以日K确认值为准`;
+      statusEl.className = 'intraday-status-bar';
+    } else {
+      statusEl.textContent = `${data.as_of || '最新交易日'} 日K · ${boardCountsText(data)}。`;
+      statusEl.className = 'context-hint';
+    }
+  }
+  async function fetchBoard() {
+    const response = await fetch('/subject-market/api/dashboard');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '标的看板加载失败');
+    return data;
+  }
   async function loadBoard() {
     try {
-      const response = await fetch('/subject-market/api/dashboard');
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || '标的看板加载失败');
+      const data = await fetchBoard();
       renderBoard(data);
       renderHeatmap(data);
-      isIntradayMode = false;
-      statusEl.innerHTML = board.children.length
-        ? `${data.as_of || '最新交易日'} · ${data.groups.length || 0} 个一级类目、${data.secondary_count || 0} 个二级类目、${data.category_count || 0} 个三级类目。`
-        : '暂无具备完整三级分类和本地日K数据的标的。';
-      statusEl.className = 'context-hint';
+      renderedSnapshotTs = data.snapshot_ts || null;
+      renderStatus(data);
     } catch (error) {
       statusEl.textContent = error.message || '标的看板加载失败';
       statusEl.className = 'context-hint';
     }
   }
 
-  // ---- Intraday button & progress -----------------------------------------
-  let lastTradingStatus = null;
-  function isPostClose() {
-    return !!(lastTradingStatus && lastTradingStatus.is_past_market_open && !lastTradingStatus.is_realtime_available);
-  }
-  async function checkTradingStatus() {
+  // ---- 后台实时重算（快照先行，算完自动替换） -----------------------------
+  // 打开页面即触发一次实时重算；服务端单例保证全进程只有一项在跑任务
+  // （与盘中定时快照共用入口）。非交易时段/盘前/今日日K已落库时服务端
+  // 返回 skipped，前端不再轮询。
+  let refreshPollToken = 0;
+  const REFRESH_POLL_INTERVAL_MS = 2000;
+  const REFRESH_POLL_TIMEOUT_MS = 6 * 60 * 1000;
+  async function autoRefreshBoard() {
+    const token = ++refreshPollToken;
+    let start;
     try {
-      const resp = await fetch('/subject-market/api/trading-status');
-      const status = await resp.json();
-      lastTradingStatus = status;
-      if (status.is_past_market_open) {
-        intradayBtn.disabled = false;
-        intradayBtn.title = isPostClose()
-          ? '今日已收盘：获取基于收盘报价的当日看板（日K补库前的收盘快照）'
-          : '点击获取基于实时报价的盘中趋势值看板（午间休盘也可用）';
-      } else {
-        intradayBtn.disabled = true;
-        intradayBtn.title = status.next_session || '非交易时段';
-      }
+      const resp = await fetch('/subject-market/api/dashboard/refresh', { method: 'POST' });
+      start = await resp.json();
     } catch (e) {
-      intradayBtn.disabled = true;
+      return; // 触发失败不打断当前快照展示
+    }
+    if (start.status !== 'started' && start.status !== 'running') return;
+
+    const baseText = statusEl.innerHTML;
+    const deadline = Date.now() + REFRESH_POLL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, REFRESH_POLL_INTERVAL_MS));
+      if (token !== refreshPollToken) return; // 看板已被重新加载，旧轮询作废
+      let st;
+      try {
+        const resp = await fetch('/subject-market/api/dashboard/refresh-status');
+        st = await resp.json();
+      } catch (e) {
+        continue;
+      }
+      if (st.running) {
+        const pct = Math.round((st.percent || 0) * 100);
+        statusEl.innerHTML = `${baseText} <span class="intraday-refreshing">· 正在后台更新实时数据${pct ? ` ${pct}%` : ''}…</span>`;
+        continue;
+      }
+      if (st.last_error) {
+        statusEl.innerHTML = `${baseText} <span class="intraday-refreshing">· 实时更新失败：${st.last_error}（当前为最近快照）</span>`;
+        return;
+      }
+      // 重算完成：拉取最新快照并整表替换。
+      try {
+        const data = await fetchBoard();
+        renderBoard(data);
+        renderHeatmap(data);
+        renderedSnapshotTs = data.snapshot_ts || null;
+        renderStatus(data);
+      } catch (e) {
+        statusEl.innerHTML = baseText;
+      }
+      return;
     }
   }
-
-  intradayBtn.addEventListener('click', async () => {
-    if (intradayBtn.disabled) return;
-    intradayBtn.disabled = true;
-    intradayBtn.textContent = '⏳ 正在启动…';
-    intradayProgress.hidden = false;
-    intradayProgressBar.value = 0;
-    intradayProgressText.textContent = '正在启动盘中计算…';
-
-    try {
-      // Start the intraday job.
-      const startResp = await fetch('/subject-market/api/intraday-dashboard/start', { method: 'POST' });
-      if (!startResp.ok) {
-        const err = await startResp.json();
-        throw new Error(err.detail || '启动失败');
-      }
-      const { job_id } = await startResp.json();
-
-      // Poll progress.
-      const poll = async () => {
-        const progResp = await fetch(`/subject-market/api/intraday-dashboard/progress/${job_id}`);
-        if (!progResp.ok) throw new Error('进度查询失败');
-        const prog = await progResp.json();
-        intradayProgressBar.value = Math.round(prog.percent * 100);
-        intradayProgressText.textContent = prog.message || `${(prog.percent * 100).toFixed(0)}%`;
-        return prog;
-      };
-
-      let prog = await poll();
-      while (prog.status === 'started' || prog.status === 'running') {
-        await new Promise(r => setTimeout(r, 500));
-        prog = await poll();
-      }
-
-      if (prog.status === 'error') {
-        throw new Error(prog.message || '盘中计算失败');
-      }
-
-      // Fetch the result.
-      const resultResp = await fetch(`/subject-market/api/intraday-dashboard/result/${job_id}`);
-      if (!resultResp.ok) {
-        const err = await resultResp.json();
-        throw new Error(err.detail || '获取结果失败');
-      }
-      const data = await resultResp.json();
-
-      // Render.
-      renderBoard(data);
-      renderHeatmap(data);
-      isIntradayMode = true;
-      const modeLabel = isPostClose() ? '收盘快照' : '盘中实时';
-      const modeHint = isPostClose()
-        ? '⚠️ 数据基于收盘报价，日K补库任务落库后将以盘后确认值为准'
-        : '⚠️ 数据基于当前实时价格估算，非最终盘后确认值';
-      statusEl.innerHTML = board.children.length
-        ? `<span class="intraday-dot"></span> ${modeLabel} · ${data.as_of || ''} · ${modeHint}`
-        : '盘中无可用数据。';
-      statusEl.className = 'intraday-status-bar';
-    } catch (error) {
-      statusEl.textContent = '盘中计算失败: ' + (error.message || '未知错误');
-      statusEl.className = 'context-hint';
-    } finally {
-      intradayProgress.hidden = true;
-      intradayBtn.textContent = '🟠 获取盘中实时看板';
-      // Re-check trading status in case we crossed a boundary.
-      checkTradingStatus();
-    }
-  });
 
   // ---- 仓位试算弹窗（与手工交易页同接口、同渲染口径；独立作用域避免命名冲突）----
   (() => {
@@ -1142,14 +1120,10 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   })();
 
   // Init.
-  loadBoard();
-  checkTradingStatus();
-  // Re-check trading status every 60 seconds.
-  setInterval(checkTradingStatus, 60000);
-  // 盘后数据更新完成后自动重载最新 EOD 看板（用户正在看盘盘中实时视图时不打断）。
+  loadBoard().then(autoRefreshBoard);
+  // 盘后数据更新完成后重载：今日日K落库后 /api/dashboard 自动切回 EOD 确认值。
   document.addEventListener('daily-update-done', function() {
-    if (!isIntradayMode) loadBoard();
-    checkTradingStatus();
+    loadBoard();
   });
 </script>
 {% endblock %}
