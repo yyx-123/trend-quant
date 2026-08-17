@@ -122,7 +122,7 @@ class SubjectMarketApiTest(unittest.TestCase):
         self.assertAlmostEqual(service["daily_change_pct"], (latest_a * 100 + latest_b * 300) / 4)
         self.assertEqual(service["strength"], 100)
 
-        # MACD 金叉/死叉相位 + 近10日K线：仅具体标的级有值，类目聚合行为占位。
+        # MACD 金叉/死叉相位 + 近30日K线：仅具体标的级有值，类目聚合行为占位。
         instruments_by_symbol = {
             item["symbol"]: item
             for l3 in l2["children"]
@@ -135,12 +135,12 @@ class SubjectMarketApiTest(unittest.TestCase):
         self.assertEqual(ccc["macd_phase"], "dead")
         self.assertGreaterEqual(aaa["macd_phase_days"], 1)
         self.assertIsNotNone(aaa["macd_phase_signal_date"])
-        self.assertEqual(len(aaa["kline"]), 20)
-        self.assertEqual(len(aaa["kline_ma5"]), 20)
+        self.assertEqual(len(aaa["kline"]), 30)
+        self.assertEqual(len(aaa["kline_ma5"]), 30)
         # 末根K线 = 最后一根日K；末位 MA5 = 最后 5 根收盘均值。
         last_close = 100.0 + 0.5 * 89
         self.assertAlmostEqual(aaa["kline"][-1]["c"], last_close)
-        self.assertAlmostEqual(aaa["kline"][0]["c"], 100.0 + 0.5 * 70)
+        self.assertAlmostEqual(aaa["kline"][0]["c"], 100.0 + 0.5 * 60)
         self.assertAlmostEqual(
             aaa["kline_ma5"][-1],
             sum(100.0 + 0.5 * i for i in range(85, 90)) / 5,
