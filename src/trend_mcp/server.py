@@ -129,8 +129,8 @@ def intraday_dashboard(category: str = "") -> dict:
     开盘前请使用 trend_dashboard 获取日K看板。
 
     Args:
-        category: 可选，按分类筛选（匹配 L1/L2/L3），如 "宽基"、"行业"、
-            "跨境"。不传则计算全部标的（600+，可能需要 1 分钟以上，
+        category: 可选，按分类筛选（匹配 L1/L2/L3），如 "ETF"、"宽基"、
+            "跨境"、"股票"。不传则计算全部标的（600+，可能需要 1 分钟以上，
             建议按需用 category 缩小范围）。
 
     Returns:
@@ -353,7 +353,7 @@ def list_instruments(
     """列出所有可用的 ETF 标的，支持按分类和关键词筛选。
 
     Args:
-        category: 按分类筛选（匹配 L1/L2/L3），如 "宽基"、"行业"、"跨境"
+        category: 按分类筛选（匹配 L1/L2/L3），如 "ETF"、"宽基"、"跨境"、"股票"
         keyword: 按代码或名称模糊搜索
         enabled_only: 是否仅返回启用的标的，默认 True
 
