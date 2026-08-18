@@ -623,7 +623,7 @@
 
   // 统一表格展示：各值的格式与原卡片保持一致，持有天数挪到外层后无需再展开详情
   const TRADE_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '买价', '现价', '仓位占比', '涨跌幅', '份数', '持仓金额',
-    '盈亏', '最大浮盈', '最大回撤', '硬止损价', '吊灯止损价', '持有天数', '操作'];
+    '盈亏', '最大浮盈', '最大回撤', '硬止损价', '吊灯止损价', '风险', '持有天数', '操作'];
 
   // 清仓交易表：体现一笔完整交易的结果（收益金额与收益率分列），不展示现价/持仓金额/止损价/操作
   const CLOSED_TABLE_HEADERS = ['标的', '标的代码', '买入日期', '卖出日期', '买价', '卖价', '份数',
@@ -664,6 +664,8 @@
       if (t.error) return null;
       return numOrNull((t.holding || {}).hold_days);
     },
+    // 风险 = (买价 − 较高止损价) × 份数，见 riskAmount
+    '风险': function(t) { return riskAmount(t); },
   };
 
   const CLOSED_SORTABLE_COLUMNS = {
@@ -909,6 +911,43 @@
       ' = ' + Number(t._weight).toFixed(2) + '%';
   }
 
+  // 较高止损价：硬止损 / 吊灯止损取较高者（更紧、先触发），用于风险口径
+  function higherStopPrice(t) {
+    const stops = t.stops || {};
+    const hard = numOrNull(stops.hard_stop_price);
+    const chand = numOrNull(stops.chandelier_stop_price);
+    if (hard != null && chand != null) return Math.max(hard, chand);
+    return hard != null ? hard : chand;
+  }
+
+  // 风险 = 以较高止损价离场时的亏损金额 = (买价 − 止损价) × 份数；
+  // 止损价 ≥ 买价时止损离场不亏损，风险记 0；止损价或份数缺失时无法计算
+  function riskAmount(t) {
+    if (t.error) return null;
+    const stop = higherStopPrice(t);
+    const buy = numOrNull(t.buy_price);
+    const shares = numOrNull(t.shares);
+    if (stop == null || buy == null || shares == null) return null;
+    return Math.max(0, (buy - stop) * shares);
+  }
+
+  // 风险悬停：展示取较高止损价的过程与亏损金额计算
+  function riskTip(t) {
+    const risk = riskAmount(t);
+    if (risk == null) return '';
+    const stops = t.stops || {};
+    const stop = higherStopPrice(t);
+    const hard = numOrNull(stops.hard_stop_price);
+    const chand = numOrNull(stops.chandelier_stop_price);
+    let stopNote = '止损价取较高者 = max(硬止损价 ' + (hard != null ? fmtPrice(hard) : '—') +
+      ', 吊灯止损价 ' + (chand != null ? fmtPrice(chand) : '—') + ') = ' + fmtPrice(stop);
+    if (stop >= Number(t.buy_price)) {
+      return stopNote + '；止损价不低于买价 ' + fmtPrice(t.buy_price) + '，止损离场不亏损，风险为 0';
+    }
+    return '风险 = (买价 ' + fmtPrice(t.buy_price) + ' − 止损价 ' + fmtPrice(stop) +
+      ') × 份数 ' + fmtShares(t.shares) + ' = ¥' + risk.toFixed(2) + '（' + stopNote + '）';
+  }
+
   function renderTradeRow(t, totalValue) {
     const holding = t.holding || {};
     const badges = [];
@@ -926,7 +965,7 @@
         '<td>—</td>' +
         '<td>—</td>' +
         '<td>' + esc(fmtShares(t.shares)) + '</td>' +
-        '<td colspan="7"><span class="mt-trade-error">指标计算失败：' + esc(t.error) + '</span></td>';
+        '<td colspan="8"><span class="mt-trade-error">指标计算失败：' + esc(t.error) + '</span></td>';
     } else {
       const stops = t.stops || {};
       const hardPrice = Number(stops.hard_stop_price);
@@ -952,6 +991,12 @@
           esc(fmtPct(holding.max_drawdown)) + '</span>', maxDrawdownTip(t, holding)) + '</td>' +
         '<td>' + stopCellHtml(stops.hard_stop_price, stops.hard_stop_distance_pct, hardDominant, hardStopTip(stops)) + '</td>' +
         '<td>' + stopCellHtml(stops.chandelier_stop_price, stops.chandelier_stop_distance_pct, chandDominant, chandelierStopTip(stops)) + '</td>' +
+        '<td>' + (function() {
+          const risk = riskAmount(t);
+          if (risk == null) return '—';
+          return withTip('<span class="' + (risk > 0 ? 'metric-negative' : '') + '">¥' +
+            risk.toFixed(2) + '</span>', riskTip(t));
+        })() + '</td>' +
         '<td>' + withTip(holdDaysCell(holding), holdDaysTip(t, holding)) + '</td>';
     }
     cells += '<td class="mt-cell-actions">' +

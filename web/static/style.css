@@ -4257,6 +4257,24 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   width: 260px;
 }
 
+.batch-window-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.batch-window-preset,
+.batch-window-date {
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
 .batch-eta {
   font-size: 13px;
   color: var(--muted);
@@ -4408,6 +4426,79 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   height: 520px;
 }
 
+.batch-chart--sm {
+  height: 300px;
+}
+
+.batch-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(30, 34, 45, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.batch-modal-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  width: min(980px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px;
+}
+
+.batch-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.batch-modal-head h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.batch-modal-meta {
+  margin: 8px 0 4px;
+}
+
+.batch-modal-body {
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.batch-modal-h {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  color: var(--text-soft);
+}
+
+.batch-modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.batch-compare-symbol-bar {
+  margin-top: 18px;
+  align-items: center;
+}
+
+.batch-compare-symbol-label {
+  margin-bottom: 0;
+}
+
 /* ────────────────────────────────────────────────────────────────
    手机端窄屏适配（仅标的看板 / 手工交易两页）
    全部为 @media (max-width:768px) 内的追加覆盖：桌面视口（>768px）
@@ -4516,7 +4607,7 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   }
 
   /* 窄屏隐藏次要列（按列序号，日后调整列顺序时需同步此处）。
-     持仓表保留：标的 / 现价 / 仓位占比 / 涨跌幅 / 盈亏 / 硬止损价 / 吊灯止损价 / 操作。
+     持仓表保留：标的 / 现价 / 仓位占比 / 涨跌幅 / 盈亏 / 硬止损价 / 吊灯止损价 / 风险 / 操作。
      td[colspan] 是错误行的整行提示单元格，不参与隐藏，避免误藏错误信息；
      被隐藏列的表头排序入口在手机上不可点，属既定取舍。 */
   #mtTradeList .mt-trade-table th:nth-child(2),
@@ -4526,7 +4617,7 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   #mtTradeList .mt-trade-table th:nth-child(9),
   #mtTradeList .mt-trade-table th:nth-child(11),
   #mtTradeList .mt-trade-table th:nth-child(12),
-  #mtTradeList .mt-trade-table th:nth-child(15),
+  #mtTradeList .mt-trade-table th:nth-child(16),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(2),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(3),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(4),
@@ -4534,7 +4625,7 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(9),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(11),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(12),
-  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(15) {
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(16) {
     display: none;
   }
 

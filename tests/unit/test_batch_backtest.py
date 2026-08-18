@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import threading
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -14,6 +16,7 @@ import pytest
 from data.storage.market_store import MarketStore
 from rule_backtest.batch_service import (
     BatchBacktestService,
+    aggregate_annual_returns,
     build_strategy_snapshot,
     compute_features,
     estimate_batch_seconds,
@@ -69,9 +72,9 @@ def make_strategy(strategy_id: str = "test_sma20", entry: dict | None = None) ->
     }
 
 
-def make_bars(n: int = 120, start_price: float = 10.0) -> pd.DataFrame:
+def make_bars(n: int = 120, start_price: float = 10.0, start: str = "2024-01-02") -> pd.DataFrame:
     """确定性合成 bars（线性上行 + 固定波动），ISO 日期字符串与生产格式一致。"""
-    base = pd.Timestamp("2024-01-02")
+    base = pd.Timestamp(start)
     records = []
     price = start_price
     for i in range(n):
@@ -363,3 +366,161 @@ class TestRunBatch:
         )
         batch_db.create_batch_run_if_idle(batch)
         assert batch_db.delete_batch_run(batch["batch_id"]) is False
+
+
+# ----------------------------------------------------------------------
+# 窗口批次（指定回测区间）
+# ----------------------------------------------------------------------
+def _run_window_batch(batch_db, start: date | None, end: date | None) -> str:
+    service = BatchBacktestService(db=batch_db)
+    batch = service.prepare_batch(
+        categories=["测试"], strategy_ids=["sma_ok"],
+        start_date=start, end_date=end,
+        strategy_loader=StrategyLoader(db=batch_db),
+    )
+    assert batch_db.create_batch_run_if_idle(batch) is True
+    service.run_batch(batch["batch_id"])
+    return batch["batch_id"]
+
+
+class TestWindowBatch:
+    def test_prepare_stores_requested_window_and_names_it(self, batch_db) -> None:
+        service = BatchBacktestService(db=batch_db)
+        batch = service.prepare_batch(
+            categories=["测试"], strategy_ids=["sma_ok"],
+            start_date=date(2024, 1, 15), end_date=date(2024, 3, 31),
+            strategy_loader=StrategyLoader(db=batch_db),
+        )
+        config = json.loads(batch["config_json"])
+        assert config["start_date"] == "2024-01-15"
+        assert config["end_date"] == "2024-03-31"
+        assert "2024-01-15~2024-03-31" in batch["name"]
+
+    def test_prepare_rejects_start_after_end(self, batch_db) -> None:
+        service = BatchBacktestService(db=batch_db)
+        with pytest.raises(ValueError, match="开始日期不能晚于结束日期"):
+            service.prepare_batch(
+                categories=["测试"], strategy_ids=["sma_ok"],
+                start_date=date(2024, 5, 1), end_date=date(2024, 3, 1),
+                strategy_loader=StrategyLoader(db=batch_db),
+            )
+
+    def test_prepare_keeps_requested_end_beyond_anchor(self, batch_db) -> None:
+        """end 超过锚定日不报错（截断发生在执行侧），config 保留用户请求值。"""
+        service = BatchBacktestService(db=batch_db)
+        batch = service.prepare_batch(
+            categories=["测试"], strategy_ids=["sma_ok"],
+            end_date=date(2030, 1, 1),
+            strategy_loader=StrategyLoader(db=batch_db),
+        )
+        config = json.loads(batch["config_json"])
+        assert config["start_date"] is None
+        assert config["end_date"] == "2030-01-01"
+
+    def test_window_restricts_cells_and_skips_short(self, batch_db) -> None:
+        # LONG.SS: 2024-01-02 起 120 根（连续自然日）→ 末根 2024-04-30
+        batch_id = _run_window_batch(batch_db, date(2024, 1, 15), date(2024, 3, 31))
+        cells = {c["symbol"]: c for c in batch_db.get_batch_cells(batch_id)}
+
+        ok_cell = cells["LONG.SS"]
+        assert ok_cell["status"] == "ok"
+        assert ok_cell["start_date"] == "2024-01-15"
+        assert ok_cell["end_date"] == "2024-03-31"
+        assert ok_cell["bar_count"] == 77  # 01-15~01-31(17) + 02(29) + 03(31)
+        # 数据完整覆盖窗口 → 非部分区间
+        assert ok_cell["partial_window"] == 0
+
+        skipped = cells["SHORT.SS"]
+        assert skipped["status"] == "skipped"
+        assert "窗口内数据不足" in skipped["error"]
+
+    def test_partial_window_flagged_when_data_starts_late(self, batch_db) -> None:
+        # 窗口起点早于 LONG.SS 首根 K 线（2024-01-02）→ 上市晚于窗口起点
+        batch_id = _run_window_batch(batch_db, date(2023, 12, 1), date(2024, 3, 31))
+        cells = {c["symbol"]: c for c in batch_db.get_batch_cells(batch_id)}
+        assert cells["LONG.SS"]["status"] == "ok"
+        assert cells["LONG.SS"]["partial_window"] == 1
+
+    def test_partial_window_flagged_when_data_ends_early(self, batch_db) -> None:
+        # OLD.SS 行情止于 2022-05-02，远早于窗口终点 2024-03-31 → 数据提前结束
+        batch_db.save_instrument_metadata(
+            [{"symbol": "OLD.SS", "name": "老标的", "category_l1": "测试", "asset_type": "etf"}]
+        )
+        MarketStore(db=batch_db).save_history("OLD.SS", make_bars(120, start="2022-01-03"))
+        batch_id = _run_window_batch(batch_db, date(2022, 3, 1), date(2024, 3, 31))
+        cells = {c["symbol"]: c for c in batch_db.get_batch_cells(batch_id)}
+
+        old_cell = cells["OLD.SS"]
+        assert old_cell["status"] == "ok"
+        assert old_cell["bar_count"] == 63  # 03(31) + 04(30) + 05-01~05-02(2)
+        assert old_cell["partial_window"] == 1
+        # SHORT.SS 全部 30 根都在窗口内但仍不足 60 根 → 跳过
+        assert cells["SHORT.SS"]["status"] == "skipped"
+        assert "窗口内数据不足" in cells["SHORT.SS"]["error"]
+
+    def test_end_beyond_anchor_capped_not_partial(self, batch_db) -> None:
+        # end 请求值超过锚定日：执行截到锚定日，数据覆盖到末根 → 不应误报部分区间
+        batch_id = _run_window_batch(batch_db, date(2024, 1, 15), date(2030, 1, 1))
+        cells = {c["symbol"]: c for c in batch_db.get_batch_cells(batch_id)}
+        ok_cell = cells["LONG.SS"]
+        assert ok_cell["status"] == "ok"
+        assert ok_cell["end_date"] == "2024-04-30"
+        assert ok_cell["partial_window"] == 0
+
+    def test_window_skips_all_when_range_before_any_data(self, batch_db) -> None:
+        batch_id = _run_window_batch(batch_db, date(2019, 1, 1), date(2019, 12, 31))
+        run = batch_db.get_batch_run(batch_id)
+        assert run["status"] == "completed"
+        assert run["ok_cells"] == 0
+        assert run["skipped_cells"] == run["total_cells"]
+
+    def test_count_bars_in_window(self, batch_db) -> None:
+        counts = batch_db.count_bars_by_symbol(start=date(2024, 2, 1), end=date(2024, 2, 29))
+        assert counts["LONG.SS"] == 29
+        assert "SHORT.SS" not in counts  # 窗口内 0 根的标的不出现在结果里
+
+
+# ----------------------------------------------------------------------
+# 策略×年份聚合
+# ----------------------------------------------------------------------
+class TestAggregateAnnualReturns:
+    def test_median_and_excess_per_strategy_year(self) -> None:
+        rows = [
+            {
+                "strategy_name": "策略A", "strategy_id": "a",
+                "annual_returns_json": json.dumps([
+                    {"year": 2018, "return": 0.10, "benchmark_return": -0.20,
+                     "win_rate": 0.6, "sharpe": 1.0, "max_drawdown": -0.10, "trade_count": 3},
+                    {"year": 2019, "return": 0.20, "benchmark_return": 0.30, "trade_count": 2},
+                ]),
+            },
+            {
+                "strategy_name": "策略A", "strategy_id": "a",
+                "annual_returns_json": json.dumps([
+                    {"year": 2018, "return": 0.30, "benchmark_return": -0.20,
+                     "win_rate": 0.4, "sharpe": 2.0, "max_drawdown": -0.20, "trade_count": 1},
+                ]),
+            },
+            # 坏 blob 不影响其他格子
+            {"strategy_name": "策略A", "strategy_id": "a", "annual_returns_json": "not-json"},
+        ]
+        aggs = aggregate_annual_returns(rows)
+        assert len(aggs) == 2
+
+        y2018 = next(a for a in aggs if a["year"] == 2018)
+        assert y2018["n"] == 2
+        assert y2018["median_return"] == pytest.approx(0.20)
+        # 超额逐格子计算后取中位数：(0.10-(-0.20)) 与 (0.30-(-0.20)) → 0.40
+        assert y2018["median_excess"] == pytest.approx(0.40)
+        assert y2018["median_win_rate"] == pytest.approx(0.5)
+        assert y2018["median_max_drawdown"] == pytest.approx(-0.15)
+        assert y2018["trade_count"] == 4
+
+        y2019 = next(a for a in aggs if a["year"] == 2019)
+        assert y2019["n"] == 1
+        # 缺失字段的中位数为 None 而不是 0
+        assert y2019["median_win_rate"] is None
+
+    def test_empty_input(self) -> None:
+        assert aggregate_annual_returns([]) == []
+        assert aggregate_annual_returns([{"annual_returns_json": None}]) == []

@@ -4,7 +4,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -313,6 +313,7 @@ class Database:
                     start_date TEXT,
                     end_date TEXT,
                     bar_count INTEGER,
+                    partial_window INTEGER NOT NULL DEFAULT 0,
                     total_return REAL,
                     annual_return REAL,
                     max_drawdown REAL,
@@ -371,7 +372,7 @@ class Database:
         # 指标/趋势缓存记录构建时的行情内容版本（见 data_versions），
         # 用于识别「日期没变但价格口径变了」的陈旧缓存。
         cache_columns = {"data_version": "INTEGER NOT NULL DEFAULT 0"}
-        batch_cell_columns = {"avg_holding_days": "REAL"}
+        batch_cell_columns = {"avg_holding_days": "REAL", "partial_window": "INTEGER NOT NULL DEFAULT 0"}
         targets = {
             "instrument_metadata": metadata_columns,
             "indicator_daily": cache_columns,
@@ -1522,19 +1523,20 @@ class Database:
                 """INSERT OR REPLACE INTO batch_backtest_cells
                    (batch_id, symbol, strategy_id, symbol_name, strategy_name,
                     category_l1, category_l2, category_l3, asset_type,
-                    status, error, start_date, end_date, bar_count,
+                    status, error, start_date, end_date, bar_count, partial_window,
                     total_return, annual_return, max_drawdown, sharpe, sortino, calmar,
                     win_rate, profit_factor, trade_count, avg_holding_days, final_equity,
                     benchmark_total_return, benchmark_annual_return, excess_annual_return,
                     annual_returns_json, monthly_heatmap_json, trades_json,
                     skipped_buys_json, monthly_nav_json, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                 (
                     cell["batch_id"], cell["symbol"], cell["strategy_id"],
                     cell.get("symbol_name"), cell.get("strategy_name"),
                     cell.get("category_l1"), cell.get("category_l2"), cell.get("category_l3"),
                     cell.get("asset_type"), cell["status"], cell.get("error"),
                     cell.get("start_date"), cell.get("end_date"), cell.get("bar_count"),
+                    int(cell.get("partial_window", 0) or 0),
                     cell.get("total_return"), cell.get("annual_return"), cell.get("max_drawdown"),
                     cell.get("sharpe"), cell.get("sortino"), cell.get("calmar"),
                     cell.get("win_rate"), cell.get("profit_factor"), cell.get("trade_count"),
@@ -1550,7 +1552,7 @@ class Database:
     _CELL_METRIC_COLUMNS = (
         "c.batch_id, c.symbol, c.strategy_id, c.symbol_name, c.strategy_name,"
         " c.category_l1, c.category_l2, c.category_l3, c.asset_type,"
-        " c.status, c.error, c.start_date, c.end_date, c.bar_count,"
+        " c.status, c.error, c.start_date, c.end_date, c.bar_count, c.partial_window,"
         " c.total_return, c.annual_return, c.max_drawdown, c.sharpe, c.sortino, c.calmar,"
         " c.win_rate, c.profit_factor, c.trade_count, c.avg_holding_days, c.final_equity,"
         " c.benchmark_total_return, c.benchmark_annual_return, c.excess_annual_return"
@@ -1582,6 +1584,17 @@ class Database:
                 (batch_id, symbol, strategy_id),
             ).fetchone()
         return dict(row) if row else None
+
+    def get_batch_annual_blobs(self, batch_id: str) -> list[dict]:
+        """ok 格子的年度收益 blob（策略×年份聚合用，列表端点不带 blob 故单列）。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT strategy_id, strategy_name, annual_returns_json
+                   FROM batch_backtest_cells
+                   WHERE batch_id = ? AND status = 'ok' AND annual_returns_json IS NOT NULL""",
+                (batch_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def insert_batch_symbol_features(self, batch_id: str, symbol: str, features: dict) -> None:
         with self._connect() as conn:
@@ -1627,13 +1640,32 @@ class Database:
             "data_version": row["data_version"] if row else None,
         }
 
-    def count_bars_by_symbol(self, price_mode: str = "qfq") -> dict[str, int]:
-        """Bar counts per symbol (single indexed GROUP BY) — batch ETA estimates."""
+    def count_bars_by_symbol(
+        self,
+        price_mode: str = "qfq",
+        start: date | None = None,
+        end: date | None = None,
+    ) -> dict[str, int]:
+        """Bar counts per symbol (single indexed GROUP BY) — batch ETA estimates.
+
+        start/end 限定统计窗口（按交易日计数，供窗口批次 ETA 使用）。
+        time 列为 'YYYY-MM-DD HH:MM:SS' 文本，end 补到当日末尾做闭区间比较。
+        """
         table = self._market_table(price_mode)
+        clauses: list[str] = []
+        params: list[str] = []
+        if start is not None:
+            clauses.append("time >= ?")
+            params.append(start.isoformat())
+        if end is not None:
+            clauses.append("time <= ?")
+            params.append(end.isoformat() + " 23:59:59")
+        sql = f"SELECT symbol, COUNT(*) AS n FROM {table}"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " GROUP BY symbol"
         with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT symbol, COUNT(*) AS n FROM {table} GROUP BY symbol"
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return {r["symbol"]: int(r["n"]) for r in rows}
 
 

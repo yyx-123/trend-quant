@@ -207,3 +207,78 @@ class TestBatchRun:
 
     def test_progress_unknown_batch(self, client) -> None:
         assert client.get("/batch-backtest/api/progress/nope").status_code == 404
+
+
+class TestBatchWindow:
+    def test_run_with_window(self, client, seeded_db) -> None:
+        resp = client.post(
+            "/batch-backtest/api/run",
+            json={
+                "categories": ["测试"], "strategy_ids": ["sma_ok"],
+                "start_date": "2024-01-15", "end_date": "2024-03-31",
+            },
+        )
+        assert resp.status_code == 200
+        batch_id = resp.json()["batch_id"]
+        final = _wait_finish(client, batch_id)
+        assert final["status"] == "completed"
+        assert final["ok_cells"] == 1
+
+        # 自动命名带区间；cells 反映实际窗口
+        runs = client.get("/batch-backtest/api/runs").json()["runs"]
+        assert "2024-01-15~2024-03-31" in runs[0]["name"]
+        cells = client.get(f"/batch-backtest/api/runs/{batch_id}/cells").json()["cells"]
+        assert cells[0]["start_date"] == "2024-01-15"
+        assert cells[0]["end_date"] == "2024-03-31"
+        assert cells[0]["partial_window"] == 0
+
+    def test_run_rejects_bad_window(self, client, seeded_db) -> None:
+        resp = client.post(
+            "/batch-backtest/api/run",
+            json={"categories": ["测试"], "strategy_ids": ["sma_ok"], "start_date": "not-a-date"},
+        )
+        assert resp.status_code == 400
+        assert "开始日期" in resp.json()["detail"]
+
+        resp = client.post(
+            "/batch-backtest/api/run",
+            json={
+                "categories": ["测试"], "strategy_ids": ["sma_ok"],
+                "start_date": "2024-05-01", "end_date": "2024-01-01",
+            },
+        )
+        assert resp.status_code == 400
+        assert "开始日期不能晚于结束日期" in resp.json()["detail"]
+
+
+class TestAnnualAggregates:
+    def test_aggregates_after_run(self, client, seeded_db) -> None:
+        resp = client.post(
+            "/batch-backtest/api/run",
+            json={"categories": ["测试"], "strategy_ids": ["sma_ok"]},
+        )
+        assert resp.status_code == 200
+        batch_id = resp.json()["batch_id"]
+        final = _wait_finish(client, batch_id)
+        assert final["status"] == "completed"
+
+        agg_resp = client.get(f"/batch-backtest/api/runs/{batch_id}/annual-aggregates")
+        assert agg_resp.status_code == 200
+        aggs = agg_resp.json()["aggregates"]
+        # BT1.SS 120 根（2024-01-02 起）→ 单一年份 2024，n=1
+        assert len(aggs) == 1
+        agg = aggs[0]
+        assert agg["strategy"] == "策略sma_ok"
+        assert agg["year"] == 2024
+        assert agg["n"] == 1
+        # 与单格年度收益一致（中位数即唯一值）
+        detail = client.get(
+            f"/batch-backtest/api/runs/{batch_id}/cell",
+            params={"symbol": "BT1.SS", "strategy_id": "sma_ok"},
+        ).json()
+        cell_year = detail["annual_returns"][0]
+        assert agg["median_return"] == pytest.approx(cell_year["return"])
+        assert agg["median_benchmark"] == pytest.approx(cell_year["benchmark_return"])
+
+    def test_unknown_batch_404(self, client) -> None:
+        assert client.get("/batch-backtest/api/runs/nope/annual-aggregates").status_code == 404

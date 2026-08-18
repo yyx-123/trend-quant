@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field
 from data.storage import db as db_module
 from rule_backtest.batch_service import (
     BatchBacktestService,
+    aggregate_annual_returns,
     estimate_batch_seconds,
     strategy_uses_random_indicator,
 )
@@ -40,6 +42,18 @@ class BatchRunRequest(BaseModel):
     categories: list[str] = Field(default_factory=list)
     strategy_ids: list[str] = Field(default_factory=list)
     name: str = Field(default="")
+    start_date: str = Field(default="")
+    end_date: str = Field(default="")
+
+
+def _parse_window_date(value: str, field_label: str) -> date | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_label}格式非法（应为 YYYY-MM-DD）") from exc
 
 
 @router.get("", response_class=HTMLResponse)
@@ -118,6 +132,8 @@ async def run_batch_backtest(payload: BatchRunRequest) -> dict:
             categories=payload.categories,
             strategy_ids=payload.strategy_ids,
             name=payload.name,
+            start_date=_parse_window_date(payload.start_date, "开始日期"),
+            end_date=_parse_window_date(payload.end_date, "结束日期"),
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -230,6 +246,16 @@ async def get_batch_cell_detail(batch_id: str, symbol: str, strategy_id: str) ->
     if row is None:
         raise HTTPException(status_code=404, detail="格子不存在")
     return _parse_cell_blobs(row)
+
+
+@router.get("/api/runs/{batch_id}/annual-aggregates")
+async def get_batch_annual_aggregates(batch_id: str) -> dict:
+    """策略×年份聚合：ok 格子的年度收益 blob 按（策略, 年份）取中位数。"""
+    batch = db_module.get_db().get_batch_run(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    rows = db_module.get_db().get_batch_annual_blobs(batch_id)
+    return {"batch_id": batch_id, "aggregates": aggregate_annual_returns(rows)}
 
 
 @router.get("/api/runs/{batch_id}/snapshot")

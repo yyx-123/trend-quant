@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 from datetime import date, datetime
 from typing import Any
@@ -125,9 +126,18 @@ def estimate_batch_seconds(symbols: list[dict], strategy_count: int) -> float:
     return sum(estimate_cell_seconds(int(s.get("bar_count", 0))) for s in symbols) * strategy_count
 
 
-def default_batch_name(categories: list[str], strategy_count: int) -> str:
+def default_batch_name(
+    categories: list[str],
+    strategy_count: int,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> str:
     cats = "+".join(categories[:3]) + ("..." if len(categories) > 3 else "")
-    return f"{cats}×{strategy_count}策略-{date.today().isoformat()}"
+    base = f"{cats}×{strategy_count}策略"
+    if start_date is not None or end_date is not None:
+        window = f"{start_date.isoformat() if start_date else '上市'}~{end_date.isoformat() if end_date else '最新'}"
+        return f"{base}-{window}"
+    return f"{base}-{date.today().isoformat()}"
 
 
 def compute_features(
@@ -242,6 +252,85 @@ def monthly_sampled_nav(daily_nav: list[dict]) -> list[dict]:
     return list(by_month.values())
 
 
+def _partial_window_flag(bars: pd.DataFrame, start: date | None, end: date) -> int:
+    """1 = 标的数据未覆盖完整回测窗口（上市晚于窗口起点，或行情止于窗口终点前）。
+
+    跨窗口对比时这类格子的年化口径噪声更大，前端可据此过滤。用全量 bars 的
+    首末交易日判断（而非窗口内首末 bar），避免窗口终点落在非交易日时误报。
+    """
+    if bars.empty:
+        return 0
+    starts_late = start is not None and bars["time"].min() > pd.Timestamp(start)
+    ends_early = bars["time"].max() < pd.Timestamp(end)
+    return int(bool(starts_late or ends_early))
+
+
+def _median(values: list) -> float | None:
+    vals = sorted(
+        float(v) for v in values
+        if isinstance(v, (int, float)) and v is not None and math.isfinite(v)
+    )
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
+def aggregate_annual_returns(rows: list[dict]) -> list[dict]:
+    """策略×年份聚合（输入为 ok 格子的 annual_returns blob 行）。
+
+    每（策略, 年份）把各标的的年度指标取中位数 + 样本量 n。超额 = 策略年收益
+    − 基准年收益，逐格子计算后再取中位数（不是中位数之差）。输出按策略、年份
+    排序，供前端热力图直接消费。
+    """
+    by_key: dict[tuple[str, int], list[dict]] = {}
+    for row in rows:
+        strategy = str(row.get("strategy_name") or row.get("strategy_id") or "")
+        try:
+            annual = json.loads(row.get("annual_returns_json") or "[]")
+        except (ValueError, TypeError):
+            continue
+        for entry in annual or []:
+            year = entry.get("year")
+            if year is None:
+                continue
+            ret = entry.get("return")
+            bench = entry.get("benchmark_return")
+            excess = (
+                float(ret) - float(bench)
+                if ret is not None and bench is not None
+                else None
+            )
+            by_key.setdefault((strategy, int(year)), []).append(
+                {
+                    "return": ret,
+                    "benchmark_return": bench,
+                    "excess": excess,
+                    "win_rate": entry.get("win_rate"),
+                    "sharpe": entry.get("sharpe"),
+                    "max_drawdown": entry.get("max_drawdown"),
+                    "trade_count": int(entry.get("trade_count") or 0),
+                }
+            )
+    out: list[dict] = []
+    for (strategy, year), recs in sorted(by_key.items()):
+        out.append(
+            {
+                "strategy": strategy,
+                "year": year,
+                "n": len(recs),
+                "median_return": _median([r["return"] for r in recs]),
+                "median_benchmark": _median([r["benchmark_return"] for r in recs]),
+                "median_excess": _median([r["excess"] for r in recs]),
+                "median_win_rate": _median([r["win_rate"] for r in recs]),
+                "median_sharpe": _median([r["sharpe"] for r in recs]),
+                "median_max_drawdown": _median([r["max_drawdown"] for r in recs]),
+                "trade_count": sum(r["trade_count"] for r in recs),
+            }
+        )
+    return out
+
+
 class BatchBacktestService:
     def __init__(
         self,
@@ -264,15 +353,41 @@ class BatchBacktestService:
         categories: list[str],
         strategy_ids: list[str],
         name: str = "",
+        start_date: date | None = None,
+        end_date: date | None = None,
         strategy_loader: StrategyLoader | None = None,
     ) -> dict:
         """Build the batch row payload: snapshot strategies, resolve symbols,
-        anchor the data cutoff. Raises ValueError on invalid input."""
+        anchor the data cutoff. Raises ValueError on invalid input.
+
+        start_date/end_date 限定回测窗口（可选）：缺省为全生命周期（上市 ~ 锚定日）。
+        end_date 超过锚定日时被截到锚定日；引擎对窗口内信号用全历史做指标
+        warmup（resolver 基于 all_bars），窗口起点无冷启动问题。
+        """
         snapshot = build_strategy_snapshot(strategy_ids, loader=strategy_loader)
         symbols = resolve_batch_symbols(self.db, categories)
         if not symbols:
             raise ValueError("所选类目下没有可用标的")
         anchor = self.db.get_market_data_anchor()
+        anchor_day = (
+            pd.Timestamp(str(anchor["anchor_date"])).date() if anchor.get("anchor_date") else None
+        )
+        window_end = end_date or anchor_day
+        if window_end is None:
+            raise ValueError("行情库为空，无法回测")
+        if anchor_day is not None and window_end > anchor_day:
+            window_end = anchor_day
+        if start_date is not None and start_date > window_end:
+            raise ValueError("回测开始日期不能晚于结束日期")
+
+        windowed = start_date is not None or end_date is not None
+        # ETA 按窗口内 bar 数估算（窗口批次通常比全周期便宜得多）。
+        if windowed:
+            window_counts = self.db.count_bars_by_symbol(start=start_date, end=window_end)
+            eta_symbols = [{**s, "bar_count": window_counts.get(s["symbol"], 0)} for s in symbols]
+        else:
+            eta_symbols = symbols
+
         batch_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
         config = {
             "initial_capital": 100_000.0,
@@ -282,11 +397,15 @@ class BatchBacktestService:
             "lot_size": 100,
             "stock_stamp_tax_rate": 0.001,
             "min_bars": MIN_BARS,
-            "estimated_seconds": round(estimate_batch_seconds(symbols, len(snapshot))),
+            "start_date": start_date.isoformat() if start_date else None,
+            # 用户请求的原始区间（end 可能为 None = 最新）；run_batch 再解析成
+            # 实际 window_end（= end_date or 锚定日）。展示/重跑预填用原始值。
+            "end_date": end_date.isoformat() if end_date else None,
+            "estimated_seconds": round(estimate_batch_seconds(eta_symbols, len(snapshot))),
         }
         return {
             "batch_id": batch_id,
-            "name": name.strip() or default_batch_name(categories, len(snapshot)),
+            "name": name.strip() or default_batch_name(categories, len(snapshot), start_date, end_date),
             "categories_json": json.dumps(categories, ensure_ascii=False),
             "strategy_snapshot_json": json.dumps(snapshot, ensure_ascii=False),
             "config_json": json.dumps(config),
@@ -310,13 +429,18 @@ class BatchBacktestService:
         config = json.loads(batch["config_json"])
         # time 列存的是 'YYYY-MM-DD 00:00:00'，date.fromisoformat 会报错。
         anchor = pd.Timestamp(str(batch["data_anchor_date"])).date()
+        # 回测窗口（旧批次 config 无此字段 → 全生命周期，行为与之前一致）。
+        # end 存的是用户请求值，可能超过锚定日 —— 截到锚定日，与 prepare_batch 一致。
+        window_start = date.fromisoformat(config["start_date"]) if config.get("start_date") else None
+        window_end_cfg = date.fromisoformat(config["end_date"]) if config.get("end_date") else None
+        window_end = min(window_end_cfg, anchor) if window_end_cfg else anchor
         symbols = resolve_batch_symbols(self.db, categories)
 
         counts = {"done": 0, "ok": 0, "failed": 0, "skipped": 0}
         started_at = datetime.now()
         logger.info(
-            "Batch backtest started batch_id=%s symbols=%d strategies=%d anchor=%s",
-            batch_id, len(symbols), len(snapshot), anchor,
+            "Batch backtest started batch_id=%s symbols=%d strategies=%d anchor=%s window=%s~%s",
+            batch_id, len(symbols), len(snapshot), anchor, window_start, window_end,
         )
 
         try:
@@ -327,13 +451,21 @@ class BatchBacktestService:
                 self.db.update_batch_run(batch_id, current_symbol=symbol)
                 bars = self.market_store.load_history(symbol)
                 if not bars.empty:
-                    feat_bars = bars[bars["time"] <= pd.Timestamp(anchor)]
+                    end_ts = pd.Timestamp(window_end)
+                    window_mask = bars["time"] <= end_ts
+                    if window_start is not None:
+                        window_mask &= bars["time"] >= pd.Timestamp(window_start)
+                    window_bars = bars[window_mask]
+                    feat_bars = bars[bars["time"] <= end_ts]
                 else:
-                    feat_bars = bars
-                bar_count = len(feat_bars)
+                    window_bars = feat_bars = bars
+                bar_count = len(window_bars)
 
                 if bar_count < MIN_BARS:
-                    reason = "无行情数据" if bar_count == 0 else f"数据不足（{bar_count} < {MIN_BARS} 根）"
+                    if window_start is not None:
+                        reason = "窗口内无行情数据" if bar_count == 0 else f"窗口内数据不足（{bar_count} < {MIN_BARS} 根）"
+                    else:
+                        reason = "无行情数据" if bar_count == 0 else f"数据不足（{bar_count} < {MIN_BARS} 根）"
                     for s in snapshot:
                         self._write_cell(batch_id, item, s, {"status": "skipped", "error": reason, "bar_count": bar_count})
                         counts["done"] += 1
@@ -343,7 +475,7 @@ class BatchBacktestService:
 
                 if cancel_event.is_set():
                     break
-                features = compute_features(feat_bars, symbol, db=self.db, anchor=anchor)
+                features = compute_features(feat_bars, symbol, db=self.db, anchor=window_end)
                 self.db.insert_batch_symbol_features(batch_id, symbol, features)
 
                 execution = BacktestExecutionConfig(
@@ -363,8 +495,8 @@ class BatchBacktestService:
                                 strategy=s["strategy_config"],
                                 symbol=symbol,
                                 bars=bars,
-                                start_date=None,
-                                end_date=anchor,
+                                start_date=window_start,
+                                end_date=window_end,
                                 execution=execution,
                                 run_id=f"{batch_id}-{symbol}-{s['id']}",
                                 sizer=None,
@@ -372,6 +504,7 @@ class BatchBacktestService:
                         )
                         cell = extract_cell(result, monthly_sampled_nav(result.get("daily_nav") or []))
                         cell["bar_count"] = bar_count
+                        cell["partial_window"] = _partial_window_flag(bars, window_start, window_end)
                         counts["ok"] += 1
                         del result  # 大字段（daily_nav/charts/condition_trace）到此释放
                     except Exception as exc:  # 单格失败不中断批次
