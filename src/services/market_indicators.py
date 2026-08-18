@@ -57,9 +57,9 @@ def compute_trend_indicator(df: pd.DataFrame, cfg: dict) -> dict:
         "price_direction": _series(series["price_direction"]),
         "confidence": _series(series["confidence"]),
         "config": {
-            "n_short": int(cfg.get("n_short", 5)),
-            "n_mid": int(cfg.get("n_mid", 10)),
-            "n_long": int(cfg.get("n_long", 20)),
+            "n_short": int(cfg.get("n_short", 3)),
+            "n_mid": int(cfg.get("n_mid", 5)),
+            "n_long": int(cfg.get("n_long", 8)),
             "atr_period": int(cfg.get("atr_period", 20)),
         },
     }

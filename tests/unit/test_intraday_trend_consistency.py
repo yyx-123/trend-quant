@@ -65,7 +65,7 @@ def test_cached_matches_full_history(seed: int, move_pct: float) -> None:
 
     # 模拟生产环境：cache_row = 指标缓存最后一行（与全量历史同一份K线算出），
     # tail = 1 年尾部K线（此处全量即尾部）。
-    cache_row = dict(compute_indicator_frame(bars).iloc[-1])
+    cache_row = dict(compute_indicator_frame(bars, cfg).iloc[-1])
     cached = compute_intraday_trend_cached("T.SS", quote, bars.copy(), cache_row, cfg)
     assert cached.get("ok"), f"cached path failed: {cached}"
 
@@ -83,7 +83,7 @@ def test_stale_anchor_falls_back() -> None:
     quote = _quote(bars, 0.01)
     cfg = get_strategy_config()
 
-    cache_row = dict(compute_indicator_frame(bars).iloc[-1])
+    cache_row = dict(compute_indicator_frame(bars, cfg).iloc[-1])
     # 人为把锚点行改到 5 天前，模拟指标缓存滞后。
     cache_row["time"] = pd.Timestamp(bars["time"].iloc[-1]) - pd.Timedelta(days=5)
 

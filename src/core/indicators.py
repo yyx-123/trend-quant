@@ -17,9 +17,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# Bump when any formula in this module changes; indicator cache tables keyed
-# by this version are rebuilt at startup (see data/indicator_store, future P1).
-INDICATOR_FORMULA_VERSION = 1
+# Bump when any formula in this module changes (or cached-column semantics
+# change — v2: ema5/10/20 anchors renamed to ema_s/ema_m/ema_l, spans now
+# follow strategy n_short/n_mid/n_long); indicator cache tables keyed by
+# this version are rebuilt at startup (see data/indicator_store, future P1).
+INDICATOR_FORMULA_VERSION = 2
 
 
 def sma(series: pd.Series, period: int, min_periods: int | None = None) -> pd.Series:

@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "adjust": "qfq",
-    "n_short": 5,
-    "n_mid": 10,
-    "n_long": 20,
+    "n_short": 3,
+    "n_mid": 5,
+    "n_long": 8,
     "w_bias_short": 0.4,
     "w_bias_mid": 0.4,
     "w_bias_long": 0.2,

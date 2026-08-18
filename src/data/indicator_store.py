@@ -25,7 +25,7 @@ from data.storage.db import get_db
 INDICATOR_COLUMNS: tuple[str, ...] = (
     "atr", "vol_ma20", "er10",
     "sma5", "sma10", "sma20", "sma60", "sma120", "sma200",
-    "ema5", "ema10", "ema20",
+    "ema_s", "ema_m", "ema_l",
     "rsi14",
     "macd_dif", "macd_dea", "macd_hist",
     "boll_mid", "boll_up", "boll_dn",
@@ -42,8 +42,14 @@ TREND_COLUMNS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def compute_indicator_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute the indicator_daily frame for one symbol's K-line history."""
+def compute_indicator_frame(df: pd.DataFrame, trend_cfg: dict | None = None) -> pd.DataFrame:
+    """Compute the indicator_daily frame for one symbol's K-line history.
+
+    ``ema_s/ema_m/ema_l`` are the EMA recursion anchors consumed by the
+    intraday cached path; their spans follow the strategy config's
+    n_short/n_mid/n_long.
+    """
+    cfg = trend_cfg or get_strategy_config()
     close = pd.to_numeric(df["close"], errors="coerce")
     volume = pd.to_numeric(df["volume"], errors="coerce") if "volume" in df.columns else pd.Series(0.0, index=df.index)
 
@@ -68,9 +74,9 @@ def compute_indicator_frame(df: pd.DataFrame) -> pd.DataFrame:
             "sma60": core_ind.sma(close, 60),
             "sma120": core_ind.sma(close, 120),
             "sma200": core_ind.sma(close, 200),
-            "ema5": core_ind.ema(close, 5),
-            "ema10": core_ind.ema(close, 10),
-            "ema20": core_ind.ema(close, 20),
+            "ema_s": core_ind.ema(close, int(cfg.get("n_short", 3))),
+            "ema_m": core_ind.ema(close, int(cfg.get("n_mid", 5))),
+            "ema_l": core_ind.ema(close, int(cfg.get("n_long", 8))),
             "rsi14": core_ind.rsi(close, 14),
             "macd_dif": macd_out["dif"],
             "macd_dea": macd_out["dea"],
@@ -127,8 +133,11 @@ def compute_live_series(bars: pd.DataFrame, indicator: str, trend_cfg: dict | No
         out = core_ind.efficiency_ratio(close, 10)
     elif indicator.startswith("sma"):
         out = core_ind.sma(close, int(indicator[3:]))
-    elif indicator.startswith("ema"):
-        out = core_ind.ema(close, int(indicator[3:]))
+    elif indicator in ("ema_s", "ema_m", "ema_l"):
+        # EMA 递推锚点：跨度跟随策略配置的 n_short/n_mid/n_long。
+        cfg = trend_cfg or get_strategy_config()
+        key, default = {"ema_s": ("n_short", 3), "ema_m": ("n_mid", 5), "ema_l": ("n_long", 8)}[indicator]
+        out = core_ind.ema(close, int(cfg.get(key, default)))
     elif indicator == "rsi14":
         out = core_ind.rsi(close, 14)
     elif indicator in ("rsi_avg_gain", "rsi_avg_loss"):

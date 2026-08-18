@@ -121,9 +121,9 @@ def _date_only(value: object) -> str:
 
 
 def _validate_trend_config(cfg: dict) -> None:
-    n_short = int(cfg.get("n_short", 5))
-    n_mid = int(cfg.get("n_mid", 10))
-    n_long = int(cfg.get("n_long", 20))
+    n_short = int(cfg.get("n_short", 3))
+    n_mid = int(cfg.get("n_mid", 5))
+    n_long = int(cfg.get("n_long", 8))
     atr_period = int(cfg.get("atr_period", 20))
     if min(n_short, n_mid, n_long, atr_period) <= 0:
         raise HTTPException(status_code=400, detail="趋势值参数必须为正整数")

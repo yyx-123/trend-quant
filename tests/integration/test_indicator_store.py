@@ -43,7 +43,7 @@ def db(tmp_path):
 def seeded(db):
     bars = _make_bars()
     db.save_market_data("TEST.SS", bars, price_mode="qfq")
-    ind = compute_indicator_frame(bars)
+    ind = compute_indicator_frame(bars, DEFAULT_STRATEGY_CONFIG)
     trend = compute_trend_frame(bars, DEFAULT_STRATEGY_CONFIG)
     db.save_indicator_daily("TEST.SS", ind, formula_version=INDICATOR_FORMULA_VERSION)
     db.save_trend_daily("TEST.SS", trend, formula_version=TREND_FORMULA_VERSION)
@@ -78,7 +78,7 @@ class TestFallback:
         pd.testing.assert_series_equal(out, expected, check_names=False)
 
     def test_version_mismatch_falls_back(self, db, seeded) -> None:
-        db.save_indicator_daily("TEST.SS", compute_indicator_frame(seeded), formula_version=999)
+        db.save_indicator_daily("TEST.SS", compute_indicator_frame(seeded, DEFAULT_STRATEGY_CONFIG), formula_version=999)
         out = get_series("TEST.SS", "sma20", db=db)
         expected = core_ind.sma(pd.to_numeric(seeded["close"]), 20)
         expected.index = pd.to_datetime(seeded["time"])

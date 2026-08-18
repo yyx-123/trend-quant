@@ -224,7 +224,7 @@ class Database:
                     vol_ma20 REAL,
                     er10 REAL,
                     sma5 REAL, sma10 REAL, sma20 REAL, sma60 REAL, sma120 REAL, sma200 REAL,
-                    ema5 REAL, ema10 REAL, ema20 REAL,
+                    ema_s REAL, ema_m REAL, ema_l REAL,
                     rsi14 REAL,
                     macd_dif REAL, macd_dea REAL, macd_hist REAL,
                     boll_mid REAL, boll_up REAL, boll_dn REAL,
@@ -372,10 +372,18 @@ class Database:
         # 指标/趋势缓存记录构建时的行情内容版本（见 data_versions），
         # 用于识别「日期没变但价格口径变了」的陈旧缓存。
         cache_columns = {"data_version": "INTEGER NOT NULL DEFAULT 0"}
+        # EMA 递推锚点列改为跟随 n_short/n_mid/n_long 的通用命名（原 ema5/10/20
+        # 与新周期语义脱钩；旧列不再写入，存量库保留为历史遗留）。
+        indicator_columns = {
+            **cache_columns,
+            "ema_s": "REAL",
+            "ema_m": "REAL",
+            "ema_l": "REAL",
+        }
         batch_cell_columns = {"avg_holding_days": "REAL", "partial_window": "INTEGER NOT NULL DEFAULT 0"}
         targets = {
             "instrument_metadata": metadata_columns,
-            "indicator_daily": cache_columns,
+            "indicator_daily": indicator_columns,
             "trend_daily": cache_columns,
             "batch_backtest_cells": batch_cell_columns,
         }
@@ -1279,7 +1287,7 @@ class Database:
         columns = (
             "atr", "vol_ma20", "er10",
             "sma5", "sma10", "sma20", "sma60", "sma120", "sma200",
-            "ema5", "ema10", "ema20", "rsi14",
+            "ema_s", "ema_m", "ema_l", "rsi14",
             "macd_dif", "macd_dea", "macd_hist",
             "boll_mid", "boll_up", "boll_dn",
             "rsi_avg_gain", "rsi_avg_loss", "macd_ema12", "macd_ema26",
@@ -1295,7 +1303,7 @@ class Database:
                 """INSERT INTO indicator_daily
                    (symbol, time, atr, vol_ma20, er10,
                     sma5, sma10, sma20, sma60, sma120, sma200,
-                    ema5, ema10, ema20, rsi14,
+                    ema_s, ema_m, ema_l, rsi14,
                     macd_dif, macd_dea, macd_hist,
                     boll_mid, boll_up, boll_dn,
                     rsi_avg_gain, rsi_avg_loss, macd_ema12, macd_ema26,

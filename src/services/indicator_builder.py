@@ -76,7 +76,7 @@ def rebuild_symbol(symbol: str, trend_cfg: dict, db=None) -> dict:
     df = db.load_market_data(symbol)
     if df.empty:
         return {"symbol": symbol, "status": "no_data", "rows": 0}
-    ind_frame = compute_indicator_frame(df)
+    ind_frame = compute_indicator_frame(df, trend_cfg)
     trend_frame = compute_trend_frame(df, trend_cfg)
     # 记录构建时的行情内容版本：之后 qfq 若被原位重写（除权重物化），
     # _cache_fresh 能据此识别缓存已陈旧，而不是只看日期。

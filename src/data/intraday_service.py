@@ -253,11 +253,11 @@ def compute_intraday_trend_cached(
 
     Exact-equivalent to ``compute_intraday_trend_score`` on full history, but
     O(1): bias uses tail closes, slope recurses EMA from the cached
-    ``ema5/10/20`` state columns, ATR/ER/vol_ma use short tails, and the
+    ``ema_s/ema_m/ema_l`` state columns, ATR/ER/vol_ma use short tails, and the
     ATR anchor is the cached yesterday value (fixed_atr semantics).
 
     Returns the same dict shape as ``compute_intraday_trend_score``.
-    ``cache_row`` must contain atr/ema5/ema10/ema20; when None the caller
+    ``cache_row`` must contain atr/ema_s/ema_m/ema_l; when None the caller
     should fall back to the full-history path.
     """
     if tail_bars.empty or cache_row is None:
@@ -289,9 +289,9 @@ def compute_intraday_trend_cached(
     if fixed_atr <= 0:
         return {"ok": False, "reason": "invalid_atr", "is_intraday": True}
 
-    n_short = int(trend_config.get("n_short", 5))
-    n_mid = int(trend_config.get("n_mid", 10))
-    n_long = int(trend_config.get("n_long", 20))
+    n_short = int(trend_config.get("n_short", 3))
+    n_mid = int(trend_config.get("n_mid", 5))
+    n_long = int(trend_config.get("n_long", 8))
     vol_ma_period = int(trend_config.get("vol_ma_period", 20))
     er_period = int(trend_config.get("er_period", 10))
 
@@ -303,7 +303,7 @@ def compute_intraday_trend_cached(
 
     bias_parts: list[float] = []
     slope_parts: list[float] = []
-    for n, ema_col in ((n_short, "ema5"), (n_mid, "ema10"), (n_long, "ema20")):
+    for n, ema_col in ((n_short, "ema_s"), (n_mid, "ema_m"), (n_long, "ema_l")):
         ma_n = float(pd.Series(closes[-n:]).mean())
         bias_parts.append(safe_float((synth_close - ma_n) / fixed_atr))
 
@@ -406,7 +406,7 @@ def compute_intraday_trend_score(
     additional key ``is_intraday: True``.
     """
     min_bars = max(
-        int(trend_config.get("n_long", 20)),
+        int(trend_config.get("n_long", 8)),
         int(trend_config.get("atr_period", 20)),
     ) + 2
 

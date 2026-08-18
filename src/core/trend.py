@@ -51,7 +51,7 @@ def safe_float(value: object, default: float = 0.0) -> float:
 
 
 def _min_bars(cfg: dict) -> int:
-    n_long = int(cfg.get("n_long", 20))
+    n_long = int(cfg.get("n_long", 8))
     atr_period = int(cfg.get("atr_period", 20))
     return max(n_long, atr_period) + 2
 
@@ -73,9 +73,9 @@ def calculate_trend_score_series(
     ``fixed_atr`` / ``fixed_volume`` replace the ATR / volume of the LAST
     bar only (intraday synthetic-bar support).
     """
-    n_short = int(cfg.get("n_short", 5))
-    n_mid = int(cfg.get("n_mid", 10))
-    n_long = int(cfg.get("n_long", 20))
+    n_short = int(cfg.get("n_short", 3))
+    n_mid = int(cfg.get("n_mid", 5))
+    n_long = int(cfg.get("n_long", 8))
     atr_period = int(cfg.get("atr_period", 20))
     min_bars = _min_bars(cfg)
 
