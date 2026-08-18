@@ -70,7 +70,7 @@ def _make_quote(price: float = 12.0) -> dict:
 
 def _default_cfg() -> dict:
     return {
-        "n_short": 5, "n_mid": 10, "n_long": 20,
+        "n_short": 3, "n_mid": 5, "n_long": 8,
         "atr_period": 20, "vol_ma_period": 20, "er_period": 10,
         "w_bias_short": 0.4, "w_bias_mid": 0.4, "w_bias_long": 0.2,
         "w_slope_short": 0.4, "w_slope_mid": 0.4, "w_slope_long": 0.2,
@@ -381,12 +381,12 @@ class TestBuildIntradayDashboard:
         ]
         for inst in instruments:
             assert inst.get("macd_phase") in ("golden", "dead", None)
-            assert 0 < len(inst.get("kline") or []) <= 20
+            assert 0 < len(inst.get("kline") or []) <= 30
             # 缓存路径下 trend_history（成交额加权 MA5 序列）也必须非空。
             assert len(inst.get("trend_history") or []) > 0
 
     def test_instrument_rows_carry_macd_phase_and_kline(self, fake_deps) -> None:
-        """标的行带 MACD 相位与近10日K线（末根=盘中实时合成K线）；类目行为占位。"""
+        """标的行带 MACD 相位与近30日K线（末根=盘中实时合成K线）；类目行为占位。"""
         ds, db, cfg = fake_deps
         from data.intraday_service import build_intraday_dashboard
 
@@ -411,7 +411,7 @@ class TestBuildIntradayDashboard:
             for key in ("macd_phase_days", "macd_phase_change_pct", "macd_phase_signal_date"):
                 assert key in inst, f"Missing key: {key}"
             kline = inst.get("kline") or []
-            assert 0 < len(kline) <= 20
+            assert 0 < len(kline) <= 30
             assert len(inst.get("kline_ma5") or []) == len(kline)
             # 当日K线未落库 → 末根为实时合成K线，close = 实时价。
             assert kline[-1]["c"] == pytest.approx(quotes[inst["symbol"]]["price"])

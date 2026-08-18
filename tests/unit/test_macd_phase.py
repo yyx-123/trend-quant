@@ -121,18 +121,18 @@ class TestKlineMini:
             })
         return pd.DataFrame(rows)
 
-    def test_returns_last_twenty_with_aligned_ma5(self) -> None:
-        bars = self._bars(24)
+    def test_returns_last_thirty_with_aligned_ma5(self) -> None:
+        bars = self._bars(34)
         payload = kline_mini(bars)
-        assert len(payload["kline"]) == 20
-        assert len(payload["kline_ma5"]) == 20
-        # 窗口从第 5 根（index 4）开始：close = 104 … 123
+        assert len(payload["kline"]) == 30
+        assert len(payload["kline_ma5"]) == 30
+        # 窗口从第 5 根（index 4）开始：close = 104 … 133
         assert payload["kline"][0]["c"] == 104.0
-        assert payload["kline"][-1]["c"] == 123.0
+        assert payload["kline"][-1]["c"] == 133.0
         # 前 4 根 MA5 不足窗口 → None；第 5 根起有值。
         assert payload["kline_ma5"][:4] == [None, None, None, None]
         assert payload["kline_ma5"][4] == pytest.approx((104 + 105 + 106 + 107 + 108) / 5)
-        assert payload["kline_ma5"][-1] == pytest.approx((119 + 120 + 121 + 122 + 123) / 5)
+        assert payload["kline_ma5"][-1] == pytest.approx((129 + 130 + 131 + 132 + 133) / 5)
 
     def test_fewer_than_count_bars_returned_as_is(self) -> None:
         payload = kline_mini(self._bars(6))
