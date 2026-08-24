@@ -1,7 +1,7 @@
 # 线上执行手册：申万行业分类 + ETF 前十大重仓股（2026-08-24）
 
 目标：把本地已完成的功能与数据同步到线上服务器（Ubuntu + systemd + nginx，
-代码 `/opt/trend-quant`，服务 `trend-quant`）。
+代码 `/srv/trend-quant`，服务 `trend-quant`）。
 
 **核心思路：服务器不需要 tushare，也不需要重新抓数据** —— 行业分类
 （5552 只）与 ETF 重仓快照（161 只 ETF）已在本地抓完，导出种子 SQL 直接
@@ -22,7 +22,7 @@ git add -A && git commit && git push   # 由 ZCode 执行或手动
 
 ```bash
 ssh root@<服务器IP>
-cd /opt/trend-quant && git pull
+cd /srv/trend-quant && git pull
 source .venv/bin/activate && pip install -e .   # pyproject 有变动，装一次保险
 ```
 
@@ -35,7 +35,7 @@ source .venv/bin/activate && pip install -e .   # pyproject 有变动，装一�
 ```bash
 # 种子文件已生成：scripts/temp/sw2021_seed.sql（5552 行业 + 1604 重仓 + 申万树）
 # 若之后数据有更新，先重跑：.venv/Scripts/python scripts/export_industry_seed.py
-scp scripts/temp/sw2021_seed.sql root@<服务器IP>:/opt/trend-quant/scripts/temp/
+scp scripts/temp/sw2021_seed.sql root@<服务器IP>:/srv/trend-quant/scripts/temp/
 ```
 
 ## 第 3 步：重启服务建表 → 导入种子 → 验证
@@ -46,11 +46,17 @@ scp scripts/temp/sw2021_seed.sql root@<服务器IP>:/opt/trend-quant/scripts/tem
 systemctl restart trend-quant && sleep 5
 
 # 导入（几秒完成；WAL 模式下服务在跑也可导入）
-sqlite3 /opt/trend-quant/data/trend_quant.db < /opt/trend-quant/scripts/temp/sw2021_seed.sql
-# 服务器没装 sqlite3 CLI 的话：apt-get install -y sqlite3，或用 .venv 的 python 执行
+sqlite3 /srv/trend-quant/data/trend_quant.db < /srv/trend-quant/scripts/temp/sw2021_seed.sql
+# 服务器没装 sqlite3 CLI 时用 .venv 的 python 导入（免装包）：
+/srv/trend-quant/.venv/bin/python -c "
+import sqlite3, pathlib
+db = sqlite3.connect('/srv/trend-quant/data/trend_quant.db')
+db.executescript(pathlib.Path('/srv/trend-quant/scripts/temp/sw2021_seed.sql').read_text(encoding='utf-8'))
+print('import ok')
+"
 
-# 验证（应输出 5552 和 161）
-sqlite3 /opt/trend-quant/data/trend_quant.db \
+# 验证（应输出 5552 和 193；2026-08-24 晚修正版种子为 1943 行重仓含软失效行）
+sqlite3 /srv/trend-quant/data/trend_quant.db \
   "SELECT COUNT(*) FROM stock_industry; SELECT COUNT(DISTINCT etf_symbol) FROM etf_constituents WHERE is_current=1;"
 ```
 
@@ -59,7 +65,7 @@ sqlite3 /opt/trend-quant/data/trend_quant.db \
 ## 第 4 步：存量类目迁移（三级树重建）
 
 ```bash
-cd /opt/trend-quant
+cd /srv/trend-quant
 # 4.1 dry-run：看命中率与「旧类目 → 新类目」对照，不写库
 .venv/bin/python scripts/migrate_category_sw2021.py --dry-run
 
@@ -100,7 +106,7 @@ query（如 `style.css?v=20260824`）后重启。
 
 ```bash
 systemctl stop trend-quant
-cp /opt/trend-quant/data/backups/<迁移前备份>.db /opt/trend-quant/data/trend_quant.db
+cp /srv/trend-quant/data/backups/<迁移前备份>.db /srv/trend-quant/data/trend_quant.db
 systemctl start trend-quant
 ```
 
