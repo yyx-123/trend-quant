@@ -12,7 +12,7 @@ import logging
 import threading
 from datetime import date
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -58,10 +58,13 @@ def _parse_window_date(value: str, field_label: str) -> date | None:
 
 @router.get("", response_class=HTMLResponse)
 async def batch_backtest_page(request: Request) -> HTMLResponse:
+    # no-cache：页面内联了全部交互 JS，部署修复后必须让浏览器重新校验，
+    # 否则旧脚本（无超时/无防重的版本）可能被缓存继续用。
     return templates.TemplateResponse(
         name="batch_backtest.html",
         request=request,
         context={"title": "批量回测"},
+        headers={"Cache-Control": "no-cache"},
     )
 
 
@@ -230,10 +233,15 @@ def _parse_cell_blobs(row: dict) -> dict:
 
 
 @router.get("/api/runs/{batch_id}/cells")
-async def get_batch_cells(batch_id: str) -> dict:
+async def get_batch_cells(batch_id: str, response: Response) -> dict:
     batch = db_module.get_db().get_batch_run(batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="批次不存在")
+    # 已结束批次的格子不可变（重跑会产生新批次号），允许浏览器缓存这份数 MB 的
+    # 响应，避免弱网环境下每次载入都重传；运行中的批次结果仍在增长，禁止缓存。
+    response.headers["Cache-Control"] = (
+        "no-store" if batch["status"] == "running" else "private, max-age=3600"
+    )
     return {
         "batch": batch,
         "cells": db_module.get_db().get_batch_cells(batch_id),

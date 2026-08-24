@@ -4441,6 +4441,13 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   padding: 24px;
 }
 
+/* author display:flex 会覆盖 hidden 属性的 UA display:none，
+   必须显式补 [hidden] 规则（其它弹窗均有此兜底，此处漏了会导致
+   弹窗永远罩住全屏：关不掉、页面所有点击被拦截） */
+.batch-modal[hidden] {
+  display: none;
+}
+
 .batch-modal-card {
   background: var(--panel);
   border: 1px solid var(--line);

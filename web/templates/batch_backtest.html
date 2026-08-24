@@ -249,6 +249,29 @@
 (function () {
   'use strict';
 
+  // 远端排障：浏览器端未捕获的 JS 错误直接显示在页面顶部红条。
+  // 前端一旦无声抛错，用户只能看到「卡死」而服务端零日志——
+  // 红条截图即可定位问题。
+  function showClientError(msg) {
+    var bar = document.getElementById('bbClientErrorBar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'bbClientErrorBar';
+      bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+        'background:#b00020;color:#fff;padding:8px 12px;font-size:13px;line-height:1.5;' +
+        'white-space:pre-wrap;max-height:40vh;overflow:auto;';
+      (document.body || document.documentElement).appendChild(bar);
+    }
+    bar.textContent = '页面脚本出错（请截图反馈）：' + msg;
+  }
+  window.addEventListener('error', function (e) {
+    showClientError((e.message || '未知脚本错误') + (e.lineno ? '（第 ' + e.lineno + ' 行）' : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    showClientError('异步错误：' + (r && (r.message || r.name) ? (r.message || r.name) : String(r)));
+  });
+
   var state = {
     meta: null,
     categories: new Set(),
@@ -631,11 +654,34 @@
   }
 
   // ── 结果加载与 Tab 切换 ──────────────────────────────────
+  // 结果集载入股：数千格子的响应有数 MB，弱网/代理下传输可能拖上几十秒。
+  // 无防重时连点会叠多个大请求互相排队，把整会话拖到「像服务卡死」——
+  // 这里做防重 + 中止 + 30s 超时，并给出可见的加载/失败提示。
+  var cellsLoad = null;
   function loadBatch(batchId) {
-    fetch('/batch-backtest/api/runs/' + encodeURIComponent(batchId) + '/cells')
+    if (cellsLoad && cellsLoad.batchId === batchId) return;
+    if (cellsLoad) cellsLoad.abort();
+    el('bbResultSection').hidden = false;
+    el('bbResultTitle').textContent = '批次结果载入中…';
+    el('bbResultMeta').textContent = '结果集较大，弱网可能需数十秒；超过 30 秒自动中止，可重新点击载入。';
+    // 老浏览器/旧 webview 可能没有 AbortController：降级为普通 fetch（无中止），
+    // 总比 new AbortController() 抛错把「载入中…」永远挂死强。
+    var ticket = { batchId: batchId, timer: 0, abort: function () {} };
+    var fetchOpts = {};
+    if (typeof AbortController === 'function') {
+      var ctrl = new AbortController();
+      fetchOpts.signal = ctrl.signal;
+      ticket.abort = function () { ctrl.abort(); };
+      ticket.timer = setTimeout(function () { ctrl.abort(); }, 30000);
+    }
+    cellsLoad = ticket;
+    fetch('/batch-backtest/api/runs/' + encodeURIComponent(batchId) + '/cells', fetchOpts)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (!data) return;
+        clearTimeout(ticket.timer);
+        if (cellsLoad !== ticket) return; // 已被更新的请求取代
+        cellsLoad = null;
+        if (!data) { el('bbResultMeta').textContent = '载入失败，请重新点击批次重试。'; return; }
         state.currentBatchId = batchId;
         state.currentBatch = data.batch;
         state.cells = data.cells || [];
@@ -654,6 +700,15 @@
         el('bbFilterFullWindow').parentElement.hidden = !state.batchWindowed;
         initFilters();
         renderActiveTab();
+      })
+      .catch(function (err) {
+        clearTimeout(ticket.timer);
+        if (cellsLoad !== ticket) return; // 已被更新的请求取代
+        cellsLoad = null;
+        el('bbResultMeta').textContent =
+          err && err.name === 'AbortError'
+            ? '载入超时（30 秒），请检查网络后重新点击批次重试。'
+            : '载入失败，请重新点击批次重试。';
       });
   }
 
@@ -1170,14 +1225,29 @@
       cell.symbol + ' ' + (cell.symbol_name || '') + ' × ' + (cell.strategy_name || cell.strategy_id);
     el('bbCellMeta').textContent = '加载中…';
     el('bbCellAnnualBody').innerHTML = '';
+    // 30s 超时兜底：弱网/代理下请求悬挂时给出可读的失败态，而不是永远「加载中…」。
+    // 老浏览器无 AbortController 时降级为普通 fetch（无中止）。
+    var fetchOpts = {};
+    var timer = 0;
+    if (typeof AbortController === 'function') {
+      var ctrl = new AbortController();
+      fetchOpts.signal = ctrl.signal;
+      timer = setTimeout(function () { ctrl.abort(); }, 30000);
+    }
     fetch('/batch-backtest/api/runs/' + encodeURIComponent(state.currentBatchId) + '/cell' +
-      '?symbol=' + encodeURIComponent(cell.symbol) + '&strategy_id=' + encodeURIComponent(cell.strategy_id))
+      '?symbol=' + encodeURIComponent(cell.symbol) + '&strategy_id=' + encodeURIComponent(cell.strategy_id),
+      fetchOpts)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
+        clearTimeout(timer);
         if (!d) { el('bbCellMeta').textContent = '格子明细加载失败'; return; }
         renderCellDetail(d);
       })
-      .catch(function () { el('bbCellMeta').textContent = '格子明细加载失败'; });
+      .catch(function (err) {
+        clearTimeout(timer);
+        el('bbCellMeta').textContent =
+          err && err.name === 'AbortError' ? '格子明细加载超时（30 秒），请关闭后重试' : '格子明细加载失败';
+      });
   }
 
   function renderCellDetail(d) {
