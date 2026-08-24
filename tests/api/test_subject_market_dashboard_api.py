@@ -76,3 +76,43 @@ def test_refresh_status_shape(client):
     data = resp.json()
     assert data["running"] is False
     assert "snapshot_ts" in data
+
+
+def test_dashboard_overlays_login_user_holdings(client, test_db):
+    """持仓金额列：快照 payload 上叠加当前登录用户的持仓（快照最新价 × 份数）。"""
+    snapshot_payload = {
+        "as_of": SNAPSHOT_AS_OF,
+        "is_intraday": True,
+        "groups": [
+            {
+                "category_l1": "ETF",
+                "items": [
+                    {
+                        "category_l2": "宽基",
+                        "children": [
+                            {
+                                "category_l3": "大盘",
+                                "children": [
+                                    {"symbol": "510300.SS", "name": "沪深300", "kline": [{"c": 5.0}]},
+                                    {"symbol": "510050.SS", "name": "上证50", "kline": [{"c": 2.5}]},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    test_db.save_dashboard_snapshot("intraday", SNAPSHOT_AS_OF, snapshot_payload)
+    # client fixture 自动登录的用户是 tester
+    tester = test_db.get_user_by_username("tester")
+    test_db.create_manual_trade(tester["id"], "510300.SS", "2026-08-01", 4.0, 1000)
+
+    resp = client.get("/subject-market/api/dashboard")
+    assert resp.status_code == 200
+    children = resp.json()["groups"][0]["items"][0]["children"][0]["children"]
+    held = next(c for c in children if c["symbol"] == "510300.SS")
+    other = next(c for c in children if c["symbol"] == "510050.SS")
+    assert held["holding_value"] == 5000.0  # 快照最新价 5.0 × 1000 份
+    assert held["holding_weight"] == 100.0
+    assert "holding_value" not in other

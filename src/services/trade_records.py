@@ -1,7 +1,11 @@
 """手工交易记录 — 用户凭据校验、交易录入 / 清仓 / 列表聚合。
 
-鉴权为极简无状态方案：每个请求携带 username + password，逐次查 users
-表校验（密码明文存储，内部小工具口径）。每个用户只能查看自己的交易
+鉴权分两路（2026-08 登录墙改造）：
+- Web：全站登录墙签发 session cookie，路由层解析出 user 后直接传入本模块
+  的 create/close/list（不再逐请求带密码）；
+- MCP 工具：仍以 username+password 逐次调 ``authenticate`` 换取 user。
+
+密码 pbkdf2 哈希存储（历史明文由 db 层迁移）。每个用户只能查看自己的交易
 记录；admin 保留清仓任意记录的权限。
 
 持仓与止损指标完全复用 ``services/manual_trade.compute_manual_trade``
@@ -18,7 +22,7 @@ import pandas as pd
 from core.display import load_instrument_name_map
 from core.symbols import normalize_symbol
 from core.trend import safe_float
-from data.storage.db import get_db
+from data.storage.db import get_db, verify_password
 from services import stop_loss as sl
 from services.manual_trade import compute_manual_trade
 
@@ -32,6 +36,7 @@ __all__ = [
     "create_trade",
     "close_trade",
     "list_trades",
+    "symbol_annotations",
 ]
 
 
@@ -51,10 +56,14 @@ class TradeRecordError(ValueError):
 # 凭据与用户
 # ------------------------------------------------------------------
 def authenticate(username: str, password: str, db=None) -> dict:
-    """校验用户名 + 密码，返回 ``{id, username, is_admin}``；失败抛 TradeAuthError。"""
+    """校验用户名 + 密码，返回 ``{id, username, is_admin}``；失败抛 TradeAuthError。
+
+    调用方：登录接口（签发 session）与 MCP 工具（逐次鉴权）。Web 登录墙内部
+    请求不经过这里——session 解析由 ``services.auth`` 完成。
+    """
     db = db or get_db()
     user = db.get_user_by_username(str(username))
-    if user is None or user["password"] != str(password):
+    if user is None or not verify_password(user["password"], str(password)):
         raise TradeAuthError("用户名或密码错误")
     return {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
 
@@ -63,8 +72,7 @@ def authenticate(username: str, password: str, db=None) -> dict:
 # 交易录入 / 清仓
 # ------------------------------------------------------------------
 def create_trade(
-    username: str,
-    password: str,
+    user: dict,
     *,
     symbol: str,
     buy_date: str,
@@ -73,7 +81,6 @@ def create_trade(
     db=None,
 ) -> dict:
     """录入一笔交易。买入价复用 ``compute_stop_loss`` 的当日区间校验。"""
-    user = authenticate(username, password, db=db)
     db = db or get_db()
     shares = float(shares)
     if shares <= 0:
@@ -102,8 +109,7 @@ def _validate_price_in_day_range(df: pd.DataFrame, date_str: str, price: float, 
 
 
 def close_trade(
-    username: str,
-    password: str,
+    user: dict,
     *,
     trade_id: int,
     sell_date: str,
@@ -111,7 +117,6 @@ def close_trade(
     db=None,
 ) -> dict:
     """清仓一笔交易（全仓清出）。本人或 admin 可操作。"""
-    user = authenticate(username, password, db=db)
     db = db or get_db()
     trade = db.get_manual_trade(int(trade_id))
     if trade is None:
@@ -197,8 +202,7 @@ def _closed_item(row: dict, result: dict, name_map: dict[str, str]) -> dict:
 
 
 def list_trades(
-    username: str,
-    password: str,
+    user: dict,
     db=None,
     intraday: bool = True,
     stop_mode: str | None = None,
@@ -209,7 +213,6 @@ def list_trades(
     按清仓日倒序。单笔计算失败不拖垮整个列表，以 ``error`` 字段返回。
     ``stop_mode`` 透传给止损计算（"tight" 紧止损 / None|"loose" 松止损）。
     """
-    user = authenticate(username, password, db=db)
     db = db or get_db()
     rows = db.list_manual_trades(user["id"])
     name_map = load_instrument_name_map()  # DB 不可用时返回 {}（单测环境）
@@ -271,3 +274,73 @@ def list_trades(
         "user": user,
         "trades": open_items + closed_items,
     }
+
+
+# ------------------------------------------------------------------
+# 标的查看页持仓标注
+# ------------------------------------------------------------------
+# 标注所需的止损字段子集（前端据此画止损线 + 悬停说明文案）
+_ANNOTATION_STOP_FIELDS = (
+    "hard_stop_price",
+    "hard_stop_atr_mul",
+    "atr_at_buy",
+    "chandelier_stop_price",
+    "chandelier_stop_atr_mul",
+    "current_atr",
+    "highest_since_buy",
+    "highest_since_buy_date",
+)
+
+
+def symbol_annotations(user: dict, symbol: str, db=None) -> dict:
+    """当前用户在某标的上的交易标注数据：买卖点 + 未平仓单双档止损。
+
+    止损按紧（tight）/ 松（loose）两档各算一次供前端切换；盘中合成K线
+    只拉取一次并复用（tickflow 实时报价 10/min 限流防护），与列表接口
+    同口径。单笔计算失败不拖垮整体，该笔仅返回买卖点（无 stops）。
+    """
+    db = db or get_db()
+    norm = normalize_symbol(symbol)
+    rows = [r for r in db.list_manual_trades(user["id"]) if r["symbol"] == norm]
+
+    intraday_bar = None
+    if any(r["status"] == "open" for r in rows):
+        df = db.load_market_data(norm)
+        if not df.empty:
+            intraday_bar = sl.fetch_intraday_bars({norm: df}).get(norm)
+
+    trades: list[dict] = []
+    for row in rows:
+        item: dict = {
+            "id": row["id"],
+            "status": row["status"],
+            "buy_date": row["buy_date"],
+            "buy_price": row["buy_price"],
+            "sell_date": row["sell_date"],
+            "sell_price": row["sell_price"],
+            "shares": row["shares"],
+        }
+        if row["status"] == "open":
+            stops: dict[str, dict] = {}
+            for mode in ("tight", "loose"):
+                try:
+                    result = compute_manual_trade(
+                        norm,
+                        row["buy_date"],
+                        row["buy_price"],
+                        db=db,
+                        intraday=True,
+                        intraday_bar=intraday_bar,
+                        stop_mode=mode,
+                    )
+                    stops[mode] = {
+                        k: result["stops"].get(k) for k in _ANNOTATION_STOP_FIELDS
+                    }
+                except Exception as exc:
+                    logger.warning(
+                        "annotation stops failed (trade %s, %s): %s", row["id"], mode, exc
+                    )
+            if stops:
+                item["stops"] = stops
+        trades.append(item)
+    return {"symbol": norm, "trades": trades}

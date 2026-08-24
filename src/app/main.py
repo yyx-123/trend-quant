@@ -5,6 +5,7 @@ from datetime import time
 import os
 from pathlib import Path
 import threading
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -19,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.routers import (
+    auth,
     batch_backtest,
     instruments,
     manual_trade,
@@ -34,6 +36,7 @@ from core.settings import load_settings
 # Import the module (not the function) so tests can monkeypatch init_db
 # and have the lifespan use the patched test double.
 from data.storage import db as db_module
+from services import auth as auth_service
 
 settings = load_settings()
 setup_logging(settings.logging.level)
@@ -273,6 +276,87 @@ class AssetVersionMiddleware:
         await self.app(scope, receive, send)
 
 
+class AuthWallMiddleware:
+    """全站登录墙：无有效 session cookie 的请求一律拦截。
+
+    - 页面请求（GET/HEAD 且路径不含 /api/）→ 303 跳 /login?next=<原地址>
+    - API 请求 → 401 JSON
+    - 豁免：/login、/api/auth/login、/api/auth/logout、/static、/favicon.ico、/mcp
+      （MCP 为机对机通道，工具调用自带 username/password 逐次鉴权）
+
+    纯 ASGI 实现（同 AssetVersionMiddleware 的原因）。有效 session 写入
+    ``scope["state"]["user"]`` 供路由依赖与模板使用；滑动续期触发时在
+    响应头追加 Set-Cookie 同步浏览器侧有效期。
+    """
+
+    _EXEMPT_PATHS = {"/login", "/api/auth/login", "/api/auth/logout", "/favicon.ico"}
+    _EXEMPT_PREFIXES = ("/static", "/mcp")
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    def _read_token(scope) -> str | None:
+        for name, value in scope.get("headers", []):
+            if name.lower() != b"cookie":
+                continue
+            for part in value.decode("latin-1").split(";"):
+                key, _, val = part.strip().partition("=")
+                if key == auth_service.SESSION_COOKIE:
+                    return val
+        return None
+
+    @staticmethod
+    def _is_page_request(scope) -> bool:
+        return scope.get("method") in ("GET", "HEAD") and "/api/" not in scope.get("path", "")
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        if path in self._EXEMPT_PATHS or path.startswith(self._EXEMPT_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+
+        token = self._read_token(scope)
+        user, renewed = auth_service.resolve_session(token)
+        if user is None:
+            if self._is_page_request(scope):
+                query = scope.get("query_string", b"").decode("latin-1")
+                target = path + ("?" + query if query else "")
+                response = RedirectResponse(
+                    url="/login?next=" + quote(target, safe=""), status_code=303
+                )
+            else:
+                response = JSONResponse(
+                    status_code=401, content={"detail": "未登录或登录已过期"}
+                )
+            await response(scope, receive, send)
+            return
+
+        scope.setdefault("state", {})["user"] = user
+        if not renewed:
+            await self.app(scope, receive, send)
+            return
+
+        # 滑动续期：服务端已顺延 expires_at，响应里同步重发 cookie
+        set_cookie = (
+            f"{auth_service.SESSION_COOKIE}={token}; HttpOnly; Path=/; "
+            f"Max-Age={int(auth_service.SESSION_TTL.total_seconds())}; SameSite=lax"
+        ).encode("latin-1")
+
+        async def send_with_renewed_cookie(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"set-cookie", set_cookie))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_renewed_cookie)
+
+
+app.add_middleware(AuthWallMiddleware)
 app.add_middleware(AssetVersionMiddleware)
 # Compress larger JSON/HTML bodies (backtest results, market series). The
 # app sits directly behind the frp relay with no nginx in between, so
@@ -290,6 +374,7 @@ app.include_router(market_view.router)
 app.include_router(subject_market.router)
 app.include_router(manual_trade.router)
 app.include_router(batch_backtest.router)
+app.include_router(auth.router)
 
 
 @app.get("/", include_in_schema=False)

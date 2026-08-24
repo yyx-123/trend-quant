@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ title }} | 趋势 ETF 系统</title>
-  <link rel="stylesheet" href="/static/style.css?v={{ request.app.state.asset_version|default('1', true) if request is defined else '1' }}-20260815-sm-16">
+  <link rel="stylesheet" href="/static/style.css?v={{ request.app.state.asset_version|default('1', true) if request is defined else '1' }}-20260824-auth">
 </head>
 <body>
   {% set path = request.url.path if request is defined else '' %}
@@ -23,6 +23,12 @@
         <a href="/subject-market" class="{% if path.startswith('/subject-market') %}is-active{% endif %}">标的看板</a>
         <a href="/instruments" class="{% if path.startswith('/instruments') %}is-active{% endif %}">标的管理</a>
         <a href="/manual-trade" class="{% if path.startswith('/manual-trade') %}is-active{% endif %}">手工交易</a>
+        {% if request.state.user %}
+        <span class="site-user" title="当前登录用户">
+          <span class="site-user__name">{{ request.state.user.username }}{% if request.state.user.is_admin %}·admin{% endif %}</span>
+          <a class="site-user__logout" href="/api/auth/logout">退出</a>
+        </span>
+        {% endif %}
       </nav>
     </div>
   </header>
@@ -57,6 +63,11 @@
     const STORAGE_KEY = 'du_last_seen_ts';
 
     let lastSeenTs = localStorage.getItem(STORAGE_KEY) || '';
+
+    // session 过期（401）时统一跳回登录墙，避免后台轮询无限刷 401
+    function redirectToLogin() {
+      location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+    }
 
     function showBar(status) {
       if (!status || !status.completed) return;
@@ -105,7 +116,10 @@
       const text = textEl.textContent;
       // Store current state as seen.
       fetch('/instruments/api/daily-update/status')
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+          if (r.status === 401) { redirectToLogin(); return null; }
+          return r.json();
+        })
         .then(function(s) {
           if (s && s.ts) {
             localStorage.setItem(STORAGE_KEY, s.ts);
@@ -117,7 +131,10 @@
 
     function poll() {
       fetch('/instruments/api/daily-update/status')
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+          if (r.status === 401) { redirectToLogin(); return null; }
+          return r.json();
+        })
         .then(function(status) {
           if (status && status.completed && status.ts && status.ts !== lastSeenTs) {
             showBar(status);

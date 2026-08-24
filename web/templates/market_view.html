@@ -56,6 +56,12 @@
   <div class="viz-panel market-chart-panel">
     <div class="market-chart-head">
       <h3 id="mvChartTitle">日 K</h3>
+      <div class="mt-seg" id="mvStopModeToggle" hidden
+        title="我的持仓止损线：紧止损 硬1×/吊灯2×ATR；松止损 硬1.5×/吊灯2.5×ATR。止损线取硬止损与吊灯止损中较高者">
+        <span class="mt-seg-label">我的止损</span>
+        <button type="button" data-mode="tight" class="is-active">紧止损</button>
+        <button type="button" data-mode="loose">松止损</button>
+      </div>
       <div id="mvRangeMeta" class="market-range-meta"></div>
     </div>
     <div id="mvBacktestSummary" class="market-backtest-summary" hidden></div>
@@ -234,6 +240,7 @@
   const trendAtrEl = document.getElementById('mvTrendAtr');
   const rsiControlsEl = document.getElementById('mvRsiControls');
   const rsiPeriodEl = document.getElementById('mvRsiPeriod');
+  const stopModeToggleEl = document.getElementById('mvStopModeToggle');
 
   let priceChart = null;
   let trendChart = null;
@@ -272,6 +279,10 @@
   let currentZoom = null;
   let currentPayload = null;
   let currentBacktest = null;
+  // 我的持仓标注：当前标的上本人的交易记录（买卖点 + 双档止损），
+  // 来自 /market-view/api/my-trades；null 表示无持仓或加载失败（不渲染标注）
+  let myTrades = null;
+  let myStopMode = 'tight';  // 止损线档位：tight 紧止损（默认）/ loose 松止损
   let allMultiKline = [];        // [{strategy_id, strategy_name, sizer_id, sizer_name, buy_points, sell_points, skipped_buy_points}]
   let activeResultKey = null;    // which 策略×仓位 combo's markers are shown on chart
   // Degraded sizing flags — synced from /api/meta (ruleMeta.sizing) in
@@ -652,6 +663,131 @@
     };
   }
 
+  // ── 我的持仓标注（登录用户在该标的上的买卖点 + 止损线）─────────────────
+  // 精确价格口径：买卖点散点锚在 [日期, 实际成交价] 坐标上（不是挂在K线
+  // 上方/下方的示意点），止损线 y 值为实际止损价，任何缩放级别下位置不变。
+  function fmtExact(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? String(n) : '-';
+  }
+
+  // 止损线悬停文案：说明当前生效的是硬止损还是吊灯止损及计算过程
+  function stopHoverText(t, s, effectivePrice) {
+    const isHard = Number(s.hard_stop_price) >= Number(s.chandelier_stop_price);
+    const modeLabel = myStopMode === 'tight' ? '紧止损' : '松止损';
+    const lines = [
+      `${modeLabel} ${fmtExact(effectivePrice)}（${t.buy_date} 买入 @ ${fmtExact(t.buy_price)}）`,
+      isHard
+        ? `生效：硬止损 = 买入价 ${fmtExact(t.buy_price)} − ${s.hard_stop_atr_mul}×买入日ATR20 ${fmtExact(s.atr_at_buy)}`
+        : `生效：吊灯止损 = 买入以来最高价 ${fmtExact(s.highest_since_buy)}（${s.highest_since_buy_date || '-'}）− ${s.chandelier_stop_atr_mul}×当前ATR20 ${fmtExact(s.current_atr)}`,
+      `参考另一档：硬止损 ${fmtExact(s.hard_stop_price)} / 吊灯止损 ${fmtExact(s.chandelier_stop_price)}，取较高者生效`,
+    ];
+    return lines.join('\n');
+  }
+
+  function myAnnotationSeries() {
+    if (!myTrades || !Array.isArray(myTrades.trades) || !myTrades.trades.length) return [];
+    // 存在回测结果时，K线让位给策略买卖点，不再叠加本人实际买卖点（避免两套点位混淆）；
+    // 止损线不是买卖点，始终显示。
+    const showMyPoints = !currentBacktest;
+    const buys = [];
+    const sells = [];
+    const stopLines = [];
+    for (const t of myTrades.trades) {
+      if (t.buy_date && Number(t.buy_price) > 0) buys.push([t.buy_date, Number(t.buy_price), t]);
+      if (t.status === 'closed' && t.sell_date && Number(t.sell_price) > 0) {
+        sells.push([t.sell_date, Number(t.sell_price), t]);
+      }
+      const stops = t.stops && t.stops[myStopMode];
+      if (t.status === 'open' && stops) {
+        const hard = Number(stops.hard_stop_price);
+        const chandelier = Number(stops.chandelier_stop_price);
+        const effective = Math.max(hard, chandelier);
+        if (Number.isFinite(effective) && effective > 0) {
+          stopLines.push({
+            yAxis: effective,
+            hoverText: stopHoverText(t, stops, effective),
+          });
+        }
+      }
+    }
+    const series = [];
+    // 精确小圆点锚在 [日期, 实际成交价]；配色避开K线红绿与回测蓝/橙 pin
+    if (showMyPoints && buys.length) {
+      series.push({
+        name: '我的买入',
+        type: 'scatter',
+        data: buys,
+        symbol: 'circle',
+        symbolSize: 8,
+        itemStyle: { color: '#c026d3', borderColor: '#ffffff', borderWidth: 1.5,
+          shadowBlur: 6, shadowColor: 'rgba(17,35,42,0.30)' },
+        label: { show: true, formatter: (p) => fmtExact(p.data[1]), position: 'top',
+          color: '#c026d3', fontWeight: 800, fontSize: 10,
+          textBorderColor: '#ffffff', textBorderWidth: 3 },
+        tooltip: { formatter: (p) => {
+          const t = p.data[2] || {};
+          return `我的买入 ${t.buy_date || ''}<br/>成交价：${fmtExact(t.buy_price)}<br/>份数：${t.shares ?? '-'}`;
+        } },
+        z: 10,
+      });
+    }
+    if (showMyPoints && sells.length) {
+      series.push({
+        name: '我的卖出',
+        type: 'scatter',
+        data: sells,
+        symbol: 'circle',
+        symbolSize: 8,
+        itemStyle: { color: '#0891b2', borderColor: '#ffffff', borderWidth: 1.5,
+          shadowBlur: 6, shadowColor: 'rgba(17,35,42,0.30)' },
+        label: { show: true, formatter: (p) => fmtExact(p.data[1]), position: 'bottom',
+          color: '#0891b2', fontWeight: 800, fontSize: 10,
+          textBorderColor: '#ffffff', textBorderWidth: 3 },
+        tooltip: { formatter: (p) => {
+          const t = p.data[2] || {};
+          return `我的卖出 ${t.sell_date || ''}<br/>成交价：${fmtExact(t.sell_price)}<br/>份数：${t.shares ?? '-'}` +
+            `<br/>（${t.buy_date} 买入 @ ${fmtExact(t.buy_price)}）`;
+        } },
+        z: 10,
+      });
+    }
+    if (stopLines.length) {
+      series.push({
+        name: '我的止损',
+        type: 'scatter',
+        data: [],
+        markLine: {
+          symbol: 'none',
+          animation: false,
+          lineStyle: { color: '#b42318', width: 1.5, type: 'dashed' },
+          label: {
+            show: true,
+            position: 'insideEndTop',
+            formatter: (p) => `止损 ${fmtExact(p.data.yAxis)}`,
+            color: '#b42318', fontWeight: 800, fontSize: 11,
+            textBorderColor: '#ffffff', textBorderWidth: 3,
+          },
+          emphasis: {
+            lineStyle: { width: 3 },
+            label: {
+              position: 'insideEndTop',
+              formatter: (p) => p.data.hoverText || '',
+              fontSize: 11, fontWeight: 700, lineHeight: 16,
+              backgroundColor: 'rgba(255,255,255,0.94)',
+              borderColor: '#b42318', borderWidth: 1, borderRadius: 6,
+              padding: [6, 8],
+              textBorderWidth: 0,
+            },
+          },
+          data: stopLines,
+        },
+        z: 9,
+      });
+    }
+    return series;
+  }
+
   function renderPrice(payload, zoom) {
     if (!priceChart) return;
     const dates = payload.dates || [];
@@ -704,7 +840,13 @@
               lines.push(`${p.seriesName}：${num(p.value)}`);
             } else if (p.seriesType === 'scatter') {
               const raw = p.data?.[2] || {};
-              lines.push(`${p.seriesName}：${num(raw.price, 4)} / ${raw.qty || 0}`);
+              if (p.seriesName === '我的买入') {
+                lines.push(`我的买入：${fmtExact(raw.buy_price)}（${raw.shares ?? '-'} 份）`);
+              } else if (p.seriesName === '我的卖出') {
+                lines.push(`我的卖出：${fmtExact(raw.sell_price)}（${raw.shares ?? '-'} 份）`);
+              } else {
+                lines.push(`${p.seriesName}：${num(raw.price, 4)} / ${raw.qty || 0}`);
+              }
             }
           }
           return lines.join('<br/>');
@@ -745,6 +887,7 @@
         },
         ...overlays,
         ...backtestSeries,
+        ...myAnnotationSeries(),
       ],
     }, true);
   }
@@ -1474,7 +1617,9 @@
         skipped_buy_points: result.charts.kline.skipped_buy_points || [],
       }];
     }
-    activeResultKey = null;
+    // 单一 策略×仓位 组合时直接激活其买卖点标记（用户预期：回测跑完即见策略买卖点）；
+    // 多组合仍需点击对比表行选择显示哪一组（既有交互）。
+    activeResultKey = allMultiKline.length === 1 ? resultKey(allMultiKline[0]) : null;
     renderBacktestSummary(result);
     renderBacktestTrades(result);
     renderBacktestReturns(result);
@@ -1506,6 +1651,10 @@
     const intradayLabel = afterClose ? '收盘估算' : '盘中实时';
     chartTitleEl.innerHTML = `${payload.display_label || payload.display_name || payload.symbol || ''} 日 K${payload.meta?.is_intraday ? ` <span class="intraday-badge"><span class="intraday-dot" style="animation:intraday-pulse 1.6s ease-in-out infinite"></span>${intradayLabel}</span>` : ''}`;
     rangeMetaEl.textContent = `${payload.meta?.start || '-'} ~ ${payload.meta?.end || '-'} | ${Number(payload.meta?.rows || 0)} 根${payload.meta?.is_intraday ? ` · 含${intradayLabel}数据` : ''}`;
+    // 我的止损档位开关：仅当当前标的存在带止损数据的未平仓持仓时显示
+    stopModeToggleEl.hidden = !(myTrades?.trades || []).some(
+      (t) => t.status === 'open' && t.stops
+    );
     renderPrice(payload, zoom);
     renderTrend(payload, zoom);
     renderVolume(payload, zoom);
@@ -1664,6 +1813,24 @@
     return String(matched?.symbol || symbolInputEl.value || '').trim();
   }
 
+  // session 过期（401）时统一跳回登录墙，登录后回到当前页
+  function redirectToLogin() {
+    location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+  }
+
+  // 拉取当前用户在该标的上的交易标注（买卖点 + 双档止损）。
+  // 失败（非 401）时静默降级为无标注，不影响日K主流程。
+  async function loadMyTrades(symbol) {
+    try {
+      const resp = await fetch(`/market-view/api/my-trades?symbol=${encodeURIComponent(symbol)}`);
+      if (resp.status === 401) { redirectToLogin(); return null; }
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch (err) {
+      return null;
+    }
+  }
+
   async function loadDaily(symbol) {
     const target = String(symbol || selectedSymbol()).trim();
     if (!target) {
@@ -1680,8 +1847,11 @@
       appendTrendParams(params);
       appendRsiParams(params);
       const resp = await fetch(`/market-view/api/daily?${params.toString()}`);
+      if (resp.status === 401) { redirectToLogin(); return; }
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || '日 K 加载失败');
+      // 我的持仓标注与主数据并行口径：用服务端归一化后的代码拉取
+      myTrades = await loadMyTrades(data.symbol);
       const matched = allSymbols.find((item) => item.symbol === data.symbol) || {
         symbol: data.symbol,
         name: data.name,
@@ -1815,6 +1985,17 @@
     // charts not initialized – listeners skipped
   }
   refreshBtnEl.addEventListener('click', () => loadDaily());
+
+  // 我的止损紧/松切换（与手工交易页同一 seg 交互）：只重渲染价格图，不重拉数据
+  stopModeToggleEl.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button[data-mode]');
+    if (!btn || btn.dataset.mode === myStopMode) return;
+    myStopMode = btn.dataset.mode;
+    stopModeToggleEl.querySelectorAll('button[data-mode]').forEach((b) => {
+      b.classList.toggle('is-active', b.dataset.mode === myStopMode);
+    });
+    if (currentPayload) renderPrice(currentPayload, currentZoom);
+  });
   // 盘后数据更新完成后自动重载当前图表（无选中标的时 loadDaily 内部安全返回）。
   document.addEventListener('daily-update-done', () => loadDaily());
   runBacktestBtnEl.addEventListener('click', runRuleBacktest);

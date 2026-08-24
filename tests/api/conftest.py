@@ -44,10 +44,19 @@ def isolate_api_db(test_db, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def client(test_db) -> Generator[TestClient, None, None]:
-    """Return a ``TestClient`` wired to the FastAPI app with test DB."""
+    """Return a ``TestClient`` wired to the FastAPI app with test DB.
+
+    全站登录墙（2026-08）后所有页面/API 都需要有效 session：这里统一创建
+    tester 用户并完成登录，cookie 由 TestClient 自动携带，各测试文件无需
+    关心鉴权。需要匿名（未登录）请求的登录墙测试请自建 TestClient，
+    见 test_auth_wall.py。
+    """
     from app.main import app
 
+    test_db.create_user("tester", "pw-tester")
     with TestClient(app) as c:
+        resp = c.post("/api/auth/login", json={"username": "tester", "password": "pw-tester"})
+        assert resp.status_code == 200
         yield c
 
 

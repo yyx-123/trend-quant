@@ -5,7 +5,7 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -14,6 +14,9 @@ from core.calendar import market_now
 from core.symbols import normalize_symbol
 from data.intraday_service import build_intraday_overlay
 from data.storage.db import get_db
+
+from services import auth
+from services import trade_records as tr
 
 from services.market_indicators import (
     ATR_PERIODS,
@@ -225,6 +228,18 @@ async def list_market_symbols() -> dict:
     ]
     items.sort(key=lambda item: _metadata_sort_key(metadata_by_symbol.get(item["symbol"]), item["symbol"]))
     return {"items": items, "count": len(items)}
+
+
+@router.get("/api/my-trades")
+async def my_trade_annotations(
+    symbol: str = Query(..., min_length=1),
+    user: dict = Depends(auth.get_current_user),
+) -> dict:
+    """当前用户在该标的上的买卖点 + 未平仓止损（紧/松双档），供日K标注。"""
+    normalized_symbol = _normalize_symbol(symbol)
+    if not normalized_symbol:
+        raise HTTPException(status_code=400, detail="标的无效")
+    return tr.symbol_annotations(user, normalized_symbol)
 
 
 @router.get("/api/daily")

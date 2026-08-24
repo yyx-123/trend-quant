@@ -1,7 +1,8 @@
 """Unit tests for services.trade_records（手工交易记录：凭据/录入/清仓/列表聚合）。
 
 止损与持仓指标本身的口径测试见 test_stop_loss.py / test_manual_trade_service.py；
-这里只覆盖：极简鉴权、录入校验、清仓权限与校验、列表排序与错误隔离。
+这里只覆盖：凭据校验（authenticate，供登录接口与 MCP 工具用）、录入校验、
+清仓权限与校验、列表排序与错误隔离。业务函数接收 user 字典（登录墙 session 解析产物）。
 """
 
 from __future__ import annotations
@@ -40,6 +41,11 @@ def _day(bars, idx: int) -> tuple[str, float]:
     return str(row["time"])[:10], round(float(row["close"]), 4)
 
 
+def _u(db, username: str) -> dict:
+    """登录墙改造后业务函数接收 user 字典（Web 来自 session，此处按用户名取）。"""
+    return db.get_user_by_username(username)
+
+
 class TestAuthenticate:
     def test_ok(self, env) -> None:
         db, _, alice, _, _ = env
@@ -66,7 +72,7 @@ class TestCreateTrade:
         db, bars, alice, *_ = env
         buy_date, buy_price = _day(bars, -5)
         trade = tr.create_trade(
-            "alice", "pw1", symbol="510300", buy_date=buy_date,
+            _u(db, "alice"), symbol="510300", buy_date=buy_date,
             buy_price=buy_price, shares=1000, db=db,
         )
         assert trade["symbol"] == "510300.SS"  # 归一化
@@ -78,9 +84,9 @@ class TestCreateTrade:
         db, bars, alice, *_ = env
         d1, p1 = _day(bars, -8)
         d2, p2 = _day(bars, -4)
-        t1 = tr.create_trade("alice", "pw1", symbol="510300", buy_date=d1,
+        t1 = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d1,
                              buy_price=p1, shares=100, db=db)
-        t2 = tr.create_trade("alice", "pw1", symbol="510300", buy_date=d2,
+        t2 = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d2,
                              buy_price=p2, shares=200, db=db)
         assert t1["id"] != t2["id"]
         assert len(db.list_manual_trades(alice["id"])) == 2
@@ -90,7 +96,7 @@ class TestCreateTrade:
         row = bars.iloc[-5]
         with pytest.raises(sl.StopLossError, match="当日价格区间"):
             tr.create_trade(
-                "alice", "pw1", symbol="510300", buy_date=str(row["time"])[:10],
+                _u(db, "alice"), symbol="510300", buy_date=str(row["time"])[:10],
                 buy_price=round(float(row["high"]) + 0.5, 4), shares=100, db=db,
             )
 
@@ -98,28 +104,21 @@ class TestCreateTrade:
         db, bars, *_ = env
         buy_date, buy_price = _day(bars, -5)
         with pytest.raises(tr.TradeRecordError, match="份数"):
-            tr.create_trade("alice", "pw1", symbol="510300", buy_date=buy_date,
+            tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=buy_date,
                             buy_price=buy_price, shares=0, db=db)
-
-    def test_bad_credentials_rejected(self, env) -> None:
-        db, bars, *_ = env
-        buy_date, buy_price = _day(bars, -5)
-        with pytest.raises(tr.TradeAuthError):
-            tr.create_trade("alice", "bad", symbol="510300", buy_date=buy_date,
-                            buy_price=buy_price, shares=100, db=db)
 
 
 class TestCloseTrade:
     def _open_trade(self, db, bars, shares: float = 1000) -> dict:
         buy_date, buy_price = _day(bars, -5)
-        return tr.create_trade("alice", "pw1", symbol="510300", buy_date=buy_date,
+        return tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=buy_date,
                                buy_price=buy_price, shares=shares, db=db)
 
     def test_close_ok(self, env) -> None:
         db, bars, *_ = env
         trade = self._open_trade(db, bars)
         sell_date, sell_price = _day(bars, -2)
-        closed = tr.close_trade("alice", "pw1", trade_id=trade["id"],
+        closed = tr.close_trade(_u(db, "alice"), trade_id=trade["id"],
                                 sell_date=sell_date, sell_price=sell_price, db=db)
         assert closed["status"] == "closed"
         assert closed["sell_date"] == sell_date
@@ -130,14 +129,14 @@ class TestCloseTrade:
         trade = self._open_trade(db, bars)
         sell_date, sell_price = _day(bars, -2)
         with pytest.raises(tr.TradePermissionError, match="自己的"):
-            tr.close_trade("bob", "pw2", trade_id=trade["id"],
+            tr.close_trade(_u(db, "bob"), trade_id=trade["id"],
                            sell_date=sell_date, sell_price=sell_price, db=db)
 
     def test_admin_can_close_any_trade(self, env) -> None:
         db, bars, *_ = env
         trade = self._open_trade(db, bars)
         sell_date, sell_price = _day(bars, -2)
-        closed = tr.close_trade("admin", "root", trade_id=trade["id"],
+        closed = tr.close_trade(_u(db, "admin"), trade_id=trade["id"],
                                 sell_date=sell_date, sell_price=sell_price, db=db)
         assert closed["status"] == "closed"
 
@@ -145,10 +144,10 @@ class TestCloseTrade:
         db, bars, *_ = env
         trade = self._open_trade(db, bars)
         sell_date, sell_price = _day(bars, -2)
-        tr.close_trade("alice", "pw1", trade_id=trade["id"],
+        tr.close_trade(_u(db, "alice"), trade_id=trade["id"],
                        sell_date=sell_date, sell_price=sell_price, db=db)
         with pytest.raises(tr.TradeRecordError, match="已清仓"):
-            tr.close_trade("alice", "pw1", trade_id=trade["id"],
+            tr.close_trade(_u(db, "alice"), trade_id=trade["id"],
                            sell_date=sell_date, sell_price=sell_price, db=db)
 
     def test_sell_before_buy_rejected(self, env) -> None:
@@ -156,7 +155,7 @@ class TestCloseTrade:
         trade = self._open_trade(db, bars)
         early_date, price = _day(bars, -8)
         with pytest.raises(tr.TradeRecordError, match="早于买入日期"):
-            tr.close_trade("alice", "pw1", trade_id=trade["id"],
+            tr.close_trade(_u(db, "alice"), trade_id=trade["id"],
                            sell_date=early_date, sell_price=price, db=db)
 
     def test_sell_price_out_of_day_range_rejected(self, env) -> None:
@@ -164,7 +163,7 @@ class TestCloseTrade:
         trade = self._open_trade(db, bars)
         row = bars.iloc[-2]
         with pytest.raises(tr.TradeRecordError, match="当日价格区间"):
-            tr.close_trade("alice", "pw1", trade_id=trade["id"],
+            tr.close_trade(_u(db, "alice"), trade_id=trade["id"],
                            sell_date=str(row["time"])[:10],
                            sell_price=round(float(row["high"]) + 0.5, 4), db=db)
 
@@ -172,7 +171,7 @@ class TestCloseTrade:
         db, bars, *_ = env
         sell_date, sell_price = _day(bars, -2)
         with pytest.raises(tr.TradeRecordError, match="不存在"):
-            tr.close_trade("alice", "pw1", trade_id=999,
+            tr.close_trade(_u(db, "alice"), trade_id=999,
                            sell_date=sell_date, sell_price=sell_price, db=db)
 
 
@@ -190,9 +189,9 @@ class TestListTrades:
         db.save_market_data("510050.SS", bars2, price_mode="qfq")
         d1, p1 = _day(bars, -5)
         d2, p2 = _day(bars2, -5)
-        tr.create_trade("alice", "pw1", symbol="510300", buy_date=d1,
+        tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d1,
                         buy_price=p1, shares=100, db=db)
-        tr.create_trade("alice", "pw1", symbol="510050", buy_date=d2,
+        tr.create_trade(_u(db, "alice"), symbol="510050", buy_date=d2,
                         buy_price=p2, shares=100, db=db)
 
         calls: list[list[str]] = []
@@ -203,7 +202,7 @@ class TestListTrades:
 
         monkeypatch.setattr(sl, "fetch_intraday_bars", fake_batch)
 
-        out = tr.list_trades("alice", "pw1", db=db)
+        out = tr.list_trades(_u(db, "alice"), db=db)
         assert len(out["trades"]) == 2
         assert calls == [["510050.SS", "510300.SS"]]
 
@@ -212,17 +211,17 @@ class TestListTrades:
         # 小持仓先录入，大持仓后录入 —— 验证不是按录入顺序而是按持仓金额
         d1, p1 = _day(bars, -6)
         d2, p2 = _day(bars, -4)
-        small = tr.create_trade("alice", "pw1", symbol="510300", buy_date=d1,
+        small = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d1,
                                 buy_price=p1, shares=100, db=db)
-        big = tr.create_trade("alice", "pw1", symbol="510300", buy_date=d2,
+        big = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d2,
                               buy_price=p2, shares=10000, db=db)
-        closed = tr.create_trade("alice", "pw1", symbol="510300", buy_date=d1,
+        closed = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d1,
                                  buy_price=p1, shares=50000, db=db)
         sd, sp = _day(bars, -3)
-        tr.close_trade("alice", "pw1", trade_id=closed["id"],
+        tr.close_trade(_u(db, "alice"), trade_id=closed["id"],
                        sell_date=sd, sell_price=sp, db=db)
 
-        out = tr.list_trades("alice", "pw1", db=db)
+        out = tr.list_trades(_u(db, "alice"), db=db)
         trades = out["trades"]
         assert [t["id"] for t in trades] == [big["id"], small["id"], closed["id"]]
         assert trades[0]["position_value"] > trades[1]["position_value"]
@@ -231,9 +230,9 @@ class TestListTrades:
     def test_open_item_realtime_fields(self, env) -> None:
         db, bars, *_ = env
         d, p = _day(bars, -3)
-        tr.create_trade("alice", "pw1", symbol="510300", buy_date=d,
+        tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
                         buy_price=p, shares=1000, db=db)
-        out = tr.list_trades("alice", "pw1", db=db)
+        out = tr.list_trades(_u(db, "alice"), db=db)
         item = out["trades"][0]
         latest_close = round(float(bars.iloc[-1]["close"]), 4)
         assert item["latest_price"] == latest_close
@@ -246,9 +245,9 @@ class TestListTrades:
         """持仓列表项携带当日涨跌幅：最新收盘 / 前一交易日收盘 − 1（EOD 口径）。"""
         db, bars, *_ = env
         d, p = _day(bars, -3)
-        tr.create_trade("alice", "pw1", symbol="510300", buy_date=d,
+        tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
                         buy_price=p, shares=1000, db=db)
-        out = tr.list_trades("alice", "pw1", db=db)
+        out = tr.list_trades(_u(db, "alice"), db=db)
         item = out["trades"][0]
         last_close = float(bars.iloc[-1]["close"])
         prev_close = float(bars.iloc[-2]["close"])
@@ -261,12 +260,12 @@ class TestListTrades:
         db, bars, *_ = env
         bd, bp = _day(bars, -6)
         sd, sp = _day(bars, -2)
-        trade = tr.create_trade("alice", "pw1", symbol="510300", buy_date=bd,
+        trade = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=bd,
                                 buy_price=bp, shares=1000, db=db)
-        tr.close_trade("alice", "pw1", trade_id=trade["id"],
+        tr.close_trade(_u(db, "alice"), trade_id=trade["id"],
                        sell_date=sd, sell_price=sp, db=db)
 
-        out = tr.list_trades("alice", "pw1", db=db)
+        out = tr.list_trades(_u(db, "alice"), db=db)
         item = out["trades"][0]
         assert item["realized_pnl"] == pytest.approx(round((sp - bp) * 1000, 2))
         assert item["realized_pnl_pct"] == pytest.approx(round((sp / bp - 1) * 100, 2))
@@ -276,13 +275,63 @@ class TestListTrades:
     def test_single_trade_error_does_not_break_list(self, env) -> None:
         db, bars, alice, *_ = env
         d, p = _day(bars, -3)
-        ok = tr.create_trade("alice", "pw1", symbol="510300", buy_date=d,
+        ok = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
                              buy_price=p, shares=100, db=db)
         bad = db.create_manual_trade(alice["id"], "999999.SS", d, 1.0, 100)  # 无数据标的
-        out = tr.list_trades("alice", "pw1", db=db)
+        out = tr.list_trades(_u(db, "alice"), db=db)
         by_id = {t["id"]: t for t in out["trades"]}
         assert "error" not in by_id[ok["id"]]
         assert "error" in by_id[bad["id"]]
+
+
+class TestSymbolAnnotations:
+    """symbol_annotations：标的查看页的买卖点 + 双档止损标注数据。"""
+
+    def test_open_trade_has_dual_mode_stops(self, env) -> None:
+        db, bars, alice, *_ = env
+        d, p = _day(bars, -5)
+        tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
+                        buy_price=p, shares=1000, db=db)
+        out = tr.symbol_annotations(_u(db, "alice"), "510300", db=db)
+        assert out["symbol"] == "510300.SS"
+        assert len(out["trades"]) == 1
+        item = out["trades"][0]
+        assert item["status"] == "open"
+        assert item["sell_date"] is None
+        tight = item["stops"]["tight"]
+        loose = item["stops"]["loose"]
+        assert tight["hard_stop_atr_mul"] == 1.0
+        assert loose["hard_stop_atr_mul"] == 1.5
+        assert tight["hard_stop_price"] > loose["hard_stop_price"]
+        assert tight["chandelier_stop_price"] > loose["chandelier_stop_price"]
+        # 悬停文案所需的计算组件齐全
+        for key in ("atr_at_buy", "current_atr", "highest_since_buy", "highest_since_buy_date"):
+            assert tight[key] is not None
+
+    def test_closed_trade_has_sell_point_no_stops(self, env) -> None:
+        db, bars, *_ = env
+        bd, bp = _day(bars, -5)
+        sd, sp = _day(bars, -2)
+        trade = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=bd,
+                                buy_price=bp, shares=100, db=db)
+        tr.close_trade(_u(db, "alice"), trade_id=trade["id"],
+                       sell_date=sd, sell_price=sp, db=db)
+        out = tr.symbol_annotations(_u(db, "alice"), "510300", db=db)
+        item = out["trades"][0]
+        assert item["status"] == "closed"
+        assert item["sell_date"] == sd
+        assert item["sell_price"] == sp
+        assert "stops" not in item
+
+    def test_isolated_between_users_and_symbols(self, env) -> None:
+        db, bars, alice, bob, _ = env
+        d, p = _day(bars, -3)
+        tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
+                        buy_price=p, shares=100, db=db)
+        # 其他用户在该标的上无记录
+        assert tr.symbol_annotations(_u(db, "bob"), "510300", db=db)["trades"] == []
+        # 本人在其他标的上无记录
+        assert tr.symbol_annotations(_u(db, "alice"), "510050", db=db)["trades"] == []
 
 
 class TestEndDateCutoff:

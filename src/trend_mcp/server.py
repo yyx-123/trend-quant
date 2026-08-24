@@ -441,9 +441,9 @@ def add_trade(
         区间 / 参数非法等）。
     """
     try:
+        user = tr.authenticate(username, password)
         trade = tr.create_trade(
-            username,
-            password,
+            user,
             symbol=symbol,
             buy_date=buy_date,
             buy_price=buy_price,
@@ -480,7 +480,8 @@ def open_positions(username: str, password: str, stop_mode: str | None = None) -
         - is_intraday / intraday_ts: 数据口径标记
     """
     try:
-        payload = tr.list_trades(username, password, intraday=True, stop_mode=stop_mode)
+        user = tr.authenticate(username, password)
+        payload = tr.list_trades(user, intraday=True, stop_mode=stop_mode)
     except (tr.TradeAuthError, tr.TradePermissionError, tr.TradeRecordError) as exc:
         return {"ok": False, "error": str(exc)}
 

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="page-panel manual-trade-page">
-  <!-- ① 试算区：公开，无需登录，不落库 -->
+  <!-- ① 试算区：不落库 -->
   <div class="bt-form-row manual-trade-form">
     <label>标的代码
       <input id="mtSymbol" type="text" list="mtSymbolOptions" placeholder="如 510300 或 510300.SS" autocomplete="off">
@@ -34,23 +34,8 @@
     </div>
   </div>
 
-  <!-- ② 登录区：输入用户名 + 密码后展示下方交易记录（仅用于区分可见记录，无登出概念） -->
-  <div class="viz-panel" id="mtAuthPanel">
-    <h3>我的交易记录</h3>
-    <div id="mtLoginForm" class="bt-form-row">
-      <label>用户名
-        <input id="mtUsername" type="text" autocomplete="username">
-      </label>
-      <label>密码
-        <input id="mtPassword" type="password" autocomplete="current-password">
-      </label>
-      <button id="mtLoginBtn" type="button">登录</button>
-    </div>
-    <div id="mtLoginMessage" class="instrument-form-message" hidden></div>
-  </div>
-
-  <!-- ③ 持仓记录区：登录后可见 -->
-  <div class="viz-panel" id="mtRecordsPanel" hidden>
+  <!-- ② 持仓记录区（全站登录墙内，进入本页即已登录） -->
+  <div class="viz-panel" id="mtRecordsPanel">
     <div class="mt-records-head">
       <h3>持仓记录</h3>
       <div class="mt-seg" id="mtTimeFilter" role="group" aria-label="时间筛选"
@@ -76,8 +61,8 @@
     <div id="mtTradeEmpty" class="manual-trade-note" hidden>暂无持仓记录，点击右上角「录入」添加第一笔。</div>
   </div>
 
-  <!-- ④ 清仓交易区：登录后可见，展示已清仓交易的完整结果 -->
-  <div class="viz-panel" id="mtClosedPanel" hidden>
+  <!-- ③ 清仓交易区：展示已清仓交易的完整结果 -->
+  <div class="viz-panel" id="mtClosedPanel">
     <div class="mt-records-head">
       <h3>清仓交易</h3>
       <div class="mt-seg" id="mtClosedTimeFilter" role="group" aria-label="时间筛选"
@@ -155,12 +140,6 @@
   const holdingStatsEl = document.getElementById('mtHoldingStats');
   const sizingPanelEl = document.getElementById('mtSizingPanel');
 
-  const loginFormEl = document.getElementById('mtLoginForm');
-  const usernameEl = document.getElementById('mtUsername');
-  const passwordEl = document.getElementById('mtPassword');
-  const loginBtn = document.getElementById('mtLoginBtn');
-  const loginMessageEl = document.getElementById('mtLoginMessage');
-
   const recordsPanelEl = document.getElementById('mtRecordsPanel');
   const openEnterBtn = document.getElementById('mtOpenEnterBtn');
   const refreshBtn = document.getElementById('mtRefreshBtn');
@@ -193,8 +172,7 @@
   const closeMessageEl = document.getElementById('mtCloseMessage');
 
   // ── 状态 ────────────────────────────────────────────────
-  // 凭据只保存在页面内存（无 cookie/localStorage），刷新需重新登录
-  let auth = null;             // {username, password, is_admin}
+  // 登录态由全站登录墙（session cookie）保证，页面不持有任何凭据
   let currentTrades = [];      // 最近一次列表数据
   let dayRange = null;         // 买入表单：当日价格区间缓存
   let rangeRequestSeq = 0;
@@ -226,12 +204,6 @@
     messageEl.textContent = text;
     messageEl.classList.toggle('is-error', !!isError);
     messageEl.hidden = !text;
-  }
-
-  function showLoginMessage(text, isError) {
-    loginMessageEl.textContent = text;
-    loginMessageEl.classList.toggle('is-error', !!isError);
-    loginMessageEl.hidden = !text;
   }
 
   function showCloseMessage(text, isError) {
@@ -416,12 +388,18 @@
       esc(fmtPrice(range.high)) + '</b>（收盘 ' + esc(fmtPrice(range.close)) + '），价格需落在区间内';
   }
 
+  // session 过期（401）时统一跳回登录墙，登录后回到当前页
+  function redirectToLogin() {
+    location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+  }
+
   async function postJson(url, body) {
     const resp = await fetch(url, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
+    if (resp.status === 401) { redirectToLogin(); return new Promise(function() {}); }
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '请求失败');
     return data;
@@ -559,63 +537,16 @@
     resultEl.hidden = false;
   }
 
-  // ── ② 登录 ─────────────────────────────────────────────
-  function onLogin() {
-    loginFormEl.hidden = true;
-    recordsPanelEl.hidden = false;
-    closedPanelEl.hidden = false;
-    showLoginMessage('已登录：' + auth.username + (auth.is_admin ? '（admin）' : ''), false);
-    loadTrades();
-  }
-
-  function onLogout() {
-    auth = null;
-    currentTrades = [];
-    sortState = {key: null, dir: 0};
-    closedSortState = {key: null, dir: 0};
-    passwordEl.value = '';
-    loginFormEl.hidden = false;
-    recordsPanelEl.hidden = true;
-    closedPanelEl.hidden = true;
-    tradeListEl.innerHTML = '';
-    closedListEl.innerHTML = '';
-    closeModalEl.hidden = true;
-    enterModalEl.hidden = true;
-  }
-
-  async function login() {
-    const username = usernameEl.value.trim();
-    const password = passwordEl.value;
-    if (!username || !password) { showLoginMessage('请输入用户名和密码', true); return; }
-    loginBtn.disabled = true;
-    try {
-      const data = await postJson('/manual-trade/api/login', {username: username, password: password});
-      auth = {username: username, password: password, is_admin: !!data.is_admin};
-      onLogin();
-    } catch (err) {
-      showLoginMessage(err.message || '登录失败', true);
-    } finally {
-      loginBtn.disabled = false;
-    }
-  }
-
-  // ── ③ 交易记录 ─────────────────────────────────────────
+  // ── ② 交易记录 ─────────────────────────────────────────
   async function loadTrades() {
-    if (!auth) return;
     refreshBtn.disabled = true;
     try {
-      const body = {username: auth.username, password: auth.password, stop_mode: stopMode};
-      const data = await postJson('/manual-trade/api/trades/list', body);
+      const data = await postJson('/manual-trade/api/trades/list', {stop_mode: stopMode});
       currentTrades = data.trades || [];
       renderTradeList();
       renderClosedList();
     } catch (err) {
-      if (err.message && err.message.indexOf('用户名或密码') >= 0) {
-        onLogout();
-        showLoginMessage('登录已失效，请重新登录', true);
-      } else {
-        showMessage(err.message || '交易记录加载失败', true);
-      }
+      showMessage(err.message || '交易记录加载失败', true);
     } finally {
       refreshBtn.disabled = false;
     }
@@ -1086,7 +1017,6 @@
 
   // ── 录入弹窗 ───────────────────────────────────────────
   function openEnterModal() {
-    if (!auth) { showLoginMessage('请先登录后再录入交易', true); return; }
     // 预填试算区的输入，减少重复录入
     enterSymbolEl.value = symbolEl.value.trim();
     enterDateEl.value = buyDateEl.value || todayStr();
@@ -1123,7 +1053,6 @@
   }
 
   async function confirmEnter() {
-    if (!auth) { showEnterMessage('请先登录后再录入交易', true); return; }
     const symbol = enterSymbolEl.value.trim();
     const buyDate = enterDateEl.value;
     const buyPrice = parseFloat(enterPriceEl.value);
@@ -1143,7 +1072,6 @@
     showEnterMessage('录入中…', false);
     try {
       await postJson('/manual-trade/api/trades/create', {
-        username: auth.username, password: auth.password,
         symbol: symbol, buy_date: buyDate, buy_price: buyPrice, shares: shares,
       });
       enterModalEl.hidden = true;
@@ -1195,7 +1123,7 @@
   }
 
   async function confirmClose() {
-    if (!auth || !closeCtx) return;
+    if (!closeCtx) return;
     const sellDate = sellDateEl.value;
     const sellPrice = parseFloat(sellPriceEl.value);
     if (!sellDate) { showCloseMessage('请选择清仓日期', true); return; }
@@ -1213,7 +1141,6 @@
     closeConfirmBtn.disabled = true;
     try {
       await postJson('/manual-trade/api/trades/close', {
-        username: auth.username, password: auth.password,
         trade_id: closeCtx.id, sell_date: sellDate, sell_price: sellPrice,
       });
       closeModalEl.hidden = true;
@@ -1241,15 +1168,9 @@
   symbolEl.addEventListener('change', scheduleRangeRefresh);
   buyDateEl.addEventListener('change', scheduleRangeRefresh);
 
-  loginBtn.addEventListener('click', login);
-  [usernameEl, passwordEl].forEach(function(el) {
-    el.addEventListener('keydown', function(ev) {
-      if (ev.key === 'Enter') login();
-    });
-  });
   openEnterBtn.addEventListener('click', openEnterModal);
   refreshBtn.addEventListener('click', loadTrades);
-  // 盘后数据更新完成后自动刷新持仓（未登录时 loadTrades 内部直接返回）。
+  // 盘后数据更新完成后自动刷新持仓
   document.addEventListener('daily-update-done', function() { loadTrades(); });
 
   enterConfirmBtn.addEventListener('click', confirmEnter);
@@ -1301,7 +1222,7 @@
     stopModeToggleEl.querySelectorAll('button[data-mode]').forEach(function(b) {
       b.classList.toggle('is-active', b.dataset.mode === stopMode);
     });
-    if (auth) loadTrades();
+    loadTrades();
     if (!resultEl.hidden) evaluate();
   });
 
@@ -1342,6 +1263,7 @@
   buyDateEl.value = todayStr();
   loadSymbolOptions();
   refreshDayRange();
+  loadTrades();
 })();
 </script>
 {% endblock %}

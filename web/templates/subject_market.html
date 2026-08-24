@@ -4,6 +4,12 @@
   <section id="heatmapPanel" class="heatmap-panel" hidden>
     <div class="heatmap-head">
       <div id="heatmapTabs" class="heatmap-tabs" role="tablist" aria-label="一级类目切换"></div>
+      <div id="heatmapDim" class="heatmap-dim" role="radiogroup" aria-label="热力图着色维度">
+        <span class="heatmap-dim-label">着色</span>
+        <button type="button" role="radio" aria-checked="true" class="heatmap-dim-btn is-active" data-dim="ma5">趋势 MA5</button>
+        <button type="button" role="radio" aria-checked="false" class="heatmap-dim-btn" data-dim="score">当日趋势值</button>
+        <button type="button" role="radio" aria-checked="false" class="heatmap-dim-btn" data-dim="change">日涨跌幅</button>
+      </div>
       <div class="heatmap-legend" aria-hidden="true">
         <span class="heatmap-legend-label">下跌</span>
         <span class="heatmap-legend-bar"></span>
@@ -14,7 +20,7 @@
     </div>
     <div id="heatmapChart" class="heatmap-chart"></div>
     <div id="heatmapCrumb" class="heatmap-crumb" hidden></div>
-    <p class="heatmap-note">面积 = 等大面积（同级色块面积相同，与成交额无关） · 颜色 = 最新趋势值 MA5（红涨绿跌，类目为成员成交额加权） · 点击色块下钻，底部面包屑返回 · 悬停查看详情</p>
+    <p class="heatmap-note">面积 = 每个标的等大面积（类目块大小 ∝ 标的数量，与成交额无关） · 颜色 = <span id="heatmapColorNote">最新趋势值 MA5</span>（红涨绿跌、深浅随绝对值，类目为成员成交额加权） · 点击色块下钻，底部面包屑返回 · 悬停查看详情</p>
   </section>
   <div class="subject-status-row">
     <div id="subjectBoardStatus" class="context-hint">正在加载标的看板…</div>
@@ -101,6 +107,8 @@
   const heatmapTabsEl = document.getElementById('heatmapTabs');
   const heatmapChartEl = document.getElementById('heatmapChart');
   const heatmapCrumbEl = document.getElementById('heatmapCrumb');
+  const heatmapDimEl = document.getElementById('heatmapDim');
+  const heatmapColorNoteEl = document.getElementById('heatmapColorNote');
   let heatmapChart = null;
   let heatmapPayload = null;
   let heatmapActiveL1 = null;
@@ -113,7 +121,17 @@
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-  // 柔和的红/绿渐变档位（趋势 MA5 绝对值 → RGB），最深不超过末档，避免刺眼。
+  // 热力图着色维度：field 为标的/类目 meta 上的字段名；maxAbs 为该维度映射到
+  // 最深色的绝对值上限（趋势值量纲 0~20，与 HEAT_STOPS 档位一致；涨跌幅按
+  // ±5% 封顶）。fmt 用于叶子标签第二行数值与图例说明。
+  const HEAT_COLOR_DIMS = {
+    ma5: { field: 'trend_ma5', maxAbs: 20, note: '最新趋势值 MA5', fmt: (m) => fmtScore(m.trend_ma5) },
+    score: { field: 'trend_score', maxAbs: 20, note: '当日趋势值', fmt: (m) => fmtScore(m.trend_score) },
+    change: { field: 'daily_change_pct', maxAbs: 5, note: '当日涨跌幅', fmt: (m) => fmtChange(m.daily_change_pct) },
+  };
+  let heatColorDim = 'ma5';
+
+  // 柔和的红/绿渐变档位（指标绝对值 → RGB），最深不超过末档，避免刺眼。
   const HEAT_STOPS_UP = [[0, [250, 236, 234]], [2.5, [241, 203, 198]], [5, [228, 161, 154]], [10, [211, 105, 97]], [20, [191, 63, 57]]];
   const HEAT_STOPS_DOWN = [[0, [232, 241, 237]], [2.5, [198, 227, 215]], [5, [152, 205, 183]], [10, [96, 174, 143]], [20, [27, 126, 96]]];
 
@@ -130,18 +148,19 @@
     return stops[stops.length - 1][1];
   }
 
-  function heatColor(ma5) {
-    if (ma5 == null || !Number.isFinite(ma5)) return { fill: '#e6eaee', text: '#6b7280' };
-    const abs = Math.abs(ma5);
-    const rgb = heatInterpolate(ma5 >= 0 ? HEAT_STOPS_UP : HEAT_STOPS_DOWN, abs);
-    return { fill: `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`, text: abs >= 9 ? '#ffffff' : '#3f4756' };
+  function heatColor(value, maxAbs = 20) {
+    if (value == null || !Number.isFinite(value)) return { fill: '#e6eaee', text: '#6b7280' };
+    // 各维度量纲不同：先归一到 HEAT_STOPS 的 0~20 区间再取色
+    const scaled = Math.abs(value) / maxAbs * 20;
+    const rgb = heatInterpolate(value >= 0 ? HEAT_STOPS_UP : HEAT_STOPS_DOWN, scaled);
+    return { fill: `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`, text: scaled >= 9 ? '#ffffff' : '#3f4756' };
   }
 
   // 类目标题条底色：趋势色向白色稀释，避免与深色标题文字冲突。
-  function heatColorSoft(ma5) {
-    if (ma5 == null || !Number.isFinite(ma5)) return '#eef1f3';
-    const abs = Math.abs(ma5);
-    const rgb = heatInterpolate(ma5 >= 0 ? HEAT_STOPS_UP : HEAT_STOPS_DOWN, abs);
+  function heatColorSoft(value, maxAbs = 20) {
+    if (value == null || !Number.isFinite(value)) return '#eef1f3';
+    const scaled = Math.abs(value) / maxAbs * 20;
+    const rgb = heatInterpolate(value >= 0 ? HEAT_STOPS_UP : HEAT_STOPS_DOWN, scaled);
     const mix = (a) => Math.round(a + (255 - a) * 0.66);
     return `rgb(${mix(rgb[0])},${mix(rgb[1])},${mix(rgb[2])})`;
   }
@@ -152,19 +171,20 @@
     return s.length <= maxChars ? s : `${s.slice(0, Math.max(1, maxChars - 1))}…`;
   }
 
-  // 等大面积色块：不再按成交额决定面积。treemap 按兄弟节点的 value 比例
-  // 分配面积，因此把每个节点的 value 都固定为 1 —— 同一父节点下的所有
-  // 兄弟色块（二级类目之间 / 三级类目之间 / 类目内各标的之间）面积完全相同。
+  // 每个标的等大面积：treemap 按兄弟节点的 value 比例分配面积（父节点声明的
+  // value 生效，不会被子节点覆盖），因此叶子 value 固定为 1，类目节点 value
+  // 取其包含的标的数 —— 每个标的色块面积完全相同，类目块面积正比于标的数量。
   // 这里只构建静态结构（颜色 / 层级），标签文字由 layoutHeatLabels 按当前
   // 下钻视图的实际显示面积动态计算 —— 直接下钻放大后标签会重新生成，
   // 不会出现"色块放大了名字还是不显示"。
   function buildHeatTree(group) {
+    const dim = HEAT_COLOR_DIMS[heatColorDim];
     const l2Nodes = [];
     for (const l2 of group.items || []) {
       const l3Nodes = [];
       for (const l3 of l2.children || []) {
         const leaves = (l3.children || []).map((inst) => {
-          const color = heatColor(inst.trend_ma5);
+          const color = heatColor(inst[dim.field], dim.maxAbs);
           return {
             name: inst.name || inst.symbol, value: 1, meta: inst, isLeaf: true, level: 3,
             itemStyle: { color: color.fill }, labelColor: color.text,
@@ -174,16 +194,16 @@
         });
         if (!leaves.length) continue;
         l3Nodes.push({
-          name: l3.category_l3, value: 1, children: leaves, meta: l3, level: 2,
-          itemStyle: { color: heatColorSoft(l3.trend_ma5) },
+          name: l3.category_l3, value: leaves.length, children: leaves, meta: l3, level: 2,
+          itemStyle: { color: heatColorSoft(l3[dim.field], dim.maxAbs) },
           // 标题条挂在节点自身：下钻改变层级时不随 levels 偏移。
           upperLabel: { show: true, height: 17, fontSize: 11, color: '#52596b', formatter: (p) => p.data.upperText || '' },
         });
       }
       if (!l3Nodes.length) continue;
       l2Nodes.push({
-        name: l2.category_l2, value: 1, children: l3Nodes, meta: l2, level: 1,
-        itemStyle: { color: heatColorSoft(l2.trend_ma5) },
+        name: l2.category_l2, value: l3Nodes.reduce((sum, n) => sum + n.value, 0), children: l3Nodes, meta: l2, level: 1,
+        itemStyle: { color: heatColorSoft(l2[dim.field], dim.maxAbs) },
         // 标题条底色 = 当前视图最外层的 borderColor（ECharts 父节点标题条用边框色填充，
         // 非 itemStyle.color），顶层视图下是深色条，文字用浅色；实际颜色随下钻视图
         // 在 layoutHeatLabels 里逐层重设。
@@ -193,12 +213,96 @@
     return l2Nodes;
   }
 
-  // 按当前视图根节点把画布面积均分给各兄弟节点，估算每个色块的像素边长，
-  // 据此（重新）生成标签：大框显示名称+MA5，中框仅名称（超长截断），小框不显示文字。
-  function layoutHeatLabels(viewNodes, canvasArea) {
+  // 按每个色块的真实矩形（宽×高，来自 readHeatRects）生成标签。treemap 的
+  // 矩形形状由 squarify 布局决定、预先无法得知，所以 renderHeatView 先渲染
+  // 一遍拿到实际宽高 —— 横扁条按实际宽度放完整名称，竖长条把名称旋转 90°
+  // 竖排显示，太小的框不放文字。
+  function layoutHeatLabels(viewNodes, rects) {
     // depth = 节点在当前下钻视图里的层级（viewNodes 为 0）。父节点标题条底色由
     // levels 里该层的 borderColor 填充：最外层是深色条（#1f2937），内层是浅灰条
     // （#a3adb8）—— 文字颜色必须跟着当前层级走，否则深色条上深字不可见。
+    const decorate = (node, depth) => {
+      const rect = rects.get(node);
+      const meta = node.meta || {};
+      if (node.level === 3) {
+        const availW = (rect ? rect.width : 0) - 8;
+        const availH = (rect ? rect.height : 0) - 6;
+        const label = { color: node.labelColor, fontSize: 12 };
+        let text = '';
+        if (availW >= 18 && availH >= 14) {
+          if (availH > availW * 1.6 && availW < 46 && availH >= 46) {
+            // 竖长条：名称逐字换行竖排（每字端正、从上往下读），但连续数字、
+            // 连续字母各自合并为一行 —— 沪深300ETF → 沪/深/300/ETF 四行。
+            // 字号按条宽自适应；若最长的字母/数字行放不下则进一步缩字号。
+            label.fontSize = Math.max(10, Math.min(13, availW / 1.5));
+            const runs = String(node.name ?? '').match(/\d+|[a-zA-Z]+|[^\da-zA-Z]/g) || [];
+            const widest = runs.reduce((m, r) => Math.max(m, r.length > 1 ? r.length * 0.62 : 1), 1);
+            if (widest * label.fontSize > availW) {
+              label.fontSize = Math.max(10, availW / widest);
+            }
+            label.lineHeight = Math.round(label.fontSize * 1.18);
+            const maxLines = Math.floor(availH / label.lineHeight);
+            const lines = runs.length <= maxLines ? runs
+              : maxLines < 2 ? [] : [...runs.slice(0, maxLines - 1), '…'];
+            text = lines.join('\n');
+          } else {
+            label.fontSize = Math.max(10, Math.min(14, Math.min(availW / 4.5, availH / 2.1)));
+            text = clipHeatText(node.name, Math.floor(availW / label.fontSize));
+            if (text && availH >= label.fontSize * 2.9) {
+              const score = HEAT_COLOR_DIMS[heatColorDim].fmt(meta);
+              if (score !== '—') text += `\n${score}`;
+            }
+          }
+        }
+        node.label = label;
+        node.labelText = text;
+      } else {
+        const w = rect ? rect.width : 0;
+        const fontSize = node.level === 1 ? 13 : 11;
+        node.upperText = w < fontSize * 2.4 ? '' : clipHeatText(node.name, Math.floor((w - 10) / fontSize));
+        node.upperLabel.color = depth === 0 ? '#f3f4f6' : '#52596b';
+      }
+      const kids = node.children || [];
+      for (const kid of kids) {
+        decorate(kid, depth + 1);
+      }
+    };
+    for (const node of viewNodes) {
+      decorate(node, 0);
+    }
+  }
+
+  // 从刚渲染完的图表读回每个节点色块的实际矩形（key = 我们构建的数据对象）。
+  // 注意：getRawDataItem 返回的是 ECharts 内部包装/深拷贝对象，无法按引用
+  // 匹配回原始节点 —— 所以改为平行遍历 series data 的内部树（tree.root 的
+  // 子节点顺序与传入数据一致，TreeNode 有 getDataIndex()），逐层用名字做
+  // 校验，对不上就返回空 Map 让调用方走兜底。
+  function readHeatRects(viewNodes) {
+    const rects = new Map();
+    try {
+      const data = heatmapChart.getModel().getSeriesByIndex(0).getData();
+      const walk = (treeNode, ourNode) => {
+        if (!treeNode || !ourNode || treeNode.name !== ourNode.name) throw new Error('tree mismatch');
+        const dataIndex = typeof treeNode.getDataIndex === 'function' ? treeNode.getDataIndex() : treeNode.dataIndex;
+        const layout = data.getItemLayout(dataIndex);
+        if (layout) rects.set(ourNode, layout);
+        const tKids = treeNode.children || [];
+        const oKids = ourNode.children || [];
+        if (tKids.length !== oKids.length) throw new Error('tree mismatch');
+        for (let i = 0; i < tKids.length; i++) walk(tKids[i], oKids[i]);
+      };
+      const tRoots = (data.tree.root.children || []);
+      if (tRoots.length !== viewNodes.length) throw new Error('tree mismatch');
+      for (let i = 0; i < tRoots.length; i++) walk(tRoots[i], viewNodes[i]);
+    } catch (err) {
+      return new Map();
+    }
+    return rects;
+  }
+
+  // 兜底：读不到真实布局时按"当前视图根节点面积 × value 占比"估算方形边长，
+  // 据此生成标签（横竖形状未知、不如真实矩形准，但保证有文字）。
+  function layoutHeatLabelsFallback(viewNodes, canvasArea) {
     const decorate = (node, share, depth) => {
       const side = Math.sqrt(Math.max(share, 0) * canvasArea);
       const meta = node.meta || {};
@@ -208,7 +312,7 @@
         const chars = Math.floor((side * 0.9) / fontSize);
         let text = side < 32 ? '' : clipHeatText(node.name, chars);
         if (text && side >= 92) {
-          const score = fmtScore(meta.trend_ma5);
+          const score = HEAT_COLOR_DIMS[heatColorDim].fmt(meta);
           if (score !== '—') text += `\n${score}`;
         }
         node.labelText = text;
@@ -218,12 +322,14 @@
         node.upperLabel.color = depth === 0 ? '#f3f4f6' : '#52596b';
       }
       const kids = node.children || [];
+      const kidTotal = kids.reduce((sum, kid) => sum + (kid.value || 0), 0);
       for (const kid of kids) {
-        decorate(kid, kids.length ? share / kids.length : 0, depth + 1);
+        decorate(kid, kidTotal > 0 ? share * (kid.value || 0) / kidTotal : 0, depth + 1);
       }
     };
+    const viewTotal = viewNodes.reduce((sum, node) => sum + (node.value || 0), 0);
     for (const node of viewNodes) {
-      decorate(node, viewNodes.length ? 1 / viewNodes.length : 0, 0);
+      decorate(node, viewTotal > 0 ? (node.value || 0) / viewTotal : 0, 0);
     }
   }
 
@@ -329,15 +435,25 @@
 
   // 按当前下钻路径重算标签并重渲染。ECharts 内置 zoom 只是放大既有数据，
   // 标签是构建时算死的静态字符串，小色块下钻后依然无文字 —— 所以这里每次
-  // 都以"当前视图根节点铺满画布"为前提重新生成标签。
+  // 都以"当前视图根节点铺满画布"为前提重新生成标签。渲染分两遍：第一遍先
+  // 铺出 treemap 真实布局（矩形的横竖/宽高比只有布局后才知道），读回每个
+  // 色块的实际矩形后，第二遍按实际宽高写入标签（见 layoutHeatLabels）。
   function renderHeatView() {
     if (!heatmapChart || !heatActiveGroup || !heatTreeNodes) return;
     const width = heatmapChartEl.clientWidth || 1000;
     const height = heatmapChartEl.clientHeight || 560;
     const root = heatViewPath.length ? heatViewPath[heatViewPath.length - 1] : null;
     const viewNodes = root ? [root] : heatTreeNodes;
-    layoutHeatLabels(viewNodes, width * height);
     heatmapChart.setOption(heatmapOption(heatActiveGroup, viewNodes), true);
+    const rects = readHeatRects(viewNodes);
+    if (rects.size) {
+      layoutHeatLabels(viewNodes, rects);
+      // 数据只多了 labelText/upperText 等标签字段，布局不变，直接合并更新
+      heatmapChart.setOption({ series: [{ type: 'treemap', data: viewNodes }] });
+    } else {
+      layoutHeatLabelsFallback(viewNodes, width * height);
+      heatmapChart.setOption({ series: [{ type: 'treemap', data: viewNodes }] });
+    }
     renderHeatCrumb();
   }
 
@@ -368,6 +484,21 @@
     if (!btn || !heatmapPayload) return;
     heatmapActiveL1 = btn.dataset.l1;
     renderHeatmap(heatmapPayload);
+  });
+
+  // 着色维度切换：重建树（itemStyle 颜色在 buildHeatTree 里按维度取值），
+  // 与切换一级类目一样回到顶层视图。
+  heatmapDimEl.addEventListener('click', (event) => {
+    const btn = event.target.closest('.heatmap-dim-btn');
+    if (!btn || !HEAT_COLOR_DIMS[btn.dataset.dim] || btn.dataset.dim === heatColorDim) return;
+    heatColorDim = btn.dataset.dim;
+    heatmapDimEl.querySelectorAll('.heatmap-dim-btn').forEach((el) => {
+      const on = el === btn;
+      el.classList.toggle('is-active', on);
+      el.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+    heatmapColorNoteEl.textContent = HEAT_COLOR_DIMS[heatColorDim].note;
+    if (heatmapPayload) renderHeatmap(heatmapPayload);
   });
 
   window.addEventListener('resize', () => {
@@ -658,7 +789,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   // 交互与手工交易持仓表一致：点击表头循环 降序 → 升序 → 原始顺序，
   // 缺失值恒排最后、同值保持原始相对顺序（稳定）。排序只重排每个类目行
   // （页面上带金叉/死叉计数的那一级）内部的标的行，类目分组顺序不变。
-  // key: null=原始顺序 | 'strength'=强度 | 'phase'=MACD 相位。
+  // key: null=原始顺序 | 'strength'=强度 | 'phase'=MACD 相位 | 'change'=日变动。
   // 相位排序是「强弱序」而非纯天数序：金叉按天数降序在前、死叉按天数升序
   // 在后（金叉5天 > 金叉1天 > 死叉1天 > 死叉5天），用 金叉=+天数 / 死叉=-天数
   // 的秩实现，升序即整体反转。
@@ -666,6 +797,8 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   let boardData = null;
   const sortValueFor = (item, key) => {
     if (key === 'strength') return Number.isFinite(item.strength) ? item.strength : null;
+    if (key === 'change') return Number.isFinite(item.daily_change_pct) ? item.daily_change_pct : null;
+    if (key === 'holding') return Number.isFinite(item.holding_value) ? item.holding_value : null;
     if (key === 'phase') {
       if (!Number.isFinite(item.macd_phase_days)) return null;
       return item.macd_phase === 'golden' ? item.macd_phase_days : -item.macd_phase_days;
@@ -691,7 +824,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const arrow = active ? (boardSort.dir === -1 ? '⬇️' : '⬆️') : '';
     return `<span class="sort-head${active ? ' is-sorted' : ''}" data-sort-key="${key}" title="点击排序（${escHtml(tip)}）：降序 → 升序 → 原始顺序">${label}<span class="sort-arrow">${arrow}</span></span>`;
   };
-  // 具体标的行：相位/日变动/近30日K线/MACD/趋势MA5/强度/操作（查看+试算）。
+  // 具体标的行：持仓金额/相位/日变动/近30日K线/MACD/趋势MA5/强度/操作（查看+试算）。
   const renderInstrumentRow = (item) => {
     const viewBtn = item.symbol
       ? `<a class="index-view-btn" href="/market-view?symbol=${encodeURIComponent(item.symbol)}" title="在标的查看页打开 ${escHtml(item.symbol)}">查看</a>`
@@ -699,8 +832,23 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const trialBtn = item.symbol
       ? `<button type="button" class="index-view-btn index-trial-btn" data-symbol="${escHtml(item.symbol)}" title="试算 ${escHtml(item.symbol)} 的止损价与仓位">试算</button>`
       : '';
+    // 持仓金额：服务端按「看板最新价（快照模式下为实时报价合成K线收盘）× 份数」
+    // 实时重算并附加；无持仓则为空。悬停提示带具体计算过程（与手工交易页同风格）。
+    let holdingCell = '';
+    let holdingTitle = '';
+    if (Number.isFinite(item.holding_value)) {
+      const fmtShares = (v) => Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+      const fmtMoney0 = (v) => '¥' + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+      holdingCell = `<strong>${fmtMoney0(item.holding_value)}</strong>` +
+        (Number.isFinite(item.holding_weight) ? `<span>占 ${item.holding_weight}%</span>` : '');
+      const totalText = Number.isFinite(boardData?.holdings_total)
+        ? `；占比 = ${fmtMoney0(item.holding_value)} ÷ 看板内持仓合计 ${fmtMoney0(boardData.holdings_total)} = ${item.holding_weight}%`
+        : '';
+      holdingTitle = `持仓金额 = 最新价 ${item.holding_price} × ${fmtShares(item.holding_shares)} 份 = ${fmtMoney0(item.holding_value)}${totalText}（随快照每 5 分钟重算）`;
+    }
     return `<div class="index-row subject-inst-row" data-symbol="${escHtml(item.symbol || '')}">
       <div class="index-name"><strong>${escHtml(item.name || item.symbol)}</strong><span>${escHtml(item.symbol)} · 具体标的</span></div>
+      <div class="index-holding" ${holdingTitle ? `title="${escHtml(holdingTitle)}"` : ''}>${holdingCell}</div>
       <div class="index-kspark">${klineSpark(item.kline || [], item.kline_ma5 || [], item.macd_dif || [], item.macd_dea || [])}<div class="chart-cross" hidden></div></div>
       <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
       <div class="index-mspark">${macdSpark(item.macd_dif || [], item.macd_dea || [], item.macd_hist || [])}<div class="chart-cross" hidden></div></div>
@@ -725,7 +873,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       const rows = ordered.map(renderInstrumentRow).join('');
       return `<div class="subject-l2-head"${section ? ` id="${escHtml(section.id)}"` : ''}><strong>${escHtml(l2.category_l2)}</strong><span class="subject-l2-meta">${dividerCross}</span></div>${rows}`;
     }).join('');
-    const gridHead = `<div class="index-grid-head"><span>标的</span><span>近30日K线</span><span>日变动</span><span>MACD</span>${sortHeadHtml('phase', 'MACD相位', '金叉久 > 金叉新 > 死叉新 > 死叉久，各类目内')}<span>近3月趋势 MA5</span>${sortHeadHtml('strength', '强度', '按强度，各类目内')}<span></span></div>`;
+    const gridHead = `<div class="index-grid-head"><span>标的</span>${sortHeadHtml('holding', '持仓金额', '按持仓金额（看板最新价×持仓份数），各类目内；无持仓为空')}<span>近30日K线</span>${sortHeadHtml('change', '日变动', '按日涨跌幅，各类目内')}<span>MACD</span>${sortHeadHtml('phase', 'MACD相位', '金叉久 > 金叉新 > 死叉新 > 死叉久，各类目内')}<span>近3月趋势 MA5</span>${sortHeadHtml('strength', '强度', '按强度，各类目内')}<span></span></div>`;
     return `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${escHtml(group.category_l1)}</h2><span>${headMeta}</span></div><div class="index-table-scroll">${gridHead}${body}</div></section>`;
   };
   const renderBoard = (data) => {
@@ -868,8 +1016,13 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       statusEl.className = 'context-hint';
     }
   }
+  // session 过期（401）时统一跳回登录墙，登录后回到当前页（后台轮询不再无限刷 401）
+  function redirectToLogin() {
+    location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+  }
   async function fetchBoard() {
     const response = await fetch('/subject-market/api/dashboard');
+    if (response.status === 401) { redirectToLogin(); return new Promise(function() {}); }
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '标的看板加载失败');
     return data;
@@ -906,6 +1059,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       let st;
       try {
         const resp = await fetch('/subject-market/api/dashboard/refresh-status');
+        if (resp.status === 401) { redirectToLogin(); return; }
         st = await resp.json();
       } catch (e) {
         continue;

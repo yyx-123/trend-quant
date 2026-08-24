@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -13,6 +16,38 @@ import pandas as pd
 _logger = logging.getLogger(__name__)
 
 _db_instance: Database | None = None
+
+# 密码哈希格式：pbkdf2_sha256$迭代次数$盐(hex)$摘要(hex)。
+# 2026-08 之前库存的是明文，由 _migrate_schema 一次性改写为哈希。
+_PASSWORD_ALGO = "pbkdf2_sha256"
+_PASSWORD_ITERATIONS = 200_000
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", str(password).encode("utf-8"), bytes.fromhex(salt), _PASSWORD_ITERATIONS
+    ).hex()
+    return f"{_PASSWORD_ALGO}${_PASSWORD_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(stored: str, candidate: str) -> bool:
+    """校验候选密码。兼容两种存储：pbkdf2 哈希 / 历史明文（迁移遗漏兜底）。"""
+    stored = str(stored)
+    candidate = str(candidate)
+    parts = stored.split("$")
+    if len(parts) == 4 and parts[0] == _PASSWORD_ALGO:
+        _, iterations, salt, digest = parts
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", candidate.encode("utf-8"), bytes.fromhex(salt), int(iterations)
+        ).hex()
+        return hmac.compare_digest(actual, digest)
+    return hmac.compare_digest(stored, candidate)
+
+
+def _dt_str(dt: datetime) -> str:
+    """与 SQLite datetime('now','localtime') 相同的字符串格式，保证可直接比较。"""
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 class Database:
@@ -275,6 +310,15 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_manual_trades_user_status
                     ON manual_trades(user_id, status, id);
 
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    expires_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sessions_expires
+                    ON sessions(expires_at);
+
                 CREATE TABLE IF NOT EXISTS batch_backtest_runs (
                     batch_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL DEFAULT '',
@@ -395,6 +439,19 @@ class Database:
                 for name, ddl in new_columns.items():
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+            # 2026-08 登录墙改造：users 表由明文密码迁移为 pbkdf2 哈希。
+            # 旧库明文就在库里，直接读出重哈希即可，幂等（已哈希的行跳过）。
+            rows = conn.execute("SELECT id, password FROM users").fetchall()
+            for row in rows:
+                stored = str(row["password"])
+                if stored.startswith(f"{_PASSWORD_ALGO}$"):
+                    continue
+                conn.execute(
+                    "UPDATE users SET password = ? WHERE id = ?",
+                    (hash_password(stored), row["id"]),
+                )
+                _logger.info("Migrated plaintext password to hash for user id=%s", row["id"])
 
     # ------------------------------------------------------------------
     # rule_strategies
@@ -1062,7 +1119,7 @@ class Database:
         return result
 
     # ------------------------------------------------------------------
-    # users（手工交易记录的用户体系，密码明文存储 — 内部小工具口径）
+    # users（密码 pbkdf2 哈希存储；2026-08 前的明文由 _migrate_schema 改写）
     # ------------------------------------------------------------------
     def create_user(self, username: str, password: str, is_admin: bool = False) -> dict:
         username = str(username).strip()
@@ -1072,7 +1129,7 @@ class Database:
             cur = conn.execute(
                 "INSERT INTO users (username, password, is_admin, created_at)"
                 " VALUES (?, ?, ?, datetime('now','localtime'))",
-                (username, str(password), 1 if is_admin else 0),
+                (username, hash_password(str(password)), 1 if is_admin else 0),
             )
             user_id = int(cur.lastrowid or 0)
         user = self.get_user(user_id)
@@ -1099,6 +1156,51 @@ class Database:
         d = dict(row)
         d["is_admin"] = bool(d.get("is_admin"))
         return d
+
+    # ------------------------------------------------------------------
+    # sessions（登录墙会话：token → user_id，滑动过期由 services/auth 驱动）
+    # ------------------------------------------------------------------
+    def create_session(self, user_id: int, token: str, expires_at: datetime) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO sessions (token, user_id, created_at, expires_at)"
+                " VALUES (?, ?, datetime('now','localtime'), ?)",
+                (str(token), int(user_id), _dt_str(expires_at)),
+            )
+
+    def get_session_user(self, token: str) -> dict | None:
+        """按 token 查 session 并联查用户。返回 {session_expires_at, user} 或 None；
+        不过滤过期——是否过期/是否删除由 services/auth 决定。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT s.expires_at AS session_expires_at, u.*
+                   FROM sessions s JOIN users u ON u.id = s.user_id
+                   WHERE s.token = ?""",
+                (str(token),),
+            ).fetchone()
+        if row is None:
+            return None
+        user = self._user_row(row)
+        expires_at = user.pop("session_expires_at")
+        return {"session_expires_at": expires_at, "user": user}
+
+    def touch_session(self, token: str, expires_at: datetime) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET expires_at = ? WHERE token = ?",
+                (_dt_str(expires_at), str(token)),
+            )
+
+    def delete_session(self, token: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sessions WHERE token = ?", (str(token),))
+
+    def delete_expired_sessions(self, now: datetime) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE expires_at < ?", (_dt_str(now),)
+            )
+            return int(cur.rowcount or 0)
 
     # ------------------------------------------------------------------
     # manual_trades（手工交易记录：同一标的多次买入 = 多条独立记录）

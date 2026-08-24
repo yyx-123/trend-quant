@@ -27,10 +27,13 @@ def test_calc_stop_loss_passes_stop_mode(monkeypatch):
 def test_open_positions_passes_stop_mode(monkeypatch):
     captured = {}
 
-    def fake_list_trades(username, password, **kwargs):
+    def fake_authenticate(username, password):
+        return {"id": 1, "username": username, "is_admin": False}
+
+    def fake_list_trades(user, **kwargs):
         captured.update(kwargs)
         return {
-            "user": {"username": username},
+            "user": {"username": user["username"]},
             "trades": [
                 {
                     "id": 1,
@@ -47,6 +50,7 @@ def test_open_positions_passes_stop_mode(monkeypatch):
             ],
         }
 
+    monkeypatch.setattr(server.tr, "authenticate", fake_authenticate)
     monkeypatch.setattr(server.tr, "list_trades", fake_list_trades)
 
     result = server.open_positions("alice", "pw", stop_mode="tight")

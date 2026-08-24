@@ -1,7 +1,9 @@
-"""API tests for the manual-trade record endpoints（交易记录：登录/录入/清仓/列表）。
+"""API tests for the manual-trade record endpoints（交易记录：录入/清仓/列表）。
 
-极简无状态鉴权：每个请求体携带 username + password。
-试算接口 POST /manual-trade/api/evaluate 保持公开，见 test_manual_trade_api.py。
+鉴权为全站登录墙 session cookie（2026-08 起）：测试先调 /api/auth/login
+换取 cookie（TestClient 自动携带），业务请求体不再携带用户名密码。
+登录墙本身的行为（未登录拦截/跳转）见 test_auth_wall.py；
+试算接口 POST /manual-trade/api/evaluate 见 test_manual_trade_api.py。
 """
 
 from __future__ import annotations
@@ -40,46 +42,28 @@ def _buy_point(bars, idx: int = -3) -> dict:
     }
 
 
-ALICE = {"username": "alice", "password": "pw1"}
-BOB = {"username": "bob", "password": "pw2"}
-ADMIN = {"username": "admin", "password": "root"}
-
-
-class TestLoginApi:
-    def test_login_ok(self, client, populated_db) -> None:
-        resp = client.post("/manual-trade/api/login", json=ALICE)
-        assert resp.status_code == 200
-        assert resp.json() == {"id": 1, "username": "alice", "is_admin": False}
-
-    def test_login_admin_flag(self, client, populated_db) -> None:
-        resp = client.post("/manual-trade/api/login", json=ADMIN)
-        assert resp.status_code == 200
-        assert resp.json()["is_admin"] is True
-
-    def test_login_wrong_password_401(self, client, populated_db) -> None:
-        resp = client.post(
-            "/manual-trade/api/login", json={"username": "alice", "password": "bad"}
-        )
-        assert resp.status_code == 401
-
-    def test_login_missing_fields_422(self, client, populated_db) -> None:
-        resp = client.post("/manual-trade/api/login", json={"username": "alice"})
-        assert resp.status_code == 422
+def _login(client, username: str, password: str) -> dict:
+    """切换当前会话用户（cookie 覆盖 conftest 自动登录的 tester）。"""
+    resp = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert resp.status_code == 200
+    return resp.json()
 
 
 class TestTradeCreateListApi:
     def test_create_then_list(self, client, populated_db) -> None:
         _, bars, *_ = populated_db
+        user = _login(client, "alice", "pw1")
+        assert user["username"] == "alice"
+        assert user["is_admin"] is False
+
         form = _buy_point(bars)
-        resp = client.post(
-            "/manual-trade/api/trades/create", json={**ALICE, **form, "shares": 1000}
-        )
+        resp = client.post("/manual-trade/api/trades/create", json={**form, "shares": 1000})
         assert resp.status_code == 200
         trade = resp.json()
         assert trade["symbol"] == "510300.SS"
         assert trade["status"] == "open"
 
-        resp = client.post("/manual-trade/api/trades/list", json=ALICE)
+        resp = client.post("/manual-trade/api/trades/list", json={})
         assert resp.status_code == 200
         data = resp.json()
         assert data["user"]["username"] == "alice"
@@ -91,25 +75,18 @@ class TestTradeCreateListApi:
         assert item["stops"]["chandelier_stop_price"] > 0
         assert item["holding"]["hold_days"] >= 1
 
-    def test_create_requires_auth_401(self, client, populated_db) -> None:
-        _, bars, *_ = populated_db
-        resp = client.post(
-            "/manual-trade/api/trades/create",
-            json={"username": "alice", "password": "bad", **_buy_point(bars), "shares": 100},
-        )
-        assert resp.status_code == 401
-
     def test_list_stop_mode_tight(self, client, populated_db) -> None:
         """列表接口支持 stop_mode：紧止损下持仓的止损倍数与价格同步切换。"""
         _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
         client.post(
             "/manual-trade/api/trades/create",
-            json={**ALICE, **_buy_point(bars), "shares": 100},
+            json={**_buy_point(bars), "shares": 100},
         )
 
-        loose = client.post("/manual-trade/api/trades/list", json=ALICE).json()["trades"][0]
+        loose = client.post("/manual-trade/api/trades/list", json={}).json()["trades"][0]
         tight = client.post(
-            "/manual-trade/api/trades/list", json={**ALICE, "stop_mode": "tight"}
+            "/manual-trade/api/trades/list", json={"stop_mode": "tight"}
         ).json()["trades"][0]
 
         assert loose["stops"]["stop_mode"] == "loose"
@@ -120,11 +97,11 @@ class TestTradeCreateListApi:
 
     def test_create_price_out_of_range_400(self, client, populated_db) -> None:
         _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
         row = bars.iloc[-3]
         resp = client.post(
             "/manual-trade/api/trades/create",
             json={
-                **ALICE,
                 "symbol": "510300",
                 "buy_date": str(row["time"])[:10],
                 "buy_price": round(float(row["high"]) + 0.5, 4),
@@ -136,32 +113,68 @@ class TestTradeCreateListApi:
 
     def test_records_isolated_between_users(self, client, populated_db) -> None:
         _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
         client.post(
             "/manual-trade/api/trades/create",
-            json={**ALICE, **_buy_point(bars), "shares": 100},
+            json={**_buy_point(bars), "shares": 100},
         )
-        resp = client.post("/manual-trade/api/trades/list", json=BOB)
+        _login(client, "bob", "pw2")
+        resp = client.post("/manual-trade/api/trades/list", json={})
         assert resp.status_code == 200
         assert resp.json()["trades"] == []
+
+
+class TestMyTradeAnnotationsApi:
+    """GET /market-view/api/my-trades：标的查看页买卖点 + 止损标注数据。"""
+
+    def test_annotations_for_open_trade(self, client, populated_db) -> None:
+        _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
+        client.post(
+            "/manual-trade/api/trades/create",
+            json={**_buy_point(bars, -5), "shares": 1000},
+        )
+        resp = client.get("/market-view/api/my-trades", params={"symbol": "510300"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["symbol"] == "510300.SS"
+        assert len(data["trades"]) == 1
+        item = data["trades"][0]
+        assert item["buy_price"] > 0
+        assert item["stops"]["tight"]["hard_stop_price"] > 0
+        assert item["stops"]["loose"]["hard_stop_price"] > 0
+
+    def test_no_position_returns_empty(self, client, populated_db) -> None:
+        _ = populated_db
+        _login(client, "bob", "pw2")
+        resp = client.get("/market-view/api/my-trades", params={"symbol": "510300"})
+        assert resp.status_code == 200
+        assert resp.json()["trades"] == []
+
+    def test_invalid_symbol_400(self, client, populated_db) -> None:
+        _ = populated_db
+        # 纯空白归一化为空串 → 400（与 /api/daily 同口径）
+        resp = client.get("/market-view/api/my-trades", params={"symbol": " "})
+        assert resp.status_code == 400
 
 
 class TestTradeCloseApi:
     def _create(self, client, bars) -> int:
         resp = client.post(
             "/manual-trade/api/trades/create",
-            json={**ALICE, **_buy_point(bars, -5), "shares": 1000},
+            json={**_buy_point(bars, -5), "shares": 1000},
         )
         assert resp.status_code == 200
         return resp.json()["id"]
 
     def test_close_then_list_shows_closed_last(self, client, populated_db) -> None:
         _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
         trade_id = self._create(client, bars)
         sell = _buy_point(bars, -2)
         resp = client.post(
             "/manual-trade/api/trades/close",
             json={
-                **ALICE,
                 "trade_id": trade_id,
                 "sell_date": sell["buy_date"],
                 "sell_price": sell["buy_price"],
@@ -170,7 +183,7 @@ class TestTradeCloseApi:
         assert resp.status_code == 200
         assert resp.json()["status"] == "closed"
 
-        resp = client.post("/manual-trade/api/trades/list", json=ALICE)
+        resp = client.post("/manual-trade/api/trades/list", json={})
         item = resp.json()["trades"][0]
         assert item["status"] == "closed"
         assert item["sell_date"] == sell["buy_date"]
@@ -179,12 +192,13 @@ class TestTradeCloseApi:
 
     def test_close_others_trade_403(self, client, populated_db) -> None:
         _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
         trade_id = self._create(client, bars)
+        _login(client, "bob", "pw2")
         sell = _buy_point(bars, -2)
         resp = client.post(
             "/manual-trade/api/trades/close",
             json={
-                **BOB,
                 "trade_id": trade_id,
                 "sell_date": sell["buy_date"],
                 "sell_price": sell["buy_price"],
@@ -192,12 +206,29 @@ class TestTradeCloseApi:
         )
         assert resp.status_code == 403
 
+    def test_admin_can_close_others_trade(self, client, populated_db) -> None:
+        _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
+        trade_id = self._create(client, bars)
+        _login(client, "admin", "root")
+        sell = _buy_point(bars, -2)
+        resp = client.post(
+            "/manual-trade/api/trades/close",
+            json={
+                "trade_id": trade_id,
+                "sell_date": sell["buy_date"],
+                "sell_price": sell["buy_price"],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "closed"
+
     def test_double_close_400(self, client, populated_db) -> None:
         _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
         trade_id = self._create(client, bars)
         sell = _buy_point(bars, -2)
         payload = {
-            **ALICE,
             "trade_id": trade_id,
             "sell_date": sell["buy_date"],
             "sell_price": sell["buy_price"],
@@ -209,12 +240,12 @@ class TestTradeCloseApi:
 
     def test_close_price_out_of_range_400(self, client, populated_db) -> None:
         _, bars, *_ = populated_db
+        _login(client, "alice", "pw1")
         trade_id = self._create(client, bars)
         row = bars.iloc[-2]
         resp = client.post(
             "/manual-trade/api/trades/close",
             json={
-                **ALICE,
                 "trade_id": trade_id,
                 "sell_date": str(row["time"])[:10],
                 "sell_price": round(float(row["high"]) + 0.5, 4),

@@ -126,8 +126,12 @@ class TestGlobalExceptionHandlers:
         app.add_api_route("/_test_observability_boom", _boom)
         # Starlette's ServerErrorMiddleware re-raises after the handler runs;
         # disable client-side re-raise to assert on the actual 500 response.
+        # 登录墙后匿名请求会被 303 拦走，local_client 需先登录（tester 由 client fixture 创建）。
         with caplog.at_level(logging.ERROR, logger="app.main"):
             with TestClient(app, raise_server_exceptions=False) as local_client:
+                local_client.post(
+                    "/api/auth/login", json={"username": "tester", "password": "pw-tester"}
+                )
                 resp = local_client.get("/_test_observability_boom")
         assert resp.status_code == 500
         assert resp.json() == {"detail": "Internal Server Error"}

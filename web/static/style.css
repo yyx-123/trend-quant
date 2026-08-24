@@ -3021,7 +3021,7 @@ details > summary::marker {
 .index-provider-head { display: flex; align-items: baseline; gap: 12px; padding: 16px 20px; background: #1d2f37; color: #fff; }
 .index-provider-head h2 { margin: 0; color: #fff; font-size: 20px; letter-spacing: .08em; }.index-provider-head span { color: #b9cbc4; font-size: 13px; }
 .index-group { border-top: 1px solid #dce5df; }.index-group-head { display:flex; justify-content:space-between; gap:12px; padding: 11px 20px; color:#f8fbf8; background:#34454a; }.index-group-head strong { font-size:14px; letter-spacing:.02em; }.index-group-head span { color:#d3dfda; font-size:12px; }
-.index-grid-head, .index-row { display:grid; grid-template-columns:minmax(150px,1.3fr) minmax(120px,1fr) 74px minmax(90px,.8fr) minmax(190px,.9fr) minmax(120px,1fr) 60px 64px; align-items:center; gap:12px; padding: 0 20px; }
+.index-grid-head, .index-row { display:grid; grid-template-columns:minmax(150px,1.3fr) minmax(96px,.7fr) minmax(120px,1fr) 74px minmax(90px,.8fr) minmax(190px,.9fr) minmax(120px,1fr) 60px 64px; align-items:center; gap:12px; padding: 0 20px; }
 .index-grid-head { min-height:34px; color:#75847d; background:#f2f5f1; font-size:12px; font-weight:800; }.index-grid-head span:not(:first-child) { text-align:center; }.index-row > :not(:first-child) { text-align:center; }
 .index-row { min-height:70px; border-top:1px solid #edf1ee; transition: background .18s ease; }.index-row:hover { background:#f0f6f0; }
 .index-name { display:grid; gap:2px; min-width:0; }.index-name strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#243840; }.index-name span { color:#8a9891; font-size:11px; font-variant-numeric:tabular-nums; }
@@ -3039,7 +3039,12 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
 .index-table-scroll { overflow-x: auto; }
 .index-table-scroll .index-grid-head,
 .index-table-scroll .index-row,
-.index-table-scroll .subject-l2-head { min-width: 1000px; }
+.index-table-scroll .subject-l2-head { min-width: 1100px; }
+
+/* 持仓金额列（标的看板，2026-08 登录墙后新增）：金额 + 占比两行 */
+.index-holding { display: grid; gap: 2px; justify-items: center; }
+.index-holding strong { font-size: 14px; color: var(--text); }
+.index-holding span { font-size: 11px; font-weight: 700; color: var(--muted); }
 
 /* Subject-board flat table ------------------------------------------------ */
 .index-board:has(.subject-l1) { gap: 16px; }
@@ -3399,6 +3404,44 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
+}
+
+.heatmap-dim {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.heatmap-dim-label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-right: 1px;
+}
+
+.heatmap-dim-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.heatmap-dim-btn:hover {
+  border-color: var(--line-strong);
+  background: #ffffff;
+}
+
+.heatmap-dim-btn.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
 }
 
 .heatmap-legend-bar {
@@ -4514,8 +4557,8 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
    ──────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
 
-  /* ── 标的看板：8 列横排表格行 → 卡片式三段布局 ─────────────
-     三段依次为：名称+操作 / 相位+日变动+强度 / 三张 mini 图。
+  /* ── 标的看板：9 列横排表格行 → 卡片式三段布局 ─────────────
+     三段依次为：名称+操作 / 相位+持仓+日变动+强度 / 三张 mini 图。
      列表头与新布局不再对应，直接隐藏。 */
   .index-board-page .index-table-scroll {
     overflow-x: visible;
@@ -4532,11 +4575,11 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   }
 
   .index-board-page .index-row {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     grid-template-areas:
-      "name name name name view view"
-      "phase phase phase change change strength"
-      "kspark kspark mspark mspark spark spark";
+      "name name name name view view view"
+      "phase phase holding holding change change strength"
+      "kspark kspark mspark mspark spark spark spark";
     gap: 10px;
     min-height: 0;
     padding: 12px 14px;
@@ -4547,6 +4590,11 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   .index-board-page .index-mspark { grid-area: mspark; }
   .index-board-page .index-spark { grid-area: spark; }
   .index-board-page .index-view { grid-area: view; }
+  .index-board-page .index-holding {
+    grid-area: holding;
+    justify-items: start;
+    align-self: center;
+  }
 
   .index-board-page .index-phase {
     grid-area: phase;
@@ -4655,4 +4703,105 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   #mtClosedList .mt-trade-table td:not([colspan]):nth-child(13) {
     display: none;
   }
+}
+
+/* ── 登录墙（2026-08）────────────────────────────────────── */
+/* 导航栏右侧：当前用户 + 退出 */
+.site-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 8px 0 16px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.site-user__logout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--accent-strong);
+  text-decoration: none;
+  font-size: 12px;
+  transition: background 0.2s ease;
+}
+
+.site-user__logout:hover {
+  background: #fff;
+}
+
+/* 登录页：独立卡片布局（不继承 base.html，无导航栏） */
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  padding: 36px 32px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.76);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(18px);
+}
+
+.login-title {
+  margin: 6px 0 24px;
+  font-size: 26px;
+}
+
+.login-form {
+  display: grid;
+  gap: 16px;
+}
+
+.login-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-soft);
+}
+
+.login-form input {
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #fff;
+  font-size: 14px;
+}
+
+.login-form input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.login-form button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.login-form button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
