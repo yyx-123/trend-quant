@@ -1728,7 +1728,7 @@ button:disabled {
 .const-col-code { width: 150px; }
 .const-col-weight { width: 96px; }
 .const-col-category { width: 220px; }
-.const-col-status { width: 96px; }
+.const-col-status { width: 120px; }
 /* const-col-name 不设宽度，占满剩余空间（约 230px，8 字名称完整显示） */
 
 /* 新增标的：类目选择区的自动/手动模式切换 */
