@@ -336,28 +336,30 @@
   function heatTooltip(param) {
     const d = param.data || {};
     const m = d.meta || {};
-    const ma5Class = (m.trend_ma5 || 0) >= 0 ? 'heat-tip-pos' : 'heat-tip-neg';
+    const signClass = (v) => (v == null || !Number.isFinite(v) || v === 0 ? '' : (v > 0 ? 'heat-tip-pos' : 'heat-tip-neg'));
+    const changeCell = (v) => `<span class="${signClass(v)}">${fmtChange(v)}</span>`;
     if (d.isLeaf) {
       return [
         `<div class="heat-tip-title">${escHtml(d.name)}</div>`,
         `<div class="heat-tip-sub">${escHtml(m.symbol || '')} · ${escHtml(m.category_l2 || '')} / ${escHtml(m.category_l3 || '')}</div>`,
         `<table class="heat-tip-table">`,
-        `<tr><td>趋势 MA5</td><td class="${ma5Class}">${fmtScore(m.trend_ma5)}</td></tr>`,
-        `<tr><td>当日趋势值</td><td>${fmtScore(m.trend_score)}</td></tr>`,
+        `<tr><td>趋势 MA5</td><td class="${signClass(m.trend_ma5)}">${fmtScore(m.trend_ma5)}</td></tr>`,
+        `<tr><td>当日趋势值</td><td class="${signClass(m.trend_score)}">${fmtScore(m.trend_score)}</td></tr>`,
         `<tr><td>强度</td><td>${m.strength == null ? '—' : m.strength}</td></tr>`,
-        `<tr><td>日涨跌</td><td>${fmtChange(m.daily_change_pct)}</td></tr>`,
-        `<tr><td>5日 / 20日</td><td>${fmtChange(m.change_5d)} / ${fmtChange(m.change_20d)}</td></tr>`,
+        `<tr><td>日涨跌</td><td class="${signClass(m.daily_change_pct)}">${fmtChange(m.daily_change_pct)}</td></tr>`,
+        `<tr><td>5日 / 20日</td><td>${changeCell(m.change_5d)} / ${changeCell(m.change_20d)}</td></tr>`,
         `<tr><td>近20日均成交额</td><td>${m.amount_avg20 == null ? '—' : fmtAmount(m.amount_avg20)}</td></tr>`,
         `</table>`,
+        `<div class="heat-tip-hint">点击跳转到标的查看页</div>`,
       ].join('');
     }
     return [
       `<div class="heat-tip-title">${escHtml(d.name)}</div>`,
       `<div class="heat-tip-sub">${m.member_count == null ? '—' : m.member_count} 个标的 · 趋势值按成交额加权</div>`,
       `<table class="heat-tip-table">`,
-      `<tr><td>趋势 MA5</td><td class="${ma5Class}">${fmtScore(m.trend_ma5)}</td></tr>`,
+      `<tr><td>趋势 MA5</td><td class="${signClass(m.trend_ma5)}">${fmtScore(m.trend_ma5)}</td></tr>`,
       `<tr><td>强度</td><td>${m.strength == null ? '—' : m.strength}</td></tr>`,
-      `<tr><td>日涨跌</td><td>${fmtChange(m.daily_change_pct)}</td></tr>`,
+      `<tr><td>日涨跌</td><td class="${signClass(m.daily_change_pct)}">${fmtChange(m.daily_change_pct)}</td></tr>`,
       `<tr><td>近20日均成交额</td><td>${m.amount_avg20 == null ? '—' : fmtAmount(m.amount_avg20)}</td></tr>`,
       `</table>`,
     ].join('');
@@ -375,6 +377,8 @@
         // 下钻不走内置 zoomToNode：标签需要按新视图重算（见 renderHeatView），
         // 因此点击由页面接管后整树重渲染，面包屑也是自定义的。
         nodeClick: false,
+        // 类目下钻、叶子跳标的查看页都由页面 click 处理，统一指针手势
+        cursor: 'pointer',
         breadcrumb: { show: false },
         label: { show: true, fontSize: 12, lineHeight: 15, formatter: (p) => p.data.labelText || '' },
         upperLabel: { show: false },
@@ -411,8 +415,13 @@
         heatmapChart = echarts.init(heatmapChartEl);
         heatmapChart.on('click', (params) => {
           const d = params?.data;
-          // 只对有子节点的类目色块下钻；叶子标的点击不缩放
-          if (!d || !Array.isArray(d.children) || !d.children.length) return;
+          if (!d) return;
+          // 叶子标的：跳转到标的查看页；类目色块：下钻
+          if (!Array.isArray(d.children) || !d.children.length) {
+            const symbol = d.meta?.symbol;
+            if (symbol) window.location.assign(`/market-view?symbol=${encodeURIComponent(symbol)}`);
+            return;
+          }
           heatViewPath.push(d);
           renderHeatView();
         });

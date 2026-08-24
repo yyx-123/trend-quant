@@ -64,6 +64,7 @@
       </div>
       <div id="mvRangeMeta" class="market-range-meta"></div>
     </div>
+    <div id="mvStopInfoBar" class="market-stop-info" hidden></div>
     <div id="mvBacktestSummary" class="market-backtest-summary" hidden></div>
 
     <div class="chart-grid market-returns-grid" id="mvReturnsPanel" hidden>
@@ -241,6 +242,7 @@
   const rsiControlsEl = document.getElementById('mvRsiControls');
   const rsiPeriodEl = document.getElementById('mvRsiPeriod');
   const stopModeToggleEl = document.getElementById('mvStopModeToggle');
+  const stopInfoEl = document.getElementById('mvStopInfoBar');
 
   let priceChart = null;
   let trendChart = null;
@@ -260,6 +262,17 @@
     charts = [priceChart, trendChart, volumeChart, rsiChart, biasChart, macdChart];
     for (const chart of charts) chart.group = 'market-view-time';
     echarts.connect('market-view-time');
+    // 止损线悬停说明：写入图上方 DOM 信息条（ECharts label 会被 grid 边缘裁剪，改用图外展示）
+    priceChart.on('mouseover', (e) => {
+      if (e.componentType === 'markLine' && e.seriesName === '我的止损' && e.data?.hoverText) {
+        stopInfoEl.textContent = e.data.hoverText;
+        stopInfoEl.hidden = false;
+      }
+    });
+    priceChart.on('mouseout', (e) => {
+      if (e.componentType === 'markLine' && e.seriesName === '我的止损') stopInfoEl.hidden = true;
+    });
+    priceChart.on('globalout', () => { stopInfoEl.hidden = true; });
   } catch (err) {
     console.warn('ECharts 初始化失败，图表将不可用：', err);
     charts = [];
@@ -671,16 +684,14 @@
     return Number.isFinite(n) ? String(n) : '-';
   }
 
-  // 止损线悬停文案：说明当前生效的是硬止损还是吊灯止损及计算过程
+  // 止损线悬停文案：硬止损/吊灯止损各一行算式，最后一行给出取值规则
   function stopHoverText(t, s, effectivePrice) {
-    const isHard = Number(s.hard_stop_price) >= Number(s.chandelier_stop_price);
     const modeLabel = myStopMode === 'tight' ? '紧止损' : '松止损';
     const lines = [
-      `${modeLabel} ${fmtExact(effectivePrice)}（${t.buy_date} 买入 @ ${fmtExact(t.buy_price)}）`,
-      isHard
-        ? `生效：硬止损 = 买入价 ${fmtExact(t.buy_price)} − ${s.hard_stop_atr_mul}×买入日ATR20 ${fmtExact(s.atr_at_buy)}`
-        : `生效：吊灯止损 = 买入以来最高价 ${fmtExact(s.highest_since_buy)}（${s.highest_since_buy_date || '-'}）− ${s.chandelier_stop_atr_mul}×当前ATR20 ${fmtExact(s.current_atr)}`,
-      `参考另一档：硬止损 ${fmtExact(s.hard_stop_price)} / 吊灯止损 ${fmtExact(s.chandelier_stop_price)}，取较高者生效`,
+      `${modeLabel}线 = ${fmtExact(effectivePrice)} 元，说明：`,
+      `硬止损 = 买入价 ${fmtExact(t.buy_price)} − ${s.hard_stop_atr_mul}×买入日ATR20 ${fmtExact(s.atr_at_buy)} = ${fmtExact(s.hard_stop_price)} 元`,
+      `吊灯止损 = 买入以来最高价 ${fmtExact(s.highest_since_buy)}（${s.highest_since_buy_date || '-'}）− ${s.chandelier_stop_atr_mul}×当前ATR20 ${fmtExact(s.current_atr)} = ${fmtExact(s.chandelier_stop_price)} 元`,
+      `二者取价高者 ${fmtExact(effectivePrice)} 元作为${modeLabel}线`,
     ];
     return lines.join('\n');
   }
@@ -760,26 +771,22 @@
         markLine: {
           symbol: 'none',
           animation: false,
-          lineStyle: { color: '#b42318', width: 1.5, type: 'dashed' },
+          // 深灰虚线：避开K线红绿与回测蓝/橙，任何缩放级别下都可辨识
+          lineStyle: { color: '#4b5563', width: 1.5, type: 'dashed' },
           label: {
             show: true,
-            position: 'insideEndTop',
+            // 放在线的最左端：右端是最新K线密集区，左端通常空旷不遮挡
+            position: 'insideStartTop',
+            distance: 6,
             formatter: (p) => `止损 ${fmtExact(p.data.yAxis)}`,
-            color: '#b42318', fontWeight: 800, fontSize: 11,
-            textBorderColor: '#ffffff', textBorderWidth: 3,
+            // 深灰底白字药丸：压在K线/均线上也能读清
+            color: '#ffffff', fontWeight: 700, fontSize: 10,
+            backgroundColor: '#4b5563', borderRadius: 3,
+            padding: [2, 6],
           },
-          emphasis: {
-            lineStyle: { width: 3 },
-            label: {
-              position: 'insideEndTop',
-              formatter: (p) => p.data.hoverText || '',
-              fontSize: 11, fontWeight: 700, lineHeight: 16,
-              backgroundColor: 'rgba(255,255,255,0.94)',
-              borderColor: '#b42318', borderWidth: 1, borderRadius: 6,
-              padding: [6, 8],
-              textBorderWidth: 0,
-            },
-          },
+          // 悬停只加粗线身；计算说明走 DOM 信息条（stopInfoEl），
+          // ECharts label 无论定位在哪一端都可能被 grid 边缘裁剪。
+          emphasis: { lineStyle: { width: 2.5 } },
           data: stopLines,
         },
         z: 9,
@@ -823,7 +830,13 @@
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       tooltip: {
         trigger: 'axis',
-        axisPointer: { type: 'cross' },
+        axisPointer: {
+          type: 'cross',
+          label: {
+            // y轴十字标签原始值是全精度浮点（如 2.1580301972），按价格精度格式化
+            formatter: (p) => p.axisDimension === 'y' ? num(Number(p.value), 4) : String(p.value),
+          },
+        },
         formatter: (params) => {
           if (!params || !params.length) return '-';
           const lines = [String(params[0].axisValue || '')];
@@ -1521,6 +1534,23 @@
     if (annualTableBodyEl) annualTableBodyEl.innerHTML = '';
   }
 
+  // 清空回测相关状态与全部回测面板，恢复标的查看页初始样貌
+  // （换标的或点刷新按钮时调用；不触碰已输入的标的）。
+  function clearBacktestState(meta = {}) {
+    currentBacktest = null;
+    allMultiKline = [];
+    activeResultKey = null;
+    backtestSummaryEl.hidden = true;
+    backtestStartEl.value = meta.start || '';
+    backtestEndEl.value = meta.end || '';
+    updateBacktestRangeLabel();
+    tradeMetaEl.textContent = '运行回测后显示。';
+    tradesBodyEl.innerHTML = '<tr><td colspan="14">暂无交易明细。</td></tr>';
+    clearBacktestReturns();
+    debugInfoEl.textContent = '暂无结果。';
+    debugPreviewEl.textContent = '';
+  }
+
   function positionPctCell(trade) {
     if (String(trade?.side || '').toUpperCase() !== 'BUY') return '';
     const sizing = trade?.sizing;
@@ -1630,6 +1660,13 @@
     }
   }
 
+  // 我的止损档位开关：仅当当前标的存在带止损数据的未平仓持仓时显示
+  function updateStopModeToggle() {
+    stopModeToggleEl.hidden = !(myTrades?.trades || []).some(
+      (t) => t.status === 'open' && t.stops
+    );
+  }
+
   function renderAll(payload, preserveZoom = false) {
     const dates = payload.dates || [];
     const zoom = preserveZoom && currentZoom ? currentZoom : oneYearZoom(dates);
@@ -1652,9 +1689,7 @@
     chartTitleEl.innerHTML = `${payload.display_label || payload.display_name || payload.symbol || ''} 日 K${payload.meta?.is_intraday ? ` <span class="intraday-badge"><span class="intraday-dot" style="animation:intraday-pulse 1.6s ease-in-out infinite"></span>${intradayLabel}</span>` : ''}`;
     rangeMetaEl.textContent = `${payload.meta?.start || '-'} ~ ${payload.meta?.end || '-'} | ${Number(payload.meta?.rows || 0)} 根${payload.meta?.is_intraday ? ` · 含${intradayLabel}数据` : ''}`;
     // 我的止损档位开关：仅当当前标的存在带止损数据的未平仓持仓时显示
-    stopModeToggleEl.hidden = !(myTrades?.trades || []).some(
-      (t) => t.status === 'open' && t.stops
-    );
+    updateStopModeToggle();
     renderPrice(payload, zoom);
     renderTrend(payload, zoom);
     renderVolume(payload, zoom);
@@ -1839,19 +1874,35 @@
       return;
     }
     refreshBtnEl.disabled = true;
+    stopInfoEl.hidden = true;
     try {
       const previousSymbol = currentPayload?.symbol || '';
       const params = new URLSearchParams();
       params.set('symbol', target);
-      params.set('intraday', 'true');
       appendTrendParams(params);
       appendRsiParams(params);
+      // 两阶段加载：阶段1 纯DB日K（本地毫秒级）立即渲染保证秒开；
+      // 阶段2 带盘中合成K线（需一次 tickflow 报价，实测 RTT 约3秒）后台补齐，
+      // 持仓标注同样含报价请求，三者并行，都不阻塞首渲染。
       const resp = await fetch(`/market-view/api/daily?${params.toString()}`);
       if (resp.status === 401) { redirectToLogin(); return; }
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || '日 K 加载失败');
-      // 我的持仓标注与主数据并行口径：用服务端归一化后的代码拉取
-      myTrades = await loadMyTrades(data.symbol);
+      myTrades = null;
+      // 用服务端归一化后的代码拉取，口径与主数据一致
+      const myTradesPromise = loadMyTrades(data.symbol);
+      const liveParams = new URLSearchParams(params);
+      liveParams.set('intraday', 'true');
+      const liveDailyPromise = (async () => {
+        try {
+          const r = await fetch(`/market-view/api/daily?${liveParams.toString()}`);
+          if (r.status === 401) { redirectToLogin(); return null; }
+          if (!r.ok) return null;
+          return await r.json();
+        } catch (err) {
+          return null;
+        }
+      })();
       const matched = allSymbols.find((item) => item.symbol === data.symbol) || {
         symbol: data.symbol,
         name: data.name,
@@ -1861,18 +1912,22 @@
       };
       applySelectedSymbol(matched);
       if (previousSymbol && previousSymbol !== data.symbol) {
-        currentBacktest = null;
-        backtestSummaryEl.hidden = true;
-        backtestStartEl.value = data.meta?.start || '';
-        backtestEndEl.value = data.meta?.end || '';
-        updateBacktestRangeLabel();
-        tradeMetaEl.textContent = '运行回测后显示。';
-        tradesBodyEl.innerHTML = '<tr><td colspan="14">暂无交易明细。</td></tr>';
-        clearBacktestReturns();
-        debugInfoEl.textContent = '暂无结果。';
-        debugPreviewEl.textContent = '';
+        clearBacktestState(data.meta || {});
       }
       renderAll(data, false);
+      const [trades, liveData] = await Promise.all([myTradesPromise, liveDailyPromise]);
+      // 等待期间用户可能已切换标的，仅当仍在同一标的时补画
+      if (currentPayload?.symbol !== data.symbol) return;
+      // 有盘中合成K线时才需要整图替换（无 overlay 则与阶段1数据相同）；
+      // 保留用户当前缩放
+      if (liveData && liveData.meta?.is_intraday) {
+        renderAll(liveData, true);
+      }
+      if (trades) {
+        myTrades = trades;
+        updateStopModeToggle();
+        renderPrice(currentPayload, currentZoom);
+      }
     } catch (err) {
       chartTitleEl.textContent = `加载失败：${err.message}`;
       rangeMetaEl.textContent = '';
@@ -1984,7 +2039,12 @@
   } catch (err) {
     // charts not initialized – listeners skipped
   }
-  refreshBtnEl.addEventListener('click', () => loadDaily());
+  // 刷新 = 清掉回测痕迹（结果表/交易明细/收益面板/图上策略买卖点）+ 重新拉日K，
+  // 已输入的标的保留。
+  refreshBtnEl.addEventListener('click', () => {
+    clearBacktestState();
+    loadDaily();
+  });
 
   // 我的止损紧/松切换（与手工交易页同一 seg 交互）：只重渲染价格图，不重拉数据
   stopModeToggleEl.addEventListener('click', (ev) => {

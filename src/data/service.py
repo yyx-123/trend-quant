@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -33,6 +34,36 @@ def _symbol_lock(symbol: str) -> threading.Lock:
             lock = threading.Lock()
             _symbol_locks[key] = lock
         return lock
+
+
+# 实时报价进程级短 TTL 缓存：打开一个标的页时，日K overlay、my-trades 止损
+# 等会为同一标的各拉一次 tickflow 报价（按次限流 + RTT 秒级，页面因此数秒
+# 打不开）。30s 短缓存让 TTL 内重复请求零网络开销；远短于盘中快照 5 分钟
+# 节奏，不影响新鲜度口径（下游 is_quote_fresh 校验照常作用于报价本身）。
+_QUOTE_CACHE_TTL_SECONDS = max(
+    0.0, float(os.getenv("TICKFLOW_QUOTE_CACHE_TTL_SECONDS", "30") or 30)
+)
+_quote_cache: dict[str, tuple[float, dict]] = {}
+_quote_cache_lock = threading.Lock()
+
+
+def _quote_cache_get(symbol: str) -> dict | None:
+    key = str(symbol or "").strip().upper()
+    if not key:
+        return None
+    with _quote_cache_lock:
+        entry = _quote_cache.get(key)
+        if entry and (time.monotonic() - entry[0]) < _QUOTE_CACHE_TTL_SECONDS:
+            return dict(entry[1])
+    return None
+
+
+def _quote_cache_put(symbol: str, quote: dict) -> None:
+    key = str(symbol or "").strip().upper()
+    if not key or not quote or quote.get("error") or quote.get("price") is None:
+        return
+    with _quote_cache_lock:
+        _quote_cache[key] = (time.monotonic(), dict(quote))
 
 
 def _retry_wait_seconds(errors: dict[str, str], fallback: float) -> float:
@@ -146,33 +177,49 @@ class DataService:
         return data
 
     def fetch_latest_quote(self, symbol: str) -> dict:
+        cached = _quote_cache_get(symbol)
+        if cached is not None:
+            return cached
         name, provider = self._tickflow_provider()
         quote = provider.fetch_latest_quote(symbol)
         if quote.get("price") is None:
             raise DataProviderError(f"TickFlow returned no latest quote price for {symbol}")
         quote["provider"] = name
+        _quote_cache_put(symbol, quote)
         return quote
 
     def fetch_latest_quotes(self, symbols: list[str]) -> dict[str, dict]:
         """Batch-fetch real-time quotes for multiple symbols."""
         if not symbols:
             return {}
+        # TTL 内已有缓存的直接命中，只为缺失/过期的标的发网络请求
+        result: dict[str, dict] = {}
+        missing: list[str] = []
+        for symbol in symbols:
+            cached = _quote_cache_get(symbol)
+            if cached is not None:
+                result[symbol] = cached
+            else:
+                missing.append(symbol)
+        if not missing:
+            return result
         name, provider = self._tickflow_provider()
         batch_fetcher = getattr(provider, "fetch_latest_quotes", None)
         if not callable(batch_fetcher):
             # Fallback: call single-symbol fetch in a loop.
-            result: dict[str, dict] = {}
-            for symbol in symbols:
+            for symbol in missing:
                 try:
                     result[symbol] = self.fetch_latest_quote(symbol)
                 except Exception as exc:
                     result[symbol] = {"symbol": symbol, "error": str(exc)}
             return result
-        quotes = batch_fetcher(symbols)
+        quotes = batch_fetcher(missing)
         for q in quotes.values():
             if "error" not in q:
                 q["provider"] = name
-        return quotes
+                _quote_cache_put(q.get("symbol", ""), q)
+        result.update(quotes)
+        return result
 
     def fetch_instrument_name(self, symbol: str) -> dict:
         name, provider = self._tickflow_provider()
