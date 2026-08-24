@@ -880,27 +880,20 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     }
   }
 
-  // ---- 后台实时重算（快照先行，算完自动替换） -----------------------------
-  // 打开页面即触发一次实时重算；服务端单例保证全进程只有一项在跑任务
-  // （与盘中定时快照共用入口）。非交易时段/盘前/今日日K已落库时服务端
-  // 返回 skipped，前端不再轮询。
+  // ---- 定时快照状态轮询（算完自动整表替换） -----------------------------
+  // 页面不再触发重算，快照只由盘中定时任务（交易时段每 5 分钟）更新；
+  // 这里仅轮询任务状态：在跑时显示进度，快照时间戳变化时拉取并整表替换。
   let refreshPollToken = 0;
   const REFRESH_POLL_INTERVAL_MS = 2000;
-  const REFRESH_POLL_TIMEOUT_MS = 6 * 60 * 1000;
   async function autoRefreshBoard() {
     const token = ++refreshPollToken;
-    let start;
-    try {
-      const resp = await fetch('/subject-market/api/dashboard/refresh', { method: 'POST' });
-      start = await resp.json();
-    } catch (e) {
-      return; // 触发失败不打断当前快照展示
-    }
-    if (start.status !== 'started' && start.status !== 'running') return;
-
-    const baseText = statusEl.innerHTML;
-    const deadline = Date.now() + REFRESH_POLL_TIMEOUT_MS;
-    while (Date.now() < deadline) {
+    // 本地记录已见到的快照时间戳，而非依赖 renderedSnapshotTs —— 盘后切回
+    // EOD 看板时后者为 null，但 refresh-status 仍返回旧快照时间戳，直接
+    // 对比会导致反复重载。
+    let lastSeenTs = renderedSnapshotTs;
+    let shownError = null;
+    let baseText = null; // 进入「在跑」状态时的状态栏文本，用于叠加进度
+    for (;;) {
       await new Promise((r) => setTimeout(r, REFRESH_POLL_INTERVAL_MS));
       if (token !== refreshPollToken) return; // 看板已被重新加载，旧轮询作废
       let st;
@@ -911,25 +904,23 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
         continue;
       }
       if (st.running) {
+        if (baseText === null) baseText = statusEl.innerHTML;
         const pct = Math.round((st.percent || 0) * 100);
         statusEl.innerHTML = `${baseText} <span class="intraday-refreshing">· 正在后台更新实时数据${pct ? ` ${pct}%` : ''}…</span>`;
         continue;
       }
-      if (st.last_error) {
-        statusEl.innerHTML = `${baseText} <span class="intraday-refreshing">· 实时更新失败：${st.last_error}（当前为最近快照）</span>`;
-        return;
+      baseText = null;
+      if (st.snapshot_ts && st.snapshot_ts !== lastSeenTs) {
+        // 新一轮定时快照已落库：整表替换。
+        lastSeenTs = st.snapshot_ts;
+        shownError = null;
+        await loadBoard();
+        continue;
       }
-      // 重算完成：拉取最新快照并整表替换。
-      try {
-        const data = await fetchBoard();
-        renderBoard(data);
-        renderHeatmap(data);
-        renderedSnapshotTs = data.snapshot_ts || null;
-        renderStatus(data);
-      } catch (e) {
-        statusEl.innerHTML = baseText;
+      if (st.last_error && st.last_error !== shownError) {
+        shownError = st.last_error;
+        statusEl.innerHTML = `${statusEl.innerHTML} <span class="intraday-refreshing">· 实时更新失败：${st.last_error}（当前为最近快照）</span>`;
       }
-      return;
     }
   }
 

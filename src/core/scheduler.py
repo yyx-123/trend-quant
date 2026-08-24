@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,17 +12,15 @@ from core.settings import Settings
 
 logger = get_logger(__name__)
 
-# 标的大盘盘中快照的固定触发时点（本地时间，交易时段内，含午间 12:30）。
-INTRADAY_SNAPSHOT_TIMES: tuple[tuple[int, int], ...] = (
-    (9, 45),
-    (10, 15),
-    (10, 45),
-    (11, 15),
-    (12, 30),
-    (13, 15),
-    (13, 45),
-    (14, 15),
-    (14, 45),
+# 标的大盘盘中快照的 cron 触发计划（本地时间）：交易时段内每 5 分钟一轮
+# —— 9:35~11:30、13:00~15:00，含 15:00 收盘快照；午间休盘报价不更新，不安排。
+# 单轮重算约 20 秒，远小于 5 分钟间隔。元素为 (hour, minute) cron 表达式。
+INTRADAY_SNAPSHOT_CRONS: tuple[tuple[str, str], ...] = (
+    ("9", "35-59/5"),
+    ("10", "*/5"),
+    ("11", "0-30/5"),
+    ("13-14", "*/5"),
+    ("15", "0"),
 )
 
 
@@ -54,16 +52,17 @@ class SchedulerManager:
         )
 
         if intraday_snapshot_job is not None:
-            # 标的大盘盘中快照：固定 9 个时点触发。周一~周五的 cron 之上，
-            # 任务内部再以 is_trading_day 兜底跳过节假日；单例运行器保证
-            # 与页面触发的重算不并发。
-            for hh, mm in INTRADAY_SNAPSHOT_TIMES:
+            # 标的大盘盘中快照：周一~周五交易时段每 5 分钟触发。任务内部
+            # 再以 is_trading_day 兜底跳过节假日；单例运行器保证上一轮
+            # 未结束时重复触发直接复用，不并发。间隔短，misfire 宽限 60s
+            # 即可 —— 错过的一轮很快由下一轮接替。
+            for idx, (hour, minute) in enumerate(INTRADAY_SNAPSHOT_CRONS):
                 scheduler.add_job(
                     intraday_snapshot_job,
-                    trigger=CronTrigger(day_of_week="mon-fri", hour=hh, minute=mm),
-                    id=f"intraday_snapshot_{hh:02d}{mm:02d}",
+                    trigger=CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute),
+                    id=f"intraday_snapshot_{idx}",
                     replace_existing=True,
-                    misfire_grace_time=300,
+                    misfire_grace_time=60,
                     coalesce=True,
                 )
 

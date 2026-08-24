@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -48,9 +49,16 @@ async def subject_market_dashboard() -> dict:
     max_bar = str(revision[0])[:10] if revision and revision[0] else ""
     if max_bar < today:
         snapshot = snapshot_runner.latest_snapshot()
-        if snapshot and snapshot.get("as_of") == today:
+        # 快照 as_of 是完整时间戳（如 2026-08-24T10:15:19），按日期部分比对。
+        if snapshot and str(snapshot.get("as_of") or "")[:10] == today:
             return {**snapshot["payload"], "snapshot_ts": snapshot["computed_at"]}
-    return _dashboard_cache.get_or_compute(revision, lambda: build_subject_dashboard_payload(db))
+    # 冷缓存重建是全市场秒级 CPU 计算 —— 放到线程池，避免在事件循环上
+    # 同步执行时把整个服务卡住（RevisionCache 内部有锁，并发冷请求只算一次）。
+    return await run_in_threadpool(
+        _dashboard_cache.get_or_compute,
+        revision,
+        lambda: build_subject_dashboard_payload(db),
+    )
 
 
 @router.get("/api/trading-status")
@@ -59,17 +67,7 @@ async def get_trading_status() -> dict:
     return trading_session_status()
 
 
-@router.post("/api/dashboard/refresh")
-async def refresh_dashboard() -> dict:
-    """触发一次盘中实时重算（页面打开时由前端调用）。
-
-    与定时任务共用同一单例入口：已有任务在跑时返回 running，不重复启动；
-    非交易时段 / 盘前 / 今日日K已落库时返回 skipped。
-    """
-    return snapshot_runner.ensure_running(trigger="page_open")
-
-
 @router.get("/api/dashboard/refresh-status")
 async def refresh_status() -> dict:
-    """轮询重算进度；snapshot_ts 变化即代表有新快照可取。"""
+    """轮询定时快照任务进度；snapshot_ts 变化即代表有新快照可取。"""
     return snapshot_runner.status()

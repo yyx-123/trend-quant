@@ -157,14 +157,14 @@ def test_successful_run_saves_snapshot(runner_env, test_db, monkeypatch):
 
 
 def test_singleton_rejects_concurrent_run(runner_env, test_db, monkeypatch):
-    """计算进行中再次触发（定时任务/多用户开页）必须复用而非多跑。"""
+    """计算进行中再次触发（相邻两轮定时任务）必须复用而非多跑。"""
     runner, monkeypatch = runner_env
     _set_trading_moment(monkeypatch, datetime(2026, 8, 17, 10, 0))
     hold = threading.Event()
     payload = {"as_of": "2026-08-17", "groups": [], "is_intraday": True}
     _stub_compute(monkeypatch, test_db, payload, hold=hold)
 
-    first = runner.ensure_running(trigger="page_open")
+    first = runner.ensure_running(trigger="schedule")
     assert first["status"] == "started"
     # 等工作线程真正进入构建函数（running 标志已置位）。
     second = runner.ensure_running(trigger="schedule")

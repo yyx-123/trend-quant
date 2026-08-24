@@ -8,6 +8,7 @@ via data.indicator_store, not here.
 
 from __future__ import annotations
 
+import threading
 from collections import defaultdict
 from math import isfinite
 
@@ -33,13 +34,20 @@ class RevisionCache:
 
     def __init__(self) -> None:
         self._cached: tuple[tuple, dict] | None = None
+        # Serializes cold rebuilds across the request threadpool and the
+        # background warm thread: one caller computes, the rest wait and then
+        # read the fresh payload instead of duplicating a multi-second build.
+        self._lock = threading.Lock()
 
     def get_or_compute(self, revision: tuple, compute) -> dict:
         if self._cached is not None and self._cached[0] == revision:
             return self._cached[1]
-        payload = compute()
-        self._cached = (revision, payload)
-        return payload
+        with self._lock:
+            if self._cached is not None and self._cached[0] == revision:
+                return self._cached[1]
+            payload = compute()
+            self._cached = (revision, payload)
+            return payload
 
 
 def _number(value: object) -> float | None:
