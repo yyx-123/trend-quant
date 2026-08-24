@@ -184,7 +184,10 @@
       l2Nodes.push({
         name: l2.category_l2, value: 1, children: l3Nodes, meta: l2, level: 1,
         itemStyle: { color: heatColorSoft(l2.trend_ma5) },
-        upperLabel: { show: true, height: 24, fontSize: 13, fontWeight: 700, color: '#1f2937', formatter: (p) => p.data.upperText || '' },
+        // 标题条底色 = 当前视图最外层的 borderColor（ECharts 父节点标题条用边框色填充，
+        // 非 itemStyle.color），顶层视图下是深色条，文字用浅色；实际颜色随下钻视图
+        // 在 layoutHeatLabels 里逐层重设。
+        upperLabel: { show: true, height: 24, fontSize: 13, fontWeight: 700, color: '#f3f4f6', formatter: (p) => p.data.upperText || '' },
       });
     }
     return l2Nodes;
@@ -193,7 +196,10 @@
   // 按当前视图根节点把画布面积均分给各兄弟节点，估算每个色块的像素边长，
   // 据此（重新）生成标签：大框显示名称+MA5，中框仅名称（超长截断），小框不显示文字。
   function layoutHeatLabels(viewNodes, canvasArea) {
-    const decorate = (node, share) => {
+    // depth = 节点在当前下钻视图里的层级（viewNodes 为 0）。父节点标题条底色由
+    // levels 里该层的 borderColor 填充：最外层是深色条（#1f2937），内层是浅灰条
+    // （#a3adb8）—— 文字颜色必须跟着当前层级走，否则深色条上深字不可见。
+    const decorate = (node, share, depth) => {
       const side = Math.sqrt(Math.max(share, 0) * canvasArea);
       const meta = node.meta || {};
       if (node.level === 3) {
@@ -209,14 +215,15 @@
       } else {
         const chars = Math.floor(side / (node.level === 1 ? 13 : 11));
         node.upperText = side < (node.level === 1 ? 56 : 42) ? '' : clipHeatText(node.name, chars);
+        node.upperLabel.color = depth === 0 ? '#f3f4f6' : '#52596b';
       }
       const kids = node.children || [];
       for (const kid of kids) {
-        decorate(kid, kids.length ? share / kids.length : 0);
+        decorate(kid, kids.length ? share / kids.length : 0, depth + 1);
       }
     };
     for (const node of viewNodes) {
-      decorate(node, viewNodes.length ? 1 / viewNodes.length : 0);
+      decorate(node, viewNodes.length ? 1 / viewNodes.length : 0, 0);
     }
   }
 
