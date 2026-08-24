@@ -21,6 +21,12 @@ dependencies = [
   "mcp>=1.0.0"
 ]
 
+[project.optional-dependencies]
+# 仅季度快照脚本需要（scripts/fetch_etf_holdings.py、scripts/sync_sw_tushare.py）。
+# 应用运行时对 tushare 零依赖；临时账号窗口期前手动安装：
+#   .venv/Scripts/pip install -e ".[tushare]"   或   .venv/Scripts/pip install tushare
+tushare = ["tushare>=1.4.0"]
+
 [build-system]
 requires = ["setuptools>=80.0"]
 build-backend = "setuptools.build_meta"

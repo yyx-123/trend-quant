@@ -206,6 +206,48 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_instrument_categories_parent
                     ON instrument_categories(parent_path, priority, name);
 
+                -- 申万行业分类 fact 表（stock_industry_etf_holdings 方案 §4.1）。
+                -- sw_l3_code 混存两套码（tushare 850xxx.SI / tickflow 6 位内部码），
+                -- 消费方须按 source 解释；当前仅留档，无功能消费方。
+                CREATE TABLE IF NOT EXISTS stock_industry (
+                    symbol TEXT PRIMARY KEY,
+                    sw_l1_name TEXT NOT NULL,
+                    sw_l2_name TEXT NOT NULL,
+                    sw_l3_name TEXT NOT NULL DEFAULT '',
+                    sw_l3_code TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL,
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
+                );
+
+                -- ETF 前十大重仓股季度快照（方案 §4.2）。软失效：整只 ETF 翻转
+                -- is_current，从不删行；fetched_at 必须本地时间（全库约定）。
+                CREATE TABLE IF NOT EXISTS etf_constituents (
+                    etf_symbol TEXT NOT NULL,
+                    stock_symbol TEXT NOT NULL,
+                    stock_name TEXT NOT NULL DEFAULT '',
+                    weight REAL,
+                    rank INTEGER NOT NULL,
+                    period TEXT NOT NULL,
+                    ann_date TEXT,
+                    is_current INTEGER NOT NULL DEFAULT 1,
+                    source TEXT NOT NULL DEFAULT 'tushare_fund_portfolio',
+                    fetched_at TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (etf_symbol, stock_symbol, period)
+                );
+                CREATE INDEX IF NOT EXISTS idx_etf_constituents_current
+                    ON etf_constituents(etf_symbol, is_current, rank);
+                CREATE INDEX IF NOT EXISTS idx_etf_constituents_stock
+                    ON etf_constituents(stock_symbol, is_current);
+
+                -- 一次性迁移的旧类目归档（方案 §4.3），可随时回溯。
+                CREATE TABLE IF NOT EXISTS stock_category_archive (
+                    symbol TEXT PRIMARY KEY,
+                    category_l2 TEXT,
+                    category_l3 TEXT,
+                    migration TEXT NOT NULL,
+                    archived_at TEXT DEFAULT (datetime('now','localtime'))
+                );
+
                 CREATE TABLE IF NOT EXISTS job_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_type TEXT NOT NULL,
@@ -906,6 +948,255 @@ class Database:
                    ORDER BY level, parent_path IS NULL DESC, parent_path, priority IS NULL, priority, name"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # stock_industry（申万行业分类 fact 表）
+    # ------------------------------------------------------------------
+    # 来源优先级：数值大者可覆盖数值小者；manual 任何同步都不动。
+    _INDUSTRY_SOURCE_RANK = {"tickflow_universe": 1, "tushare_sw2021": 2, "manual": 3}
+
+    def upsert_stock_industry(self, rows: list[dict[str, Any]], source: str) -> int:
+        """按来源优先级合并写入，只增/改、从不删行。
+
+        返回实际写入行数（被更高优先级来源挡下的行不计）。
+        """
+        new_rank = self._INDUSTRY_SOURCE_RANK.get(str(source or "").strip())
+        if new_rank is None:
+            raise ValueError(f"unknown stock_industry source: {source}")
+
+        prepared: dict[str, tuple] = {}
+        for item in rows:
+            symbol = str(item.get("symbol") or "").strip().upper()
+            l1 = str(item.get("sw_l1_name") or "").strip()
+            l2 = str(item.get("sw_l2_name") or "").strip()
+            if not symbol or not l1 or not l2:
+                continue
+            prepared[symbol] = (
+                symbol,
+                l1,
+                l2,
+                str(item.get("sw_l3_name") or "").strip(),
+                str(item.get("sw_l3_code") or "").strip(),
+                source,
+            )
+        if not prepared:
+            return 0
+
+        with self._connect() as conn:
+            ph = ",".join("?" * len(prepared))
+            existing = {
+                row["symbol"]: row["source"]
+                for row in conn.execute(
+                    f"SELECT symbol, source FROM stock_industry WHERE symbol IN ({ph})",
+                    list(prepared.keys()),
+                )
+            }
+            writable = [
+                rec
+                for sym, rec in prepared.items()
+                if new_rank
+                >= self._INDUSTRY_SOURCE_RANK.get(str(existing.get(sym) or ""), 0)
+            ]
+            if writable:
+                conn.executemany(
+                    """INSERT INTO stock_industry
+                       (symbol, sw_l1_name, sw_l2_name, sw_l3_name, sw_l3_code, source, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+                       ON CONFLICT(symbol) DO UPDATE SET
+                         sw_l1_name=excluded.sw_l1_name,
+                         sw_l2_name=excluded.sw_l2_name,
+                         sw_l3_name=excluded.sw_l3_name,
+                         sw_l3_code=excluded.sw_l3_code,
+                         source=excluded.source,
+                         updated_at=datetime('now','localtime')""",
+                    writable,
+                )
+        return len(writable)
+
+    def get_stock_industry(self, symbol: str) -> dict | None:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stock_industry WHERE symbol = ?", (normalized,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_stock_industry(self, symbols: list[str] | None = None) -> list[dict]:
+        with self._connect() as conn:
+            if symbols is None:
+                rows = conn.execute("SELECT * FROM stock_industry ORDER BY symbol").fetchall()
+            else:
+                normalized = [str(s or "").strip().upper() for s in symbols]
+                normalized = [s for s in normalized if s]
+                if not normalized:
+                    return []
+                ph = ",".join("?" * len(normalized))
+                rows = conn.execute(
+                    f"SELECT * FROM stock_industry WHERE symbol IN ({ph}) ORDER BY symbol",
+                    normalized,
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_instrument_category(
+        self,
+        symbol: str,
+        category_l1: str,
+        category_l2: str,
+        category_l3: str,
+        priority_l1: int | None,
+        priority_l2: int | None,
+        priority_l3: int | None,
+    ) -> bool:
+        """只改类目与排序字段。显式刷新 updated_at —— 看板 revision 只看
+        MAX(updated_at)，漏写会静默继续读旧分组缓存（方案评审 B1）。"""
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE instrument_metadata
+                   SET category_l1 = ?, category_l2 = ?, category_l3 = ?,
+                       priority_l1 = ?, priority_l2 = ?, priority_l3 = ?,
+                       updated_at = datetime('now','localtime')
+                   WHERE symbol = ?""",
+                (
+                    str(category_l1 or "").strip(),
+                    str(category_l2 or "").strip(),
+                    str(category_l3 or "").strip(),
+                    priority_l1,
+                    priority_l2,
+                    priority_l3,
+                    normalized,
+                ),
+            )
+        return cur.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # etf_constituents（ETF 前十大重仓股季度快照）
+    # ------------------------------------------------------------------
+    def save_etf_constituents(
+        self,
+        etf_symbol: str,
+        rows: list[dict[str, Any]],
+        period: str,
+        source: str = "tushare_fund_portfolio",
+    ) -> int:
+        """单事务：先把该 ETF 全部行置 is_current=0，再 upsert 本期行（=1）。
+
+        保证「查询当前前十」永远只命中一个期次；空 rows 也合法（整只翻转失效）。
+        """
+        etf = str(etf_symbol or "").strip().upper()
+        period = str(period or "").strip()
+        if not etf or not period:
+            raise ValueError("etf_symbol 与 period 均不能为空")
+
+        records: list[tuple] = []
+        for item in rows:
+            stock = str(item.get("stock_symbol") or "").strip().upper()
+            if not stock:
+                continue
+            records.append(
+                (
+                    etf,
+                    stock,
+                    str(item.get("stock_name") or "").strip(),
+                    item.get("weight"),
+                    int(item.get("rank") or 0),
+                    period,
+                    str(item.get("ann_date") or "").strip() or None,
+                    source,
+                )
+            )
+
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE etf_constituents SET is_current = 0 WHERE etf_symbol = ?",
+                (etf,),
+            )
+            if records:
+                conn.executemany(
+                    """INSERT INTO etf_constituents
+                       (etf_symbol, stock_symbol, stock_name, weight, rank, period,
+                        ann_date, is_current, source, fetched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now','localtime'))
+                       ON CONFLICT(etf_symbol, stock_symbol, period) DO UPDATE SET
+                         stock_name=excluded.stock_name,
+                         weight=excluded.weight,
+                         rank=excluded.rank,
+                         ann_date=excluded.ann_date,
+                         is_current=1,
+                         source=excluded.source,
+                         fetched_at=datetime('now','localtime')""",
+                    records,
+                )
+        return len(records)
+
+    def list_current_etf_constituents(self, etf_symbol: str) -> list[dict]:
+        etf = str(etf_symbol or "").strip().upper()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM etf_constituents
+                   WHERE etf_symbol = ? AND is_current = 1 ORDER BY rank""",
+                (etf,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_all_current_etf_constituents(self) -> list[dict]:
+        """全部 ETF 的当前重仓股（按 etf_symbol, rank），批量导入脚本用。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM etf_constituents
+                   WHERE is_current = 1 ORDER BY etf_symbol, rank"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_etf_constituent_periods(self) -> list[dict]:
+        """每只 ETF 当前期次与抓取时间（新鲜度展示用）。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT etf_symbol, period, MAX(fetched_at) AS fetched_at,
+                          COUNT(*) AS constituent_count
+                   FROM etf_constituents WHERE is_current = 1
+                   GROUP BY etf_symbol, period ORDER BY etf_symbol"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def has_etf_constituents_for_period(self, etf_symbol: str, period: str) -> bool:
+        etf = str(etf_symbol or "").strip().upper()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM etf_constituents WHERE etf_symbol = ? AND period = ? LIMIT 1",
+                (etf, str(period or "").strip()),
+            ).fetchone()
+        return row is not None
+
+    # ------------------------------------------------------------------
+    # stock_category_archive（迁移前旧类目归档）
+    # ------------------------------------------------------------------
+    def archive_stock_categories(self, rows: list[dict[str, Any]], migration: str) -> int:
+        records = [
+            (
+                str(item.get("symbol") or "").strip().upper(),
+                str(item.get("category_l2") or "").strip(),
+                str(item.get("category_l3") or "").strip(),
+                str(migration or "").strip(),
+            )
+            for item in rows
+            if str(item.get("symbol") or "").strip()
+        ]
+        if not records:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                """INSERT INTO stock_category_archive
+                   (symbol, category_l2, category_l3, migration, archived_at)
+                   VALUES (?, ?, ?, ?, datetime('now','localtime'))
+                   ON CONFLICT(symbol) DO NOTHING""",
+                records,
+            )
+        return len(records)
 
     # ------------------------------------------------------------------
     # data_versions（行情内容版本）

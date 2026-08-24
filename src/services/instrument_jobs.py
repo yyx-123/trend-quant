@@ -20,7 +20,9 @@ from services.indicator_builder import rebuild_after_backfill
 from services.instrument_admin import (
     _append_instrument_config,
     _build_new_instrument_record,
+    _known_managed_symbols,
     _normalize_symbol,
+    add_constituent_stock,
 )
 
 logger = logging.getLogger(__name__)
@@ -474,3 +476,235 @@ class InstrumentAddJobManager:
 
 
 add_instrument_manager = InstrumentAddJobManager()
+
+
+def _empty_etf_import_status() -> dict:
+    return {
+        "job_id": None,
+        "status": "idle",
+        "started_at": None,
+        "finished_at": None,
+        "progress_current": 0,
+        "progress_total": 0,
+        "current_symbol": None,
+        "message": "空闲。",
+        "error": None,
+        "summary": {
+            "etf_symbol": None,
+            "total": 0,
+            "added": [],
+            "skipped": [],
+            "failed": [],
+            "backfill_updated": 0,
+            "backfill_failed": 0,
+        },
+    }
+
+
+class EtfConstituentImportJobManager:
+    """ETF 前十大重仓股一键导入标的池（方案 §6.1）。
+
+    逐股票 resolve_category 自动归类（命中 → 申万类目，未命中 → 待分类，
+    后续同步自动回补）；已管理的跳过不覆盖用户配置；重复导入全部 skipped，幂等。
+    """
+
+    def __init__(
+        self,
+        data_service_factory: Callable[[list[str] | None], DataService] | None = None,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._status = _empty_etf_import_status()
+        self._data_service_factory = data_service_factory or (
+            lambda provider_priority: DataService(provider_priority=provider_priority)
+        )
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return self._copy_status()
+
+    def _copy_status(self) -> dict:
+        status = dict(self._status)
+        summary = dict(self._status.get("summary") or {})
+        for key in ("added", "skipped", "failed"):
+            summary[key] = list(summary.get(key) or [])
+        status["summary"] = summary
+        return status
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._status.get("status") == "running"
+
+    def start(
+        self,
+        *,
+        etf_symbol: str,
+        end_date: date,
+        adjust: str,
+        provider_priority: list[str] | None,
+    ) -> tuple[bool, dict]:
+        now = datetime.now()
+        job_id = now.strftime("%Y%m%d%H%M%S%f")
+        with self._lock:
+            if self._status.get("status") == "running":
+                return False, self._copy_status()
+            self._status = {
+                **_empty_etf_import_status(),
+                "job_id": job_id,
+                "status": "running",
+                "started_at": now.isoformat(),
+                "message": f"ETF 重仓股导入任务已启动：{etf_symbol}。",
+            }
+            self._status["summary"]["etf_symbol"] = etf_symbol
+            snapshot = self._copy_status()
+
+        thread = threading.Thread(
+            target=self._run,
+            kwargs={
+                "job_id": job_id,
+                "etf_symbol": etf_symbol,
+                "end_date": end_date,
+                "adjust": adjust,
+                "provider_priority": provider_priority,
+            },
+            daemon=True,
+        )
+        thread.start()
+        return True, snapshot
+
+    def _set_progress(self, job_id: str, current: int, total: int, message: str) -> None:
+        with self._lock:
+            if self._status.get("job_id") != job_id:
+                return
+            self._status["progress_current"] = current
+            self._status["progress_total"] = total
+            self._status["message"] = message
+
+    def _run(
+        self,
+        *,
+        job_id: str,
+        etf_symbol: str,
+        end_date: date,
+        adjust: str,
+        provider_priority: list[str] | None,
+    ) -> None:
+        db = get_db()
+        data_service = self._data_service_factory(provider_priority)
+        try:
+            rows = db.list_current_etf_constituents(etf_symbol)
+            if not rows:
+                raise ValueError(f"{etf_symbol} 暂无重仓股快照，请先运行季度快照脚本")
+
+            known = _known_managed_symbols()
+            added: list[dict] = []
+            skipped: list[dict] = []
+            failed: list[dict] = []
+            backfill_items: list[dict] = []
+
+            with self._lock:
+                self._status["summary"]["total"] = len(rows)
+
+            for idx, row in enumerate(rows, start=1):
+                symbol = str(row.get("stock_symbol") or "").strip().upper()
+                name = str(row.get("stock_name") or "").strip() or symbol
+                self._set_progress(job_id, idx, len(rows) + 1, f"正在写入 {symbol} {name} 的标的信息。")
+                outcome = add_constituent_stock(symbol, name, known_symbols=known)
+                status = outcome["status"]
+                if status == "added":
+                    known.add(symbol)  # 同一只 ETF 内重复出现时后续直接跳过
+                    added.append(
+                        {
+                            "symbol": symbol,
+                            "name": name,
+                            "category": outcome.get("category", ""),
+                            "hit": bool(outcome.get("hit")),
+                        }
+                    )
+                    backfill_items.append({"symbol": symbol, "start_date": date(2020, 1, 1)})
+                elif status == "skipped":
+                    skipped.append({"symbol": symbol, "name": name, "reason": "already_managed"})
+                else:
+                    failed.append({"symbol": symbol, "name": name, "error": outcome.get("error", "")})
+
+            backfill_updated = 0
+            backfill_failed = 0
+            updated_symbols: list[str] = []
+            if backfill_items:
+                self._set_progress(
+                    job_id, len(rows), len(rows) + 1,
+                    f"正在批量回补 {len(backfill_items)} 只新标的的历史行情。",
+                )
+                result_payloads = data_service.backfill_daily_histories(
+                    items=backfill_items,
+                    end_date=end_date,
+                    adjust=adjust,
+                    max_retries=3,
+                    batch_size=100,
+                    request_interval_seconds=2.0,
+                    retry_delay_seconds=2.0,
+                )
+                for payload in result_payloads:
+                    if payload.get("ok") and str((payload.get("result") or {}).get("status") or "") not in (
+                        "error",
+                        "no_data",
+                    ):
+                        backfill_updated += 1
+                        updated_symbols.append(
+                            str((payload.get("result") or {}).get("symbol") or "").strip().upper()
+                        )
+                    else:
+                        backfill_failed += 1
+                        symbol = str((payload.get("result") or {}).get("symbol") or payload.get("symbol") or "")
+                        for entry in failed:
+                            if entry["symbol"] == symbol:
+                                break
+                        else:
+                            failed.append(
+                                {
+                                    "symbol": symbol,
+                                    "name": "",
+                                    "error": str(payload.get("error") or "行情回补失败")[:200],
+                                }
+                            )
+
+            with self._lock:
+                if self._status.get("job_id") != job_id:
+                    return
+                summary = self._status["summary"]
+                summary["added"] = added
+                summary["skipped"] = skipped
+                summary["failed"] = failed
+                summary["backfill_updated"] = backfill_updated
+                summary["backfill_failed"] = backfill_failed
+                self._status["status"] = "completed"
+                self._status["finished_at"] = datetime.now().isoformat()
+                self._status["progress_current"] = len(rows) + 1
+                self._status["progress_total"] = len(rows) + 1
+                self._status["current_symbol"] = None
+                pending_note = f"，其中 {sum(1 for a in added if not a['hit'])} 只待分类（后续同步自动回补）" if added else ""
+                self._status["message"] = (
+                    f"导入完成：新增 {len(added)} 只、已在管理跳过 {len(skipped)} 只、"
+                    f"失败 {len(failed)} 只{pending_note}。"
+                )
+                final_status = self._copy_status()
+
+            if updated_symbols:
+                rebuild_after_backfill(updated_symbols)
+            record_job_run_safely(
+                "etf_constituent_import", final_status, status=str(final_status.get("status") or "")
+            )
+        except Exception as exc:
+            logger.exception("ETF constituent import job_id=%s failed for %s", job_id, etf_symbol)
+            with self._lock:
+                if self._status.get("job_id") == job_id:
+                    self._status["status"] = "failed"
+                    self._status["finished_at"] = datetime.now().isoformat()
+                    self._status["error"] = str(exc)
+                    self._status["message"] = f"ETF 重仓股导入失败：{exc}"
+        finally:
+            close = getattr(data_service, "close", None)
+            if callable(close):
+                close()
+
+
+etf_constituent_import_manager = EtfConstituentImportJobManager()

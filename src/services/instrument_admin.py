@@ -98,6 +98,25 @@ def _category_priority_map() -> dict[str, int | None]:
     }
 
 
+def category_priorities(
+    l1: str,
+    l2: str,
+    l3: str,
+    priorities: dict[str, int | None] | None = None,
+) -> tuple[int | None, int | None, int | None]:
+    """(l1, l2, l3) → (priority_l1, priority_l2, priority_l3)。
+
+    公共入口：新增标的、待分类回补、存量迁移、ETF 重仓导入共用，
+    不要各自平行实现（方案 §4.4）。
+    """
+    priorities = priorities if priorities is not None else _category_priority_map()
+    return (
+        priorities.get(_category_path_from_parts(l1)),
+        priorities.get(_category_path_from_parts(l1, l2)),
+        priorities.get(_category_path_from_parts(l1, l2, l3)),
+    )
+
+
 def _next_sort_order(config_items: list[dict] | None = None) -> int:
     values: list[int] = []
     for item in config_items if config_items is not None else _config_items():
@@ -130,7 +149,7 @@ def _build_new_instrument_record(item: dict) -> dict:
     if not (l1 and l2 and l3):
         raise ValueError("一二三级类目均必选")
 
-    priorities = _category_priority_map()
+    p1, p2, p3 = category_priorities(l1, l2, l3)
     asset_type = "stock" if l1 == "股票" else "etf"
     return {
         "symbol": symbol,
@@ -144,9 +163,9 @@ def _build_new_instrument_record(item: dict) -> dict:
         "category_l3": l3,
         "factor_tags": [],
         "region_tag": "",
-        "priority_l1": priorities.get(_category_path_from_parts(l1)),
-        "priority_l2": priorities.get(_category_path_from_parts(l1, l2)),
-        "priority_l3": priorities.get(_category_path_from_parts(l1, l2, l3)),
+        "priority_l1": p1,
+        "priority_l2": p2,
+        "priority_l3": p3,
         "sort_order": _next_sort_order(),
         "source": "manual_add",
     }
@@ -178,5 +197,51 @@ def _append_instrument_config(record: dict) -> int:
         "source": str(record.get("source") or ""),
     }
     return db.save_instrument_metadata([config_record])
+
+
+def add_constituent_stock(
+    symbol: str,
+    name: str,
+    known_symbols: set[str] | None = None,
+) -> dict:
+    """单只 ETF 重仓股入池：resolve_category 自动归类 + 写元数据（不写行情）。
+
+    页面导入 Job 与批量导入脚本共用的唯一入口，避免平行实现。
+    返回 {symbol, name, status: added|skipped|failed, ...}；重复标的安全跳过。
+    """
+    from services.stock_industry import resolve_category  # 延迟导入避免环依赖
+
+    normalized = _normalize_symbol(symbol)
+    name = str(name or "").strip() or normalized
+    if not normalized:
+        return {"symbol": "", "name": name, "status": "failed", "error": "标的代码无效"}
+    known = known_symbols if known_symbols is not None else _known_managed_symbols()
+    if normalized in known:
+        return {"symbol": normalized, "name": name, "status": "skipped", "reason": "already_managed"}
+
+    resolved = resolve_category(normalized)
+    record = _build_new_instrument_record(
+        {
+            "symbol": normalized,
+            "name": name,
+            "category_l1": resolved["category_l1"],
+            "category_l2": resolved["category_l2"],
+            "category_l3": resolved["category_l3"],
+        }
+    )
+    record["source"] = "etf_constituent"
+    try:
+        _append_instrument_config(record)
+    except ValueError as exc:
+        if "已在标的配置中" in str(exc):  # 并发重复（脚本与页面任务同时跑）
+            return {"symbol": normalized, "name": name, "status": "skipped", "reason": "already_managed"}
+        return {"symbol": normalized, "name": name, "status": "failed", "error": str(exc)[:200]}
+    return {
+        "symbol": normalized,
+        "name": name,
+        "status": "added",
+        "category": f"{resolved['category_l2']}-{resolved['category_l3']}",
+        "hit": bool(resolved["hit"]),
+    }
 
 

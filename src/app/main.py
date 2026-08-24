@@ -124,6 +124,25 @@ async def lifespan(app: FastAPI):
         if result.get("status") != "skipped":
             logger.info("Intraday snapshot scheduled trigger: %s", result.get("status"))
 
+    def industry_sync_job() -> None:
+        """申万行业分类月度同步（TickFlow universes）+ 待分类回补。
+
+        移动清单随 job_runs 落库可追溯（方案 §5）；失败只记日志，下月再试。
+        """
+        from services.stock_industry import record_industry_sync_job, sync_industry_from_tickflow
+
+        try:
+            summary = sync_industry_from_tickflow(db=db)
+            record_industry_sync_job("stock_industry_sync_tickflow", summary)
+            logger.info(
+                "Monthly industry sync: rows=%s written=%s moved=%s",
+                summary.get("rows"),
+                summary.get("written"),
+                len((summary.get("reclassify") or {}).get("moved") or []),
+            )
+        except Exception:
+            logger.exception("Monthly industry sync failed")
+
     def _run_daily_update(force: bool = False) -> None:
         payload = daily_market_update_job(settings, force=force)
         logger.info(
@@ -209,6 +228,7 @@ async def lifespan(app: FastAPI):
         scheduler_manager.start(
             update_job=update_job,
             intraday_snapshot_job=intraday_snapshot_job,
+            industry_sync_job=industry_sync_job,
         )
         threading.Thread(target=_daily_update_catchup, daemon=True).start()
 

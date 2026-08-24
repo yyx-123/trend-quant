@@ -89,18 +89,23 @@
         <span>名称</span>
         <input id="addInstrumentName" type="text" readonly placeholder="输入代码后自动查询">
       </label>
-      <label>
-        <span>一级类目</span>
-        <select id="addCategoryL1" required></select>
-      </label>
-      <label>
-        <span>二级类目</span>
-        <select id="addCategoryL2" required></select>
-      </label>
-      <label>
-        <span>三级类目</span>
-        <select id="addCategoryL3" required></select>
-      </label>
+      <div id="addCategorySelects">
+        <label>
+          <span>一级类目</span>
+          <select id="addCategoryL1"></select>
+        </label>
+        <label>
+          <span>二级类目</span>
+          <select id="addCategoryL2"></select>
+        </label>
+        <label>
+          <span>三级类目</span>
+          <select id="addCategoryL3"></select>
+        </label>
+      </div>
+      <p id="addCategoryAuto" class="instrument-form-message add-category-auto" hidden>
+        将自动归类为 <strong id="addCategoryAutoText"></strong>（申万行业）<button id="addCategoryManualBtn" class="ghost-btn" type="button">手动选择</button>
+      </p>
     </div>
     <p id="addInstrumentMsg" class="instrument-form-message"></p>
     <div class="instrument-dialog-actions">
@@ -146,6 +151,43 @@
   </form>
 </div>
 
+<div id="etfConstituentsModal" class="instrument-modal" hidden>
+  <div class="instrument-dialog etf-constituents-dialog">
+    <div class="instrument-dialog-head">
+      <h3 id="etfConstituentsTitle">ETF 前十大重仓股</h3>
+      <button id="etfConstituentsCloseBtn" class="ghost-btn" type="button" aria-label="关闭重仓股弹窗">关闭</button>
+    </div>
+    <p id="etfConstituentsFreshness" class="instrument-form-message"></p>
+    <div class="table-shell etf-constituents-table-wrap">
+      <table class="etf-constituents-table">
+        <colgroup>
+          <col class="const-col-rank">
+          <col class="const-col-code">
+          <col class="const-col-name">
+          <col class="const-col-weight">
+          <col class="const-col-category">
+          <col class="const-col-status">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>代码</th>
+            <th>名称</th>
+            <th>权重%</th>
+            <th>申万类目</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody id="etfConstituentsBody"></tbody>
+      </table>
+    </div>
+    <p id="etfConstituentsMsg" class="instrument-form-message"></p>
+    <div class="instrument-dialog-actions">
+      <button id="etfConstituentsImportBtn" type="button">导入全部未管理标的</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (() => {
   const statusEl = document.getElementById('instStatus');
@@ -173,6 +215,10 @@
     l2: document.getElementById('addCategoryL2'),
     l3: document.getElementById('addCategoryL3'),
   };
+  const addCategorySelectsEl = document.getElementById('addCategorySelects');
+  const addCategoryAutoEl = document.getElementById('addCategoryAuto');
+  const addCategoryAutoText = document.getElementById('addCategoryAutoText');
+  const addCategoryManualBtn = document.getElementById('addCategoryManualBtn');
   const editInstrumentModal = document.getElementById('editInstrumentModal');
   const editInstrumentForm = document.getElementById('editInstrumentForm');
   const editInstrumentCloseBtn = document.getElementById('editInstrumentCloseBtn');
@@ -191,6 +237,13 @@
     l2: document.getElementById('instFilterL2'),
     l3: document.getElementById('instFilterL3'),
   };
+  const etfConstituentsModal = document.getElementById('etfConstituentsModal');
+  const etfConstituentsTitle = document.getElementById('etfConstituentsTitle');
+  const etfConstituentsFreshness = document.getElementById('etfConstituentsFreshness');
+  const etfConstituentsBody = document.getElementById('etfConstituentsBody');
+  const etfConstituentsMsg = document.getElementById('etfConstituentsMsg');
+  const etfConstituentsImportBtn = document.getElementById('etfConstituentsImportBtn');
+  const etfConstituentsCloseBtn = document.getElementById('etfConstituentsCloseBtn');
   const today = localToday();
   const filters = { l1: new Set(), l2: new Set(), l3: new Set() };
   let allItems = [];
@@ -209,6 +262,10 @@
   let activeSyncPending = false;
   let editingSymbol = '';
   let isEditSaving = false;
+  let addAutoCategory = null; // 申万命中时的自动归类 {l1, l2, l3}；null=手动选择模式
+  let constituentsEtfSymbol = '';
+  let constituentsPollTimer = null;
+  let isConstituentsImporting = false;
   const dismissedCompletionKey = 'instrumentBulkBackfillDismissedJobId';
 
   function esc(v) {
@@ -288,10 +345,21 @@
     };
   }
 
+  function setAddCategoryMode(mode, data) {
+    // auto：申万命中，隐藏下拉、显示自动归类文本；manual：显示下拉手动选择
+    addAutoCategory = mode === 'auto' ? data : null;
+    if (addCategorySelectsEl) addCategorySelectsEl.classList.toggle('is-hidden', mode === 'auto');
+    if (addCategoryAutoEl) addCategoryAutoEl.hidden = mode !== 'auto';
+    if (mode === 'auto' && addCategoryAutoText) {
+      addCategoryAutoText.textContent = `${data.category_l1}-${data.category_l2}-${data.category_l3}`;
+    }
+  }
+
   function updateAddConfirmState() {
     if (!addInstrumentConfirmBtn) return;
     const payload = addFormPayload();
-    const ready = payload.symbol && payload.name && payload.category_l1 && payload.category_l2 && payload.category_l3;
+    const hasCategory = addAutoCategory || (payload.category_l1 && payload.category_l2 && payload.category_l3);
+    const ready = payload.symbol && payload.name && hasCategory;
     addInstrumentConfirmBtn.disabled = !ready || isBulkRunning || isAddRunning;
   }
 
@@ -617,13 +685,18 @@
         data-local-end="${esc(localEnd)}"
       >
         <td class="instrument-symbol-cell">${esc(symbol)}</td>
-        <td class="instrument-name-cell">${esc(item.name || '-')}</td>
+        <td class="instrument-name-cell">${item.name
+          ? `<a class="instrument-name-link" href="/market-view?symbol=${encodeURIComponent(symbol)}" title="查看 ${esc(symbol)} 行情详情">${esc(item.name)}</a>`
+          : '-'}</td>
         <td class="instrument-category-cell">${esc(valueOrDash(item.category_l1))}</td>
         <td class="instrument-category-cell">${esc(valueOrDash(item.category_l2))}</td>
         <td class="instrument-category-cell">${esc(valueOrDash(item.category_l3))}</td>
         <td class="instrument-factor-cell">${esc(tagsText(item))}</td>
         <td class="instrument-date-cell" data-role="range">${esc(dateRangeText(localStart, localEnd))}</td>
         <td class="instrument-op-cell">
+          ${String(item.category_l1 || '').trim() === 'ETF'
+            ? '<button type="button" class="ghost-btn instrument-constituents-btn" data-role="constituents">权重股</button>'
+            : ''}
           <button type="button" class="ghost-btn instrument-edit-btn" data-role="edit">编辑</button>
         </td>
       </tr>
@@ -951,6 +1024,7 @@
       addInstrumentNameEl.dataset.loading = '0';
       addInstrumentNameEl.value = '';
     }
+    setAddCategoryMode('manual');
     setAddMessage('');
     renderAddCategorySelects();
     updateAddConfirmState();
@@ -1052,6 +1126,40 @@
     }
   }
 
+  function prefillAddCategorySelects(data) {
+    // 尽力预填下拉（切手动模式时可直接改）；旧树过渡期申万类目对不上选项也无妨
+    renderAddCategorySelects();
+    if (addCategoryEls.l1) addCategoryEls.l1.value = String(data.category_l1 || '').trim();
+    const l1Path = selectedCategoryPath(addCategoryEls, 'l1');
+    setSelectOptions(addCategoryEls.l2, l1Path ? categoryChildren(2, l1Path) : [], '选择二级类目');
+    if (addCategoryEls.l2) addCategoryEls.l2.value = String(data.category_l2 || '').trim();
+    const l2Path = selectedCategoryPath(addCategoryEls, 'l2');
+    setSelectOptions(addCategoryEls.l3, l2Path ? categoryChildren(3, l2Path) : [], '选择三级类目');
+    if (addCategoryEls.l3) addCategoryEls.l3.value = String(data.category_l3 || '').trim();
+  }
+
+  async function suggestAddCategory(symbol, seq, recognizedName) {
+    // 行业分类在本地表，不依赖名称查询成功（评审 A4）；建议失败静默，不打断添加流程
+    try {
+      const resp = await fetch(`/instruments/api/suggest-category/${encodeURIComponent(symbol)}`);
+      const data = await resp.json();
+      if (seq !== addLookupSeq) return;
+      if (!resp.ok || !data.ok) return;
+      prefillAddCategorySelects(data);
+      const prefix = recognizedName ? `已识别：${recognizedName}，` : '';
+      if (data.hit) {
+        setAddCategoryMode('auto', data);
+        setAddMessage(`${prefix}将按申万行业自动归类：${data.category_l2}-${data.category_l3}。`);
+      } else {
+        setAddCategoryMode('manual');
+        setAddMessage(`${prefix}暂未识别行业：股票可选择「待分类」（后续自动回补），ETF 请手动选择类目。`);
+      }
+      updateAddConfirmState();
+    } catch (err) {
+      // 忽略建议失败
+    }
+  }
+
   async function lookupAddInstrumentName() {
     const rawSymbol = String(addInstrumentSymbolEl?.value || '').trim();
     const symbol = normalizeSymbolInput(rawSymbol);
@@ -1099,7 +1207,9 @@
         addInstrumentNameEl.dataset.loading = '0';
         addInstrumentNameEl.value = data.name || '';
       }
-      setAddMessage(data.name ? `已识别：${data.name}` : '未查询到名称，请检查代码。', !data.name);
+      await suggestAddCategory(data.symbol || symbol, seq, data.name || '');
+      if (seq !== addLookupSeq) return;
+      if (!data.name) setAddMessage('未查询到名称，请检查代码。', true);
     } catch (err) {
       if (seq !== addLookupSeq) return;
       if (addInstrumentNameEl) {
@@ -1107,6 +1217,7 @@
         addInstrumentNameEl.value = '';
       }
       setAddMessage(err.message, true);
+      await suggestAddCategory(symbol, seq, '');
     } finally {
       updateAddConfirmState();
     }
@@ -1120,6 +1231,7 @@
       addInstrumentNameEl.dataset.loading = '0';
       addInstrumentNameEl.value = '';
     }
+    setAddCategoryMode('manual');
     updateAddConfirmState();
     if (!symbol) {
       setAddMessage('');
@@ -1132,7 +1244,8 @@
     event.preventDefault();
     if (isBulkRunning || isAddRunning) return;
     const payload = addFormPayload();
-    if (!payload.symbol || !payload.name || !payload.category_l1 || !payload.category_l2 || !payload.category_l3) {
+    const hasCategory = addAutoCategory || (payload.category_l1 && payload.category_l2 && payload.category_l3);
+    if (!payload.symbol || !payload.name || !hasCategory) {
       setAddMessage('请先完成代码识别和一二三级类目选择。', true);
       return;
     }
@@ -1204,6 +1317,149 @@
     }
   }
 
+  function setConstituentsMessage(text, isError = false) {
+    if (!etfConstituentsMsg) return;
+    etfConstituentsMsg.textContent = text;
+    etfConstituentsMsg.style.color = isError ? '#b42318' : '';
+  }
+
+  function stopConstituentsPolling() {
+    if (constituentsPollTimer) window.clearInterval(constituentsPollTimer);
+    constituentsPollTimer = null;
+  }
+
+  function closeConstituentsModal() {
+    // 导入任务在服务端后台运行，关闭弹窗不影响任务本身（状态页/列表稍后刷新即可）
+    stopConstituentsPolling();
+    isConstituentsImporting = false;
+    if (etfConstituentsModal) etfConstituentsModal.hidden = true;
+    constituentsEtfSymbol = '';
+  }
+
+  function renderConstituents(data, etfName) {
+    if (etfConstituentsTitle) {
+      etfConstituentsTitle.textContent = `${data.symbol || ''} ${etfName || ''} 前十大重仓股`;
+    }
+    if (etfConstituentsFreshness) {
+      if (data.period) {
+        etfConstituentsFreshness.textContent =
+          `数据期次 ${data.period}（抓取于 ${String(data.fetched_at || '').slice(0, 10)}）`;
+        etfConstituentsFreshness.style.color = data.stale ? '#b45309' : '#556';
+      } else {
+        etfConstituentsFreshness.textContent = '';
+      }
+    }
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (etfConstituentsBody) {
+      etfConstituentsBody.innerHTML = items.map((item) => {
+        const managed = item.already_managed;
+        const hit = item.hit;
+        // 所有行都展示申万行业（stock_industry 事实源），未识别标黄
+        const categoryText = String(item.resolved_category || '');
+        const categoryStyle = !hit ? 'color:#b45309;' : '';
+        const status = managed
+          ? '<span style="color:#98a2b3;">已管理</span>'
+          : '<span style="color:#067647;">待导入</span>';
+        return `<tr>
+          <td>${esc(item.rank)}</td>
+          <td>${esc(item.stock_symbol)}</td>
+          <td title="${esc(item.stock_name || '')}">${esc(item.stock_name || '-')}</td>
+          <td>${item.weight == null ? '-' : Number(item.weight).toFixed(2)}</td>
+          <td style="${categoryStyle}" title="${esc(categoryText)}">${esc(categoryText)}</td>
+          <td>${status}</td>
+        </tr>`;
+      }).join('');
+    }
+    const importable = items.filter((item) => !item.already_managed).length;
+    if (etfConstituentsImportBtn) {
+      etfConstituentsImportBtn.disabled = importable === 0;
+      etfConstituentsImportBtn.textContent = importable
+        ? `导入全部未管理标的（${importable} 只）`
+        : '全部已在管理中';
+    }
+    return importable;
+  }
+
+  async function openConstituentsModal(symbol) {
+    if (!etfConstituentsModal) return;
+    constituentsEtfSymbol = String(symbol || '').trim();
+    const item = allItems.find((entry) => entry.symbol === constituentsEtfSymbol);
+    etfConstituentsModal.hidden = false;
+    if (etfConstituentsTitle) etfConstituentsTitle.textContent = `${constituentsEtfSymbol} 前十大重仓股`;
+    if (etfConstituentsFreshness) etfConstituentsFreshness.textContent = '';
+    if (etfConstituentsBody) etfConstituentsBody.innerHTML = '';
+    if (etfConstituentsImportBtn) {
+      etfConstituentsImportBtn.disabled = true;
+      etfConstituentsImportBtn.textContent = '导入全部未管理标的';
+    }
+    setConstituentsMessage('正在加载重仓股快照...');
+    try {
+      const resp = await fetch(`/instruments/api/etf-constituents/${encodeURIComponent(constituentsEtfSymbol)}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || '加载失败');
+      if (!data.ok) {
+        setConstituentsMessage(data.message || '该 ETF 暂无重仓股快照。', true);
+        return;
+      }
+      const importable = renderConstituents(data, item?.name || '');
+      const pending = (data.items || []).filter((entry) => !entry.already_managed && !entry.hit).length;
+      setConstituentsMessage(
+        importable
+          ? `待导入 ${importable} 只` + (pending ? `，其中 ${pending} 只暂未识别行业（导入后归入待分类，后续自动回补）` : '')
+          : ''
+      );
+    } catch (err) {
+      setConstituentsMessage(err.message, true);
+    }
+  }
+
+  async function pollConstituentsImport() {
+    try {
+      const resp = await fetch('/instruments/api/etf-constituents/import/status');
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) return;
+      const job = data.job || {};
+      if (job.status === 'running') {
+        setConstituentsMessage(job.message || '导入中...');
+        return;
+      }
+      if (job.status === 'completed' || job.status === 'failed') {
+        stopConstituentsPolling();
+        isConstituentsImporting = false;
+        if (etfConstituentsImportBtn) etfConstituentsImportBtn.disabled = true;
+        setConstituentsMessage(job.message || '', job.status === 'failed');
+        statusEl.textContent = job.message || '';
+        loadList();
+      }
+    } catch (err) {
+      // 轮询失败下轮再试
+    }
+  }
+
+  async function runConstituentsImport() {
+    if (!constituentsEtfSymbol || isConstituentsImporting) return;
+    isConstituentsImporting = true;
+    if (etfConstituentsImportBtn) etfConstituentsImportBtn.disabled = true;
+    setConstituentsMessage('正在提交导入任务...');
+    try {
+      const resp = await fetch('/instruments/api/etf-constituents/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ etf_symbol: constituentsEtfSymbol, end_date: today }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) throw new Error(data.detail || '导入任务启动失败');
+      setConstituentsMessage('导入任务已启动，正在后台写入标的并回补行情 —— 可以安全关闭本窗口，稍后在标的管理页查看结果。');
+      stopConstituentsPolling();
+      constituentsPollTimer = window.setInterval(pollConstituentsImport, 2000);
+      pollConstituentsImport();
+    } catch (err) {
+      isConstituentsImporting = false;
+      if (etfConstituentsImportBtn) etfConstituentsImportBtn.disabled = false;
+      setConstituentsMessage(err.message, true);
+    }
+  }
+
   tableBody.addEventListener('click', async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -1212,6 +1468,10 @@
     if (!row) return;
     if (role === 'edit') {
       openEditModal(row.dataset.symbol);
+      return;
+    }
+    if (role === 'constituents') {
+      openConstituentsModal(row.dataset.symbol);
       return;
     }
     if (role !== 'backfill') return;
@@ -1278,6 +1538,12 @@
     if (event.target === editInstrumentModal) closeEditModal();
   });
   editInstrumentForm?.addEventListener('submit', runEditInstrument);
+  etfConstituentsCloseBtn?.addEventListener('click', closeConstituentsModal);
+  etfConstituentsModal?.addEventListener('click', (event) => {
+    if (event.target === etfConstituentsModal) closeConstituentsModal();
+  });
+  etfConstituentsImportBtn?.addEventListener('click', runConstituentsImport);
+  addCategoryManualBtn?.addEventListener('click', () => setAddCategoryMode('manual'));
   completionCloseBtn?.addEventListener('click', () => dismissCompletion(currentCompletionJobId || currentBulkJobId));
 
   loadList();

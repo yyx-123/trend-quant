@@ -29,7 +29,12 @@ from services.instrument_admin import (
     _to_date,
 )
 from services.indicator_builder import rebuild_after_backfill
-from services.instrument_jobs import add_instrument_manager, bulk_backfill_manager
+from services.instrument_jobs import (
+    add_instrument_manager,
+    bulk_backfill_manager,
+    etf_constituent_import_manager,
+)
+from services.stock_industry import resolve_category
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
 templates = Jinja2Templates(directory="web/templates")
@@ -61,9 +66,10 @@ class InstrumentNameLookupRequest(BaseModel):
 class InstrumentAddRequest(BaseModel):
     symbol: str
     name: str = Field(default="")
-    category_l1: str
-    category_l2: str
-    category_l3: str
+    # 类目可整体留空：股票按申万行业自动归类（见 start_add_instrument）
+    category_l1: str = Field(default="")
+    category_l2: str = Field(default="")
+    category_l3: str = Field(default="")
     end_date: str = Field(default="")
     adjust: str = Field(default="")
 
@@ -72,6 +78,12 @@ class InstrumentUpdateRequest(BaseModel):
     category_l1: str
     category_l2: str
     category_l3: str
+
+
+class EtfConstituentImportRequest(BaseModel):
+    etf_symbol: str
+    end_date: str = Field(default="")
+    adjust: str = Field(default="")
 
 
 
@@ -217,7 +229,24 @@ async def start_add_instrument(payload: InstrumentAddRequest, request: Request) 
         str(payload.category_l3 or "").strip(),
     ]
     if not all(category_values):
-        raise HTTPException(status_code=400, detail="一二三级类目均必选")
+        if any(category_values):
+            raise HTTPException(
+                status_code=400, detail="一二三级类目需同时提供，或同时留空（留空按申万行业自动归类）"
+            )
+        # 类目留空：股票按申万行业自动归类（方案 §6.3，用户只需输入代码）。
+        # ETF 无自动分类来源，未覆盖的次新股也应显式落入「待分类」——
+        # 这两种情况都要求调用方手动传类目，避免静默错归。
+        resolved = resolve_category(normalized_symbol)
+        if not resolved["hit"]:
+            raise HTTPException(
+                status_code=400,
+                detail="未能自动识别该标的行业：ETF 请手动选择类目，股票可选择「待分类」（后续自动回补）",
+            )
+        category_values = [
+            resolved["category_l1"],
+            resolved["category_l2"],
+            resolved["category_l3"],
+        ]
 
     valid_paths = {str(item.get("path") or "").strip() for item in _category_options()}
     category_path = _category_path_from_parts(*category_values)
@@ -249,6 +278,103 @@ async def start_add_instrument(payload: InstrumentAddRequest, request: Request) 
 @router.get("/api/add/status")
 async def get_add_instrument_status() -> dict:
     return {"ok": True, "job": add_instrument_manager.snapshot()}
+
+
+@router.get("/api/suggest-category/{symbol}")
+async def suggest_category(symbol: str) -> dict:
+    """手动添加时的自动归类建议（方案 §6.3）。纯本地表查询，毫秒级。"""
+    normalized_symbol = _normalize_symbol(symbol)
+    if normalized_symbol == "":
+        raise HTTPException(status_code=400, detail="标的代码必填")
+    resolved = resolve_category(normalized_symbol)
+    return {"ok": True, "symbol": normalized_symbol, **resolved}
+
+
+@router.get("/api/etf-constituents/import/status")
+async def get_etf_import_status() -> dict:
+    return {"ok": True, "job": etf_constituent_import_manager.snapshot()}
+
+
+@router.post("/api/etf-constituents/import")
+async def import_etf_constituents(payload: EtfConstituentImportRequest, request: Request) -> dict:
+    etf_symbol = _normalize_symbol(payload.etf_symbol)
+    if etf_symbol == "":
+        raise HTTPException(status_code=400, detail="ETF 代码必填")
+    if etf_constituent_import_manager.is_running():
+        raise HTTPException(status_code=409, detail="已有 ETF 重仓股导入任务正在运行")
+    if not get_db().list_current_etf_constituents(etf_symbol):
+        raise HTTPException(status_code=400, detail=f"{etf_symbol} 暂无重仓股快照，请先运行季度快照脚本")
+
+    try:
+        end_date = _to_date(payload.end_date, date.today())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="日期格式必须是 YYYY-MM-DD")
+    adjust = str(payload.adjust or _default_adjust()).strip().lower() or "qfq"
+
+    started, status = etf_constituent_import_manager.start(
+        etf_symbol=etf_symbol,
+        end_date=end_date,
+        adjust=adjust,
+        provider_priority=_provider_priority_from_request(request),
+    )
+    return {"ok": True, "started": started, "job": status}
+
+
+@router.get("/api/etf-constituents/{etf_symbol}")
+async def preview_etf_constituents(etf_symbol: str) -> dict:
+    """预览某 ETF 当前前十大重仓股（方案 §6.1）。
+
+    每行带 already_managed / resolved_category / hit；附期次新鲜度。
+    """
+    normalized_symbol = _normalize_symbol(etf_symbol)
+    if normalized_symbol == "":
+        raise HTTPException(status_code=400, detail="ETF 代码必填")
+
+    db = get_db()
+    rows = db.list_current_etf_constituents(normalized_symbol)
+    if not rows:
+        return {
+            "ok": False,
+            "symbol": normalized_symbol,
+            "message": "该 ETF 暂无重仓股快照，请先运行季度快照脚本（scripts/fetch_etf_holdings.py）",
+            "period": None,
+            "items": [],
+        }
+
+    known = _known_managed_symbols()
+    period = str(rows[0].get("period") or "")
+    fetched_at = max(str(r.get("fetched_at") or "") for r in rows)
+    months_since = None
+    try:
+        period_date = datetime.strptime(period, "%Y%m%d").date()
+        months_since = round((date.today() - period_date).days / 30.44, 1)
+    except ValueError:
+        pass
+
+    items: list[dict] = []
+    for row in rows:
+        stock = str(row.get("stock_symbol") or "").strip().upper()
+        resolved = resolve_category(stock, db=db)
+        items.append(
+            {
+                "rank": row.get("rank"),
+                "stock_symbol": stock,
+                "stock_name": str(row.get("stock_name") or "").strip(),
+                "weight": row.get("weight"),
+                "already_managed": stock in known,
+                "resolved_category": f"{resolved['category_l2']}-{resolved['category_l3']}",
+                "hit": bool(resolved["hit"]),
+            }
+        )
+    return {
+        "ok": True,
+        "symbol": normalized_symbol,
+        "period": period,
+        "fetched_at": fetched_at,
+        "months_since_period": months_since,
+        "stale": bool(months_since is not None and months_since > 4),
+        "items": items,
+    }
 
 
 @router.get("/api/list")

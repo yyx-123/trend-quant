@@ -33,6 +33,7 @@ class SchedulerManager:
         self,
         update_job: Callable[[], None],
         intraday_snapshot_job: Callable[[], None] | None = None,
+        industry_sync_job: Callable[[], None] | None = None,
     ) -> None:
         if self.scheduler is not None:
             return
@@ -50,6 +51,19 @@ class SchedulerManager:
             misfire_grace_time=7200,
             coalesce=True,
         )
+
+        if industry_sync_job is not None:
+            # 申万行业分类月度同步（TickFlow universes，免费）：每月 1 日凌晨
+            # 低峰执行。申万官方每年 6/12 月调整成分、新股陆续纳入，月度足够；
+            # 错过一两天无伤大雅，misfire 宽限 24h。
+            scheduler.add_job(
+                industry_sync_job,
+                trigger=CronTrigger(day=1, hour=4, minute=30),
+                id="stock_industry_sync",
+                replace_existing=True,
+                misfire_grace_time=86400,
+                coalesce=True,
+            )
 
         if intraday_snapshot_job is not None:
             # 标的大盘盘中快照：周一~周五交易时段每 5 分钟触发。任务内部
