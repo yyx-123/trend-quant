@@ -34,7 +34,7 @@ from services.instrument_jobs import (
     bulk_backfill_manager,
     etf_constituent_import_manager,
 )
-from services.stock_industry import resolve_category
+from services.stock_industry import is_a_share, resolve_category
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
 templates = Jinja2Templates(directory="web/templates")
@@ -320,11 +320,24 @@ async def import_etf_constituents(payload: EtfConstituentImportRequest, request:
     return {"ok": True, "started": started, "job": status}
 
 
+def _market_label(symbol: str) -> str:
+    """非 A 股标的的市场展示名；A 股返回空串。"""
+    text = str(symbol or "").strip().upper()
+    if text.endswith(".HK"):
+        return "港股"
+    if text.endswith(".BJ"):
+        return "北交所"
+    if text.endswith((".US", ".O", ".N", ".A")):
+        return "美股"
+    return "" if is_a_share(text) else "境外"
+
+
 @router.get("/api/etf-constituents/{etf_symbol}")
 async def preview_etf_constituents(etf_symbol: str) -> dict:
     """预览某 ETF 当前前十大重仓股（方案 §6.1）。
 
-    每行带 already_managed / resolved_category / hit；附期次新鲜度。
+    每行带 manageable / already_managed / resolved_category / hit；附期次新鲜度。
+    非 A 股行（港股等）如实展示但 manageable=False，不纳入管理、不走申万归类。
     """
     normalized_symbol = _normalize_symbol(etf_symbol)
     if normalized_symbol == "":
@@ -354,16 +367,25 @@ async def preview_etf_constituents(etf_symbol: str) -> dict:
     items: list[dict] = []
     for row in rows:
         stock = str(row.get("stock_symbol") or "").strip().upper()
-        resolved = resolve_category(stock, db=db)
+        manageable = is_a_share(stock)
+        if manageable:
+            resolved = resolve_category(stock, db=db)
+            category = f"{resolved['category_l2']}-{resolved['category_l3']}"
+            hit = bool(resolved["hit"])
+        else:
+            # 非 A 股（港股/美股/北交所等）如实展示但不纳入管理，不走申万归类
+            category, hit = "", False
         items.append(
             {
                 "rank": row.get("rank"),
                 "stock_symbol": stock,
                 "stock_name": str(row.get("stock_name") or "").strip(),
                 "weight": row.get("weight"),
+                "manageable": manageable,
+                "market_label": _market_label(stock),
                 "already_managed": stock in known,
-                "resolved_category": f"{resolved['category_l2']}-{resolved['category_l3']}",
-                "hit": bool(resolved["hit"]),
+                "resolved_category": category,
+                "hit": hit,
             }
         )
     return {

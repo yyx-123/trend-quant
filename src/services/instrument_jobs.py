@@ -24,6 +24,7 @@ from services.instrument_admin import (
     _normalize_symbol,
     add_constituent_stock,
 )
+from services.stock_industry import is_a_share
 
 logger = logging.getLogger(__name__)
 
@@ -607,6 +608,10 @@ class EtfConstituentImportJobManager:
             for idx, row in enumerate(rows, start=1):
                 symbol = str(row.get("stock_symbol") or "").strip().upper()
                 name = str(row.get("stock_name") or "").strip() or symbol
+                if not is_a_share(symbol):
+                    # 港股/美股/北交所等如实保留在快照里，但不纳入管理
+                    skipped.append({"symbol": symbol, "name": name, "reason": "not_manageable"})
+                    continue
                 self._set_progress(job_id, idx, len(rows) + 1, f"正在写入 {symbol} {name} 的标的信息。")
                 outcome = add_constituent_stock(symbol, name, known_symbols=known)
                 status = outcome["status"]
@@ -682,9 +687,12 @@ class EtfConstituentImportJobManager:
                 self._status["progress_total"] = len(rows) + 1
                 self._status["current_symbol"] = None
                 pending_note = f"，其中 {sum(1 for a in added if not a['hit'])} 只待分类（后续同步自动回补）" if added else ""
+                unmanaged_count = sum(1 for s in skipped if s.get("reason") == "not_manageable")
+                managed_count = len(skipped) - unmanaged_count
+                unmanaged_note = f"、不纳入管理 {unmanaged_count} 只（港股等非 A 股）" if unmanaged_count else ""
                 self._status["message"] = (
-                    f"导入完成：新增 {len(added)} 只、已在管理跳过 {len(skipped)} 只、"
-                    f"失败 {len(failed)} 只{pending_note}。"
+                    f"导入完成：新增 {len(added)} 只、已在管理跳过 {managed_count} 只"
+                    f"{unmanaged_note}、失败 {len(failed)} 只{pending_note}。"
                 )
                 final_status = self._copy_status()
 

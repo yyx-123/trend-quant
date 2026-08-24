@@ -23,6 +23,7 @@ def _seed_constituents(test_db) -> None:
             {"stock_symbol": "600519.SS", "stock_name": "贵州茅台", "weight": 5.1, "rank": 1},
             {"stock_symbol": "300750.SZ", "stock_name": "宁德时代", "weight": 4.2, "rank": 2},
             {"stock_symbol": "688999.SS", "stock_name": "未知次新", "weight": 1.0, "rank": 3},
+            {"stock_symbol": "02269.HK", "stock_name": "药明生物", "weight": 8.3, "rank": 4},
         ],
         "20260630",
     )
@@ -108,11 +109,19 @@ class TestPreviewEtfConstituents:
         assert data["stale"] is False  # 20260630 距测试当日 <2 个月
         items = {i["stock_symbol"]: i for i in data["items"]}
         assert items["600519.SS"]["already_managed"] is False
+        assert items["600519.SS"]["manageable"] is True
         assert items["600519.SS"]["resolved_category"] == "食品饮料-白酒"
         assert items["600519.SS"]["hit"] is True
         assert items["300750.SZ"]["already_managed"] is True
         assert items["688999.SS"]["hit"] is False
         assert items["688999.SS"]["resolved_category"] == "待分类-待分类"
+        # 港股如实展示但不纳入管理、不走申万归类
+        hk = items["02269.HK"]
+        assert hk["manageable"] is False
+        assert hk["market_label"] == "港股"
+        assert hk["resolved_category"] == ""
+        assert hk["hit"] is False
+        assert hk["already_managed"] is False
 
 
 class _FakeDataService:
@@ -172,9 +181,11 @@ class TestImportEtfConstituents:
         assert status["status"] == "completed", status.get("error")
         summary = status["summary"]
         assert {a["symbol"] for a in summary["added"]} == {"600519.SS", "688999.SS"}
-        assert {s["symbol"] for s in summary["skipped"]} == {"300750.SZ"}
+        skipped = {s["symbol"]: s["reason"] for s in summary["skipped"]}
+        assert skipped == {"300750.SZ": "already_managed", "02269.HK": "not_manageable"}
         assert summary["failed"] == []
         assert summary["backfill_updated"] == 2
+        assert "不纳入管理 1 只" in status["message"]
 
         hit = test_db.get_instrument_metadata("600519.SS")
         assert (hit["category_l1"], hit["category_l2"], hit["category_l3"]) == (
@@ -198,7 +209,7 @@ class TestImportEtfConstituents:
                 break
             time.sleep(0.2)
         assert status["summary"]["added"] == []
-        assert len(status["summary"]["skipped"]) == 3
+        assert len(status["summary"]["skipped"]) == 4  # 3 只已管理 + 1 只港股不纳入管理
 
 
 class TestAddAutoCategory:

@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from data.storage.db import init_db, record_job_run_safely  # noqa: E402
 from services.stock_industry import (  # noqa: E402
-    is_a_share,
     project_symbol_to_tushare,
     tickflow_symbol_to_project,
 )
@@ -38,9 +37,21 @@ _JOB_TYPE = "etf_constituents_fetch"
 _MAX_CONSECUTIVE_ERRORS = 5
 
 
+def _normalize_constituent_symbol(symbol: str) -> str:
+    """fund_portfolio 代码 → 项目格式；港股代码补齐 5 位（2269.HK → 02269.HK）。"""
+    text = tickflow_symbol_to_project(symbol)
+    if text.endswith(".HK"):
+        code = text[: -len(".HK")]
+        if code.isdigit() and len(code) < 5:
+            return code.zfill(5) + ".HK"
+    return text
+
+
 def fetch_top10(pro, etf_symbol: str, period: str) -> tuple[list[dict], str | None]:
     """fund_portfolio → 前十大重仓股（项目代码格式）。返回 (rows, 实际期次|None)。
 
+    如实保留全部市场的披露行（含港股/美股/北交所，状态由消费侧判定），
+    按权重降序取前 10，不做市场过滤——过滤会让低权重行补位混进前十。
     目标期次为空时自动回退上一季度重试一次；仍为空返回 ([], None)。
     """
     ts_code = project_symbol_to_tushare(etf_symbol)
@@ -50,12 +61,9 @@ def fetch_top10(pro, etf_symbol: str, period: str) -> tuple[list[dict], str | No
             continue
         records = []
         for rec in df.to_dict("records"):
-            stock = tickflow_symbol_to_project(rec.get("symbol"))
-            if not is_a_share(stock):
-                continue  # QDII 港股/美股、北交所丢弃
             records.append(
                 {
-                    "stock_symbol": stock,
+                    "stock_symbol": _normalize_constituent_symbol(rec.get("symbol")),
                     "weight": rec.get("stk_mkv_ratio"),
                     "ann_date": str(rec.get("ann_date") or "").strip(),
                 }
@@ -156,7 +164,7 @@ def main() -> int:
             continue
 
         if not rows:
-            summary["no_data"].append(etf)  # 债券/货币/QDII 等，不算失败
+            summary["no_data"].append(etf)  # 债券/货币等无股票持仓的，不算失败
             continue
         fill_stock_names(rows, tf_client)
         if actual_period != period:

@@ -1352,14 +1352,20 @@
     const items = Array.isArray(data.items) ? data.items : [];
     if (etfConstituentsBody) {
       etfConstituentsBody.innerHTML = items.map((item) => {
+        const manageable = item.manageable !== false;
         const managed = item.already_managed;
         const hit = item.hit;
-        // 所有行都展示申万行业（stock_industry 事实源），未识别标黄
-        const categoryText = String(item.resolved_category || '');
-        const categoryStyle = !hit ? 'color:#b45309;' : '';
-        const status = managed
-          ? '<span style="color:#98a2b3;">已管理</span>'
-          : '<span style="color:#067647;">待导入</span>';
+        // A 股行展示申万行业（stock_industry 事实源），未识别标黄；
+        // 非 A 股行（港股等）类目列展示市场名，状态固定不纳入管理
+        const categoryText = manageable
+          ? String(item.resolved_category || '')
+          : String(item.market_label || '');
+        const categoryStyle = manageable && !hit ? 'color:#b45309;' : '';
+        const status = !manageable
+          ? '<span style="color:#98a2b3;">不纳入管理</span>'
+          : managed
+            ? '<span style="color:#98a2b3;">已管理</span>'
+            : '<span style="color:#067647;">待导入</span>';
         return `<tr>
           <td>${esc(item.rank)}</td>
           <td>${esc(item.stock_symbol)}</td>
@@ -1370,7 +1376,7 @@
         </tr>`;
       }).join('');
     }
-    const importable = items.filter((item) => !item.already_managed).length;
+    const importable = items.filter((item) => item.manageable !== false && !item.already_managed).length;
     if (etfConstituentsImportBtn) {
       etfConstituentsImportBtn.disabled = importable === 0;
       etfConstituentsImportBtn.textContent = importable
@@ -1402,7 +1408,7 @@
         return;
       }
       const importable = renderConstituents(data, item?.name || '');
-      const pending = (data.items || []).filter((entry) => !entry.already_managed && !entry.hit).length;
+      const pending = (data.items || []).filter((entry) => entry.manageable !== false && !entry.already_managed && !entry.hit).length;
       setConstituentsMessage(
         importable
           ? `待导入 ${importable} 只` + (pending ? `，其中 ${pending} 只暂未识别行业（导入后归入待分类，后续自动回补）` : '')

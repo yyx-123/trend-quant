@@ -54,15 +54,17 @@ def _portfolio(rows: list[dict]) -> pd.DataFrame:
 
 
 class FetchTop10Test(unittest.TestCase):
-    def test_top10_sorted_filtered(self) -> None:
+    def test_top10_sorted_all_markets_kept(self) -> None:
+        # 港股/北交所等非 A 股行如实保留并按权重参与排序（状态由消费侧判定），
+        # 不做市场过滤——过滤会让低权重行补位混进前十
         df = _portfolio(
             [
                 {"symbol": f"60051{i}.SH", "stk_mkv_ratio": float(20 - i), "ann_date": "20260720"}
                 for i in range(9)
             ]
             + [
-                {"symbol": "00700.HK", "stk_mkv_ratio": 99.0, "ann_date": "20260720"},  # 港股丢弃
-                {"symbol": "830799.BJ", "stk_mkv_ratio": 98.0, "ann_date": "20260720"},  # 北交所丢弃
+                {"symbol": "00700.HK", "stk_mkv_ratio": 99.0, "ann_date": "20260720"},
+                {"symbol": "830799.BJ", "stk_mkv_ratio": 98.0, "ann_date": "20260720"},
                 {"symbol": "000001.SZ", "stk_mkv_ratio": 1.0, "ann_date": "20260720"},
                 {"symbol": "000002.SZ", "stk_mkv_ratio": 0.5, "ann_date": "20260720"},
             ]
@@ -71,10 +73,20 @@ class FetchTop10Test(unittest.TestCase):
         rows, actual = fetch_top10(pro, "510300.SS", "20260630")
         self.assertEqual(actual, "20260630")
         self.assertEqual(len(rows), 10)
-        self.assertEqual(rows[0]["stock_symbol"], "600510.SS")  # 权重最高 + .SH→.SS
+        self.assertEqual(rows[0]["stock_symbol"], "00700.HK")  # 权重最高，港股保留
         self.assertEqual(rows[0]["rank"], 1)
-        self.assertEqual(rows[-1]["stock_symbol"], "000001.SZ")  # 第 11 名被截断
-        self.assertNotIn("00700.HK", [r["stock_symbol"] for r in rows])
+        self.assertEqual(rows[1]["stock_symbol"], "830799.BJ")
+        self.assertEqual(rows[2]["stock_symbol"], "600510.SS")  # .SH→.SS
+        self.assertEqual(rows[-1]["stock_symbol"], "600517.SS")  # 权重 13，第 11 名起被截断
+        self.assertNotIn("000001.SZ", [r["stock_symbol"] for r in rows])
+
+    def test_hk_symbol_zero_padded(self) -> None:
+        # tushare 港股代码标准即 5 位，个别来源缺前导零时补齐（tickflow 查询要求 5 位）
+        df = _portfolio([{"symbol": "2269.HK", "stk_mkv_ratio": 8.3, "ann_date": "20260720"}])
+        pro = _FakePro({"20260630": df})
+        rows, actual = fetch_top10(pro, "513120.SS", "20260630")
+        self.assertEqual(actual, "20260630")
+        self.assertEqual(rows[0]["stock_symbol"], "02269.HK")
 
     def test_fallback_to_prev_period(self) -> None:
         df = _portfolio([{"symbol": "600519.SH", "stk_mkv_ratio": 5.0, "ann_date": "20260420"}])

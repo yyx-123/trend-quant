@@ -22,6 +22,7 @@ from data.service import DataService  # noqa: E402
 from data.storage.db import init_db, record_job_run_safely  # noqa: E402
 from services.indicator_builder import rebuild_after_backfill  # noqa: E402
 from services.instrument_admin import _known_managed_symbols, add_constituent_stock  # noqa: E402
+from services.stock_industry import is_a_share  # noqa: E402
 
 DB_PATH = Path("data/trend_quant.db")
 _JOB_TYPE = "etf_constituents_import_all"
@@ -43,14 +44,22 @@ def main() -> int:
         print("[import-all] etf_constituents 无快照数据，请先运行 scripts/fetch_etf_holdings.py")
         return 1
 
-    # 去重（一只股票是多只 ETF 的重仓），保留首次出现的名称
+    # 去重（一只股票是多只 ETF 的重仓），保留首次出现的名称；
+    # 非 A 股（港股/美股/北交所等）如实留在快照里但不纳入管理
     stocks: dict[str, str] = {}
+    not_manageable = 0
     for row in rows:
         symbol = str(row.get("stock_symbol") or "").strip().upper()
-        if symbol and symbol not in stocks:
+        if not symbol:
+            continue
+        if not is_a_share(symbol):
+            not_manageable += 1
+            continue
+        if symbol not in stocks:
             stocks[symbol] = str(row.get("stock_name") or "").strip()
     etf_count = len({str(r.get("etf_symbol") or "") for r in rows})
-    print(f"[import-all] {etf_count} 只 ETF 的快照，去重后 {len(stocks)} 只股票")
+    print(f"[import-all] {etf_count} 只 ETF 的快照，去重后 {len(stocks)} 只 A 股"
+          f"（另有 {not_manageable} 行非 A 股不纳入管理）")
 
     known = _known_managed_symbols()
     todo = {s: n for s, n in stocks.items() if s not in known}
@@ -124,6 +133,7 @@ def main() -> int:
         {
             "etfs": etf_count,
             "distinct_stocks": len(stocks),
+            "not_manageable_rows": not_manageable,
             "added": [a["symbol"] for a in added],
             "added_unclassified": [a["symbol"] for a in added if not a["hit"]],
             "skipped": len(skipped),

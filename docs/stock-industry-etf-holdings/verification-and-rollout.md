@@ -110,3 +110,29 @@ export TUSHARE_HTTP_URL=https://tuaremax.top   # 镜像站账号才需要；官�
 
 本功能全部改动目前在**工作区未提交**状态（8 个改动文件 + 11 个新文件）。
 上线前需要先 commit & push，服务器再拉取。
+
+## 6. 2026-08-24 晚间行为修正：重仓股如实展示（含港股）
+
+**问题**：旧逻辑在抓取时把港股/美股/北交所行直接丢弃，跨境 ETF（如 517380
+恒生沪深港创新药）A 股重仓不足 10 只时，权重 0.01%–0.03% 的打新锁定期新股
+补位混进"前十大"。
+
+**修正**（用户拍板）：
+- `scripts/fetch_etf_holdings.py` 不再做市场过滤，全部市场的披露行按权重降序
+  取前 10 如实落库；港股代码统一补 5 位前导零（`02269.HK`），名称仍由 tickflow 补全。
+- 预览接口每行新增 `manageable` / `market_label`；弹窗里非 A 股行类目列显示
+  市场名（港股/北交所/美股/境外），状态列固定「不纳入管理」，不计入待导入数量。
+- 页面导入 Job 与 `import_all_etf_constituents.py` 对非 A 股行一律跳过
+  （reason=`not_manageable`），完成消息单列「不纳入管理 N 只」。
+
+**数据修正（需在 tushare 窗口重跑一次）**：
+
+```bash
+set TUSHARE_TOKEN=<token>
+set TUSHARE_HTTP_URL=<镜像站地址>
+.venv/Scripts/python scripts/fetch_etf_holdings.py --force
+```
+
+`save_etf_constituents` 会先整只软失效再 upsert 当期行，重抓后旧补位行自动失效，
+无需手工清库。已入池标的不受本次修正影响（今日三次导入新增的 13 只均为正常
+蓝筹股；517380 的摩尔线程/沐曦股份为 manual_add 手工添加，与本次问题无关）。
