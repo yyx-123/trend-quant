@@ -1,8 +1,8 @@
 # 股票行业分类体系重建（申万2021）+ ETF 前十大重仓股导入 方案 v1
 
 - 日期：2026-08-24
-- 状态：待评审（v1.1 已并入评审意见 `2026-08-24-stock-industry-etf-holdings-plan-review.md`：A1/A3/A4 修正、B1-B6 补强全部采纳；A2 评审表述有误已更正——`_category_priority_map` 存在于 `instrument_admin.py:88`，其"抽公共函数"的建议采纳）
-- 前置文档：`docs/etf-weighted-stocks/2026-07-30-etf-weighted-stocks-plan.md`（仅覆盖 ETF 重仓股导入；本方案在其基础上扩展行业分类体系，**取代**其 §6.3 默认类目设计，其余离线抓取/表结构/导入 Job 设计沿用）
+- 状态：已实施上线（2026-08-24；评审意见见 `2026-08-24-stock-industry-etf-holdings-plan-review-v1.1.md`：A1/A3/A4 修正、B1-B6 补强全部采纳；A2 评审表述有误已更正——`_category_priority_map` 存在于 `instrument_admin.py:88`，其"抽公共函数"的建议采纳）
+- 前置文档：`docs/etf-weighted-stocks/2026-07-30-etf-weighted-stocks-plan.md`（仅覆盖 ETF 重仓股导入的旧方案，已被本方案取代并从仓库移除，见 git 历史；本方案**取代**其 §6.3 默认类目设计，其余离线抓取/表结构/导入 Job 设计沿用）
 - 用户已确认的决策（2026-08-24）：
   1. 类目树**全面对齐申万行业分类**，重建「股票」一级类目下的二三级树；
   2. 存量 275 只股票**批量重归类**（迁移前出对照报告确认）；

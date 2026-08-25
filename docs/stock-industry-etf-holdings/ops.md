@@ -1,7 +1,7 @@
 # 运维手册：行业分类同步 / ETF 重仓股快照 / 类目迁移
 
 - 方案：`2026-08-24-stock-industry-etf-holdings-plan.md`
-- 评审：`2026-08-24-stock-industry-etf-holdings-plan-review.md`
+- 评审：`2026-08-24-stock-industry-etf-holdings-plan-review-v1.1.md`
 - 实施完成：2026-08-24（P0-P4 全部落地）
 
 ## 日常（无需操作）

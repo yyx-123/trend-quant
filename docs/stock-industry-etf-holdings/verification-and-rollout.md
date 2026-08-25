@@ -1,7 +1,7 @@
 # 验收与上线执行手册：申万行业分类 + ETF 前十大重仓股
 
 - 日期：2026-08-24
-- 方案 / 评审 / 季度运维：同目录 `2026-08-24-stock-industry-etf-holdings-plan.md`、`...-plan-review.md`、`ops.md`
+- 方案 / 评审 / 季度运维：同目录 `2026-08-24-stock-industry-etf-holdings-plan.md`、`...-plan-review-v1.1.md`、`ops.md`
 - 当前状态：**代码与数据全部就绪**（本地已实跑数据脚本），**存量迁移尚未执行**（本地/线上都待执行）
 
 ## 1. 已完成的事实（可抽查）
