@@ -4533,6 +4533,117 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   gap: 4px;
 }
 
+/* 明细大表多选筛选器 */
+.bb-multi {
+  position: relative;
+  display: inline-block;
+}
+
+.bb-multi-btn {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 0 24px 0 10px;
+  font-size: 13px;
+  color: var(--text-soft);
+  cursor: pointer;
+  position: relative;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bb-multi-btn::after {
+  content: '▾';
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: var(--text-soft);
+}
+
+.bb-multi-btn.is-filtered {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.bb-multi-pop {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  max-width: 320px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(30, 50, 40, 0.14);
+  padding: 6px;
+}
+
+.bb-multi-actions {
+  display: flex;
+  gap: 8px;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+
+.bb-multi-actions button {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.bb-multi-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.bb-multi-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bb-multi-item:hover {
+  background: var(--accent-soft);
+}
+
+/* 透视热力图轴标签拖动反馈 */
+.bb-heat-drag-ghost {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  box-shadow: 0 4px 12px rgba(30, 50, 40, 0.25);
+  white-space: nowrap;
+}
+
+.bb-heat-drag-line {
+  position: fixed;
+  z-index: 9998;
+  pointer-events: none;
+  background: var(--accent);
+}
+
 .batch-detail-shell {
   max-height: 640px;
   overflow-y: auto;

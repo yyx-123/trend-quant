@@ -16,6 +16,46 @@ def compute_drawdown(daily_nav: list[dict]) -> list[dict]:
     return [{"date": str(row["date"]), "drawdown": float(dd.iloc[idx])} for idx, row in df.iterrows()]
 
 
+def flat_run_days(trades: list[dict], dates: list[str]) -> list[float]:
+    """各空仓段的长度（交易日）：起点→首次 BUY 的前导段 + 每段 SELL→下一次 BUY 的间隔。
+
+    期末仍空仓的尾段不计入——与 avg_holding_days 排除期末未平仓对称：窗口截断
+    会低估最后一段。日期不在净值序列时回退自然日差。无任何交易时返回空列表
+    （语义上全程空仓但从未被交易事件界定，调用方按 None 处理）。
+    """
+    if not trades or not dates:
+        return []
+    nav_index = {str(d)[:10]: i for i, d in enumerate(dates)}
+
+    def span(a: str, b: str) -> float:
+        if a in nav_index and b in nav_index:
+            return float(nav_index[b] - nav_index[a])
+        return float((pd.Timestamp(b) - pd.Timestamp(a)).days)
+
+    runs: list[float] = []
+    pending_sell: str | None = None
+    first_buy_seen = False
+    for t in trades:
+        side = str(t.get("side", "")).upper()
+        day = str(t.get("date", ""))[:10]
+        if not day:
+            continue
+        if side == "BUY":
+            if not first_buy_seen:
+                first_buy_seen = True
+                leading = span(str(dates[0])[:10], day)
+                if leading > 0:
+                    runs.append(leading)
+            if pending_sell:
+                gap = span(pending_sell, day)
+                if gap > 0:
+                    runs.append(gap)
+                pending_sell = None
+        elif side == "SELL":
+            pending_sell = day
+    return runs
+
+
 def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: float) -> dict:
     if not daily_nav:
         return {
@@ -37,6 +77,7 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
             "profit_factor": 0.0,
             "trade_count": 0,
             "avg_holding_days": 0.0,
+            "avg_flat_days": None,
             "avg_win": 0.0,
             "avg_loss": 0.0,
             "payoff_ratio": 0.0,
@@ -114,6 +155,14 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
             last_buy_date = None
     avg_holding_days = sum(holding_days) / len(holding_days) if holding_days else 0.0
 
+    # 空仓天数：无任何交易记 None（全程空仓但未被交易事件界定，直接给全周期会误导）；
+    # 有交易但无空仓段（如首日买入持有到底）记 0.0。
+    flat_days = flat_run_days(trades, [str(row.get("date", ""))[:10] for row in daily_nav])
+    if flat_days:
+        avg_flat_days: float | None = sum(flat_days) / len(flat_days)
+    else:
+        avg_flat_days = 0.0 if trades else None
+
     return {
         "total_return": float(total_return),
         "annual_return": float(annual_return),
@@ -134,6 +183,7 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
         "trade_count": int(len(trades)),
         "closed_trade_count": int(len(sell_pnls)),
         "avg_holding_days": float(avg_holding_days),
+        "avg_flat_days": float(avg_flat_days) if avg_flat_days is not None else None,
         "avg_win": float(avg_win),
         "avg_loss": float(avg_loss),
         "payoff_ratio": float(payoff_ratio),

@@ -83,6 +83,29 @@ class TestComputeSummary:
         assert compute_summary(nav, [], 0.0)["avg_holding_days"] == 0.0
         assert compute_summary([], [], 0.0)["avg_holding_days"] == 0.0
 
+    def test_avg_flat_days_leading_and_gaps(self) -> None:
+        """空仓段 = 起点→首次 BUY 的前导段 + SELL→下一次 BUY 的间隔，按交易日计。"""
+        nav = _make_nav([100_000, 101_000, 102_000, 103_000, 104_000, 105_000],
+                        start_date="2025-01-02")
+        dates = [row["date"] for row in nav]
+        trades = [
+            {"date": dates[1], "side": "BUY", "pnl": 0.0},       # 前导空仓 1 天
+            {"date": dates[2], "side": "SELL", "pnl": 10.0},
+            {"date": dates[4], "side": "BUY", "pnl": 0.0},       # 间隔空仓 2 天
+            {"date": dates[5], "side": "SELL", "pnl": 5.0},      # 期末空仓尾段不计入
+        ]
+        summary = compute_summary(nav, trades, 0.0)
+        assert summary["avg_flat_days"] == pytest.approx(1.5)
+
+    def test_avg_flat_days_edge_cases(self) -> None:
+        """无交易为 None（区别于 0）；首日买入后不再交易 = 从未空仓，为 0。"""
+        nav = _make_nav([100_000, 101_000, 102_000], start_date="2025-01-02")
+        dates = [row["date"] for row in nav]
+        assert compute_summary(nav, [], 0.0)["avg_flat_days"] is None
+        assert compute_summary([], [], 0.0)["avg_flat_days"] is None
+        buy_and_hold = [{"date": dates[0], "side": "BUY", "pnl": 0.0}]
+        assert compute_summary(nav, buy_and_hold, 0.0)["avg_flat_days"] == 0.0
+
     def test_detail_keys_for_hover_tips(self) -> None:
         """悬停计算明细键：日收益统计与最大回撤峰/谷。"""
         nav = _make_nav([100_000, 110_000, 99_000, 105_000])

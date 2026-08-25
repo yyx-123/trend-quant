@@ -216,6 +216,20 @@ def extract_cell(result: dict, monthly_nav: list[dict]) -> dict:
         if annual is not None and bench_annual is not None
         else None
     )
+    sharpe = summary.get("sharpe")
+    bench_sharpe = bench.get("sharpe")
+    excess_sharpe = (
+        float(sharpe) - float(bench_sharpe)
+        if sharpe is not None and bench_sharpe is not None
+        else None
+    )
+    calmar = summary.get("calmar")
+    bench_calmar = bench.get("calmar")
+    excess_calmar = (
+        float(calmar) - float(bench_calmar)
+        if calmar is not None and bench_calmar is not None
+        else None
+    )
     return {
         "status": "ok",
         "start_date": result.get("start_date"),
@@ -223,17 +237,22 @@ def extract_cell(result: dict, monthly_nav: list[dict]) -> dict:
         "total_return": summary.get("total_return"),
         "annual_return": annual,
         "max_drawdown": summary.get("max_drawdown"),
-        "sharpe": summary.get("sharpe"),
+        "sharpe": sharpe,
         "sortino": summary.get("sortino"),
-        "calmar": summary.get("calmar"),
+        "calmar": calmar,
         "win_rate": summary.get("win_rate"),
         "profit_factor": summary.get("profit_factor"),
         "trade_count": summary.get("trade_count"),
         "avg_holding_days": summary.get("avg_holding_days"),
+        "avg_flat_days": summary.get("avg_flat_days"),
         "final_equity": result.get("final_equity"),
         "benchmark_total_return": bench.get("total_return"),
         "benchmark_annual_return": bench_annual,
+        "benchmark_sharpe": bench_sharpe,
+        "benchmark_calmar": bench_calmar,
         "excess_annual_return": excess,
+        "excess_sharpe": excess_sharpe,
+        "excess_calmar": excess_calmar,
         "annual_returns_json": json.dumps(result.get("annual_returns") or [], ensure_ascii=False),
         "monthly_heatmap_json": json.dumps(result.get("monthly_heatmap") or {}, ensure_ascii=False),
         "trades_json": json.dumps(result.get("trades") or [], ensure_ascii=False),

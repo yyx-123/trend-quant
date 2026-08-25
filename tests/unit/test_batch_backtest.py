@@ -234,8 +234,12 @@ class TestExtractCell:
                 "total_return": 0.10, "annual_return": 0.20, "max_drawdown": -0.05,
                 "sharpe": 1.5, "sortino": 2.0, "calmar": 4.0,
                 "win_rate": 0.6, "profit_factor": 1.8, "trade_count": 10,
+                "avg_holding_days": 12.0, "avg_flat_days": 30.0,
             },
-            "benchmark_summary": {"total_return": 0.08, "annual_return": 0.15},
+            "benchmark_summary": {
+                "total_return": 0.08, "annual_return": 0.15,
+                "sharpe": 1.1, "calmar": 3.0,
+            },
             "annual_returns": [{"year": 2024, "return": 0.1}],
             "monthly_heatmap": {"years": [2024]},
             "trades": [{"side": "BUY"}],
@@ -244,6 +248,11 @@ class TestExtractCell:
         cell = extract_cell(result, [{"month": "2024-01", "equity": 100}])
         assert cell["status"] == "ok"
         assert cell["excess_annual_return"] == pytest.approx(0.05)
+        assert cell["excess_sharpe"] == pytest.approx(0.4)
+        assert cell["excess_calmar"] == pytest.approx(1.0)
+        assert cell["benchmark_sharpe"] == 1.1
+        assert cell["benchmark_calmar"] == 3.0
+        assert cell["avg_flat_days"] == 30.0
         assert cell["benchmark_annual_return"] == 0.15
         # blob 是 JSON 字符串，且不含大字段键
         assert "daily_nav" not in cell and "charts" not in cell and "condition_trace" not in cell
@@ -255,6 +264,10 @@ class TestExtractCell:
     def test_extract_cell_missing_benchmark(self) -> None:
         cell = extract_cell({"summary": {"annual_return": 0.2}}, [])
         assert cell["excess_annual_return"] is None
+        assert cell["excess_sharpe"] is None
+        assert cell["excess_calmar"] is None
+        assert cell["benchmark_sharpe"] is None
+        assert cell["avg_flat_days"] is None
 
 
 # ----------------------------------------------------------------------
@@ -290,6 +303,14 @@ class TestRunBatch:
         assert ok_cell["status"] == "ok"
         assert ok_cell["annual_return"] is not None
         assert ok_cell["excess_annual_return"] is not None
+        # 2026-08 新增列：基准夏普/卡玛 + 超额 + 平均空仓天数，端到端落库可查
+        assert ok_cell["benchmark_sharpe"] is not None
+        assert ok_cell["benchmark_calmar"] is not None
+        assert ok_cell["excess_sharpe"] == pytest.approx(
+            ok_cell["sharpe"] - ok_cell["benchmark_sharpe"])
+        assert ok_cell["excess_calmar"] == pytest.approx(
+            ok_cell["calmar"] - ok_cell["benchmark_calmar"])
+        assert ok_cell["avg_flat_days"] is not None
         assert ok_cell["bar_count"] == 120
         assert ok_cell["strategy_name"].startswith("测试策略")
         # skipped 格带原因
