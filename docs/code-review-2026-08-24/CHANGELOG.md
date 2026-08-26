@@ -1,5 +1,20 @@
 # v1 → v2 修订记录
 
+## v2.2 → v3（2026-08-25：修复决策与实施方案，新增第十二节）
+
+作者对全部条目给出决策（明确指示 / 授权「看着改」/ 明确不改三类）；「看着改」条目的修改路径经独立子代理对照实际源码逐条评审并修正后定稿。要点：
+
+- P0-1/P0-2 最终建议：/mcp 前置静态 Bearer token 中间件 + add_trade/open_positions 去密码化（身份来自 token→用户映射，身份通路经 FastMCP Context 已验证 mcp 1.28.1 可行）；DNS rebinding 保护恢复开启，上线顺序先 token 后 DNS 保护。
+- 作者明确决策：P0-3 删 metadata 反推 fallback；P1-2 每日 03:00 备份 keep=1（不做异机/演练）；P1-3 内置管理员 yyx（is_admin 列已存在，子代理纠正「需迁移」前提；挂点定 lifespan 而非 init_db）；P1-5 全局东八区；P1-7 按线上真实配置重写 deploy.sh；P1-9/P2-8/P2-14/P2-17 不改。
+- 子代理评审并入的关键修正：P2-11 必须先 P2-12 且删除三个现存 close() 调用点、限流锁随状态模块级化；P2-23 foreign_keys 实测生产库零孤儿、挂点 _connect 与 timeout=30 合并为一次改动；P0-3 删 fallback 后空表行为契约（/api/add 与 update 全部 400、类目无种子来源）补种子与文档约定；P2-29 两端点全仓核实零调用方均删除（test_auth_wall 探针同步换）；asset_version 简化实现（启动内容 sha1 + 1s TTL mtime 复查）；P1-2 存量手工备份 pre-auth-wall-20260824.db 不匹配修剪 glob 需单独处置。
+- 行动清单变更：#5 改 keep=1、#14 移除 P1-9 部分、#19 移除、#32 移除 DDL 分段/域迁出；新增顺序约束（P2-12→P2-11、Bearer→DNS 保护、P1-15 前置→P1-12/P1-10→P2-27 阶段二）。
+- 仍待作者确认：P2-4（附例说明中）、附录 B N1-N5 默认处理、P1-3 密码是否强制重置、覆盖率门槛数字（起步 70% 目标 85%+）。
+- 本节仅为方案定稿，尚未进入开发。
+
+## v3 定稿（2026-08-25 同日：开放点全部闭环）
+
+作者对 4 个开放点逐一回复，全部闭环：**P2-4 不改**（确认看板按强弱排序、priority 仅打平决胜即有意设计）；**附录 B N1-N5 全做**（N1 删冗余索引/N2 备查/N3 并入 P2-18/N4 并入 P2-25/N5 改名）；**P1-3 采用默认方案**（yyx 已存在不强制重置密码，仅不存在时以 20160702 创建）；**覆盖率暂不设 fail_under 硬门槛**（尽可能做高，达成后作者再指定数字）；P0-2 调用方式变化作者知悉接受。第十二节为实施方案定稿，**尚未进入开发**。
+
 ## v2.1 → v2.2（盲审 round-2 补充收录，纯增量）
 
 盲审代理 round-2 确认「全部条目收录无误、降调均接受、无 P0-P2 级遗漏」；其第二轮定向深挖的 5 条 P3 级微调（N1 冗余索引/读侧缺索引、N2 冷路径全表查询、N3 管理路径重复全表加载、N4 API 测试 pbkdf2 拖慢、N5 误导性变量名）收录为附录 B；M1（P2-4 排序字段）补强证据（priority_l2 实为 L2 排序专用配置，当前用法使其失效）已并入 P2-4 条目。
@@ -95,3 +110,17 @@ v2 修订输入：评审代理 1（逐条事实核查，review-1-factcheck.md）
 
 - 评审 1 称 P0-1「显然未亲核」——不属实：v1 审查时端点确实存在于工作区（主审查人 Read 全文亲见 auth.py 82 行版本），系审查期间工作区回滚所致。v2 已在 R-0 中如实记录时间线与证据，并将「审查基线声明」补入报告头部防止此类争议。
 - 盲审 M1（priority_l3 排序）标为「疑似复制粘贴错误」——主审查人复核后认为语义存疑但非显然错误（L2 的 priority_l3 是其子级 min 值，排序确定但字段意图不符），报告按「疑似字段误用，建议确认意图」表述。
+
+## v3 → 开发完成（2026-08-25：第十二节方案全量落地）
+
+按第十二节实施方案完成全部条目的开发。要点与验收证据：
+
+- **P0 安全**：/mcp 前置 Bearer token 中间件（`app/mcp_auth.py`，失败关闭、401 可读 detail、hmac 常量时间比对）+ add_trade/open_positions 去密码化（身份经 FastMCP Context 来自 token→用户映射）；DNS rebinding 保护按 `TREND_MCP_ALLOWED_HOSTS` 配置开启；两个 skill（daily-trade-report / trend-quant-mcp）同步为 token 制。
+- **P1 全部**：登录限流+审计、每日 03:00 备份 keep=1（真实 2.7GB 库跑通验证）、内置管理员 yyx（lifespan ensure，不动已有密码）、Web 日K 指标全历史计算（窗口不变性测试锁定）、时区统一 market_now、deploy.sh 按线上现状重写、3 处 XSS+1 处双重转义修复、CSRF 头校验+logout 改 POST、批量回测标的快照冻结、DataService 泄漏修复。
+- **P1-14/P1-15**：safe_float/category_path/_number/SH↔SS/_date_span/看板共用件收口（阶段一完成，阶段二按方案允许未做）；app-common.js（esc/postJson/止损卡 manual_trade 口径/排序/侧栏/日期/金额）+ fetch 全局拦截（CSRF 头注入 + 统一 401 跳登录）；asset_version 扩展为全静态资源 sha1+mtime 复查。
+- **P2 全部**：盘中聚合成交额加权+NaN 防护、死代码全清（分钟K链路/benchmarks 死API/plan 校验/死 CSS 106 项/死 JS）、RevisionCache 模块级单例、DataService 进程级单例（限流状态模块级、close 调用点全清）、MarketStore/路由 service 去固化、env 收口 core/env.py + core/paths.py 锚定、引擎 itertuples、revision 免 COUNT(*)、指标只算一遍、stop_loss 预加载 df、批量 counts 每 20 格 flush、result_full 删除、慢请求中间件、失败哨兵、busy_timeout=30+foreign_keys=ON、N1 迁移式删 3 冗余索引、N3/N4/N5、trading-status 与 /api/auth/me 死端点删除。
+- **测试**：附录 A 全量补测（jobs/scheduler/lifespan/MCP 7 工具/service/provider/db/RevisionCache/冷却期特判/engine 边界）；P2-25 测试卫生（弱断言/全局状态泄漏/重复测试合并/根目录 marker/slow/pbkdf2 提速）；857 passed 连跑一致；整体覆盖率 89%、咽喉模块全部 ≥85%。
+- **CI**：GitHub Actions 单矩阵（pytest+ruff+死 CSS 检查+前端 JS 加载检查），无 fail_under（按作者决策）。
+- **E2E**：独立实例全流程验证（登录墙/登录/7 页面渲染/CSRF/MCP 官方客户端 7 工具含 token 身份与缓存命中）；浏览器 GUI 验证发现并修复 3 个前端运行时残留 bug（stopPill 孤立片段、HEAT_COLOR_DIMS 误删、止损 tip 别名缺失），新增 scripts/check_frontend_js.py 防复发。
+- **数据库变更**：见 db-changes-2026-08-25.md（仅删 3 个冗余索引，启动自动迁移，线上零手工 SQL）。
+- **两轮独立代码审查**（方案符合性 + 新问题排查）均已终审通过。

@@ -1,21 +1,9 @@
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from core import indicators as core_ind
-from core.trend import calculate_trend_score_snapshot
-
-
-def safe_float(value: object, default: float | None = None) -> float | None:
-    try:
-        if value is None:
-            return default
-        if isinstance(value, float) and np.isnan(value):
-            return default
-        return float(value)
-    except Exception:
-        return default
+from core.trend import calculate_trend_score_snapshot, safe_float
 
 
 def field_series(bars: pd.DataFrame, field: str) -> pd.Series:
@@ -23,18 +11,16 @@ def field_series(bars: pd.DataFrame, field: str) -> pd.Series:
         return pd.Series(dtype=float)
     return pd.to_numeric(bars[field], errors="coerce")
 
-
 def latest_field(bars: pd.DataFrame, field: str) -> float | None:
     series = field_series(bars, field)
     if series.empty:
         return None
     return safe_float(series.iloc[-1])
 
-
 def sma(bars: pd.DataFrame, field: str = "close", period: int = 20) -> tuple[float | None, dict]:
     series = field_series(bars, field).dropna()
     if len(series) < period:
-        return None, {"reason": "insufficient_bars", "rows": int(len(series)), "period": int(period)}
+        return None, {"reason": "insufficient_bars", "rows": len(series), "period": int(period)}
     window = series.tail(period)
     value = safe_float(core_ind.sma(series, period).iloc[-1])
     return value, {
@@ -44,15 +30,13 @@ def sma(bars: pd.DataFrame, field: str = "close", period: int = 20) -> tuple[flo
         "value": value,
     }
 
-
 def ema(bars: pd.DataFrame, field: str = "close", period: int = 20) -> tuple[float | None, dict]:
     series = field_series(bars, field).dropna()
     if len(series) < period:
-        return None, {"reason": "insufficient_bars", "rows": int(len(series)), "period": int(period)}
+        return None, {"reason": "insufficient_bars", "rows": len(series), "period": int(period)}
     ema_series = core_ind.ema(series, period, min_periods=0)
     value = safe_float(ema_series.iloc[-1])
     return value, {"field": field, "period": int(period), "value": value}
-
 
 def atr(bars: pd.DataFrame, period: int = 20) -> tuple[float | None, dict]:
     if bars.empty or not {"high", "low", "close"}.issubset(bars.columns):
@@ -77,7 +61,6 @@ def atr(bars: pd.DataFrame, period: int = 20) -> tuple[float | None, dict]:
         "value": value,
     }
 
-
 def bias(bars: pd.DataFrame, field: str = "close", period: int = 20) -> tuple[float | None, dict]:
     latest = latest_field(bars, field)
     ma_value, ma_trace = sma(bars, field=field, period=period)
@@ -85,7 +68,6 @@ def bias(bars: pd.DataFrame, field: str = "close", period: int = 20) -> tuple[fl
         return None, {"field": field, "period": int(period), "sma": ma_trace}
     value = (latest - ma_value) / ma_value
     return value, {"field": field, "period": int(period), "field_value": latest, "sma": ma_value, "value": value}
-
 
 def bias_atr_normed(
     bars: pd.DataFrame,
@@ -109,15 +91,13 @@ def bias_atr_normed(
         "value": value,
     }
 
-
 def rsi(bars: pd.DataFrame, field: str = "close", period: int = 14) -> tuple[float | None, dict]:
     series = field_series(bars, field).dropna()
     if len(series) < period + 1:
-        return None, {"reason": "insufficient_bars", "rows": int(len(series)), "period": int(period)}
+        return None, {"reason": "insufficient_bars", "rows": len(series), "period": int(period)}
     rsi_series = core_ind.rsi(series, period=period)
     value = safe_float(rsi_series.iloc[-1])
     return value, {"field": field, "period": int(period), "value": value}
-
 
 def macd(
     bars: pd.DataFrame,
@@ -129,7 +109,7 @@ def macd(
     series = field_series(bars, field).dropna()
     min_rows = max(fast_period, slow_period) + signal_period
     if len(series) < min_rows:
-        trace = {"reason": "insufficient_bars", "rows": int(len(series)), "required": int(min_rows)}
+        trace = {"reason": "insufficient_bars", "rows": len(series), "required": int(min_rows)}
         return {"line": None, "signal": None, "histogram": None}, trace
     out = core_ind.macd(series, fast_period=fast_period, slow_period=slow_period, signal_period=signal_period, warmup=True)
     values = {
@@ -145,7 +125,6 @@ def macd(
         "values": values,
     }
 
-
 def bollinger(
     bars: pd.DataFrame,
     field: str = "close",
@@ -154,7 +133,7 @@ def bollinger(
 ) -> tuple[dict[str, float | None], dict]:
     series = field_series(bars, field).dropna()
     if len(series) < period:
-        trace = {"reason": "insufficient_bars", "rows": int(len(series)), "period": int(period)}
+        trace = {"reason": "insufficient_bars", "rows": len(series), "period": int(period)}
         return {"upper": None, "middle": None, "lower": None}, trace
     out = core_ind.bollinger(series, period=period, std_mul=std_mul)
     middle = safe_float(out["mid"].iloc[-1])
@@ -173,11 +152,10 @@ def bollinger(
         "values": values,
     }
 
-
 def momentum_return(bars: pd.DataFrame, field: str = "close", period: int = 20) -> tuple[float | None, dict]:
     series = field_series(bars, field).dropna()
     if len(series) <= period:
-        return None, {"reason": "insufficient_bars", "rows": int(len(series)), "period": int(period)}
+        return None, {"reason": "insufficient_bars", "rows": len(series), "period": int(period)}
     latest = safe_float(series.iloc[-1])
     previous = safe_float(series.iloc[-1 - period])
     if latest is None or previous is None or previous == 0:
@@ -185,16 +163,14 @@ def momentum_return(bars: pd.DataFrame, field: str = "close", period: int = 20) 
     value = latest / previous - 1.0
     return value, {"field": field, "period": int(period), "latest": latest, "previous": previous, "value": value}
 
-
 def trend_score(bars: pd.DataFrame, cfg: dict | None = None) -> tuple[float | None, dict]:
     snapshot = calculate_trend_score_snapshot(bars=bars, cfg=cfg or {})
     value = safe_float(snapshot.get("trend_score")) if bool(snapshot.get("ok", False)) else None
     return value, dict(snapshot)
 
-
 def trend_score_series(bars: pd.DataFrame, period: int, mode: str, cfg: dict | None = None) -> tuple[float | None, dict]:
     if len(bars) < period:
-        return None, {"reason": "insufficient_bars", "rows": int(len(bars)), "period": int(period)}
+        return None, {"reason": "insufficient_bars", "rows": len(bars), "period": int(period)}
     values: list[float] = []
     for idx in range(max(0, len(bars) - period), len(bars)):
         value, _trace = trend_score(bars.iloc[: idx + 1].copy(), cfg=cfg)

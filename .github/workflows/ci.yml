@@ -1,0 +1,33 @@
+# CI（P2-26）：单矩阵——部署目标只有一个（Ubuntu + 单一 Python 版本）。
+# 覆盖率门槛暂不设 fail_under（作者决策：达成目标数字后再指定），持续输出报告。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check src tests scripts
+
+      - name: Dead CSS check
+        run: python scripts/check_dead_css.py
+
+      - name: Frontend JS load-time check
+        run: python scripts/check_frontend_js.py
+
+      - name: Pytest with coverage
+        run: |
+          python -m pytest --cov=src --cov-report=term-missing --cov-report=xml -q

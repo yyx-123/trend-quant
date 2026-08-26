@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import pytest
 
-import services.stop_loss as sl
-
 
 @pytest.fixture(autouse=True)
-def _no_intraday_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """默认走纯 EOD 路径，避免测试在交易时段访问实时行情。"""
-    monkeypatch.setattr(sl, "_fetch_intraday_bar", lambda symbol, df: None)
-    monkeypatch.setattr(sl, "fetch_intraday_bars", lambda dfs: dict.fromkeys(dfs, None))
+def _no_intraday(monkeypatch):
+    from conftest import no_intraday_by_default
+
+    no_intraday_by_default(monkeypatch)
 
 
 @pytest.fixture

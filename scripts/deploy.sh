@@ -2,111 +2,137 @@
 set -e
 
 # =============================================================================
-# Trend Quant 一键部署脚本
-# 适用系统：Ubuntu 22.04/24.04 (国内云服务器推荐)
+# Trend Quant 部署脚本（2026-08-25 按线上真实现状重写，P1-7）
+#
+# 线上架构事实（与 docs/stock-industry-etf-holdings/server-rollout.md 一致）：
+#   - 代码目录 /srv/trend-quant（不是 /opt）
+#   - 公网入口是 frp 直连 8000 端口，无 nginx 前置（gzip 由应用内中间件承担）
+#   - 代码分发走 GitHub：本地 push → 服务器 git pull（与 server-rollout 第 1 步相同）
+#   - 服务以专用非 root 用户 trendquant 运行（不再是 root）
+#   - 密钥/通道配置在 .env（TICKFLOW_API_KEY / TREND_MCP_TOKENS 等）
+#
+# 适用系统：Ubuntu 22.04/24.04
 # 运行方式：sudo bash scripts/deploy.sh
 # =============================================================================
 
 REPO_URL="https://github.com/yyx-123/trend-quant.git"
-INSTALL_DIR="/opt/trend-quant"
-# 如果有域名，请修改下一行，例如：DOMAIN="quant.yourdomain.com"
-DOMAIN=""
+INSTALL_DIR="/srv/trend-quant"
+SERVICE_USER="trendquant"
+SERVICE_NAME="trend-quant"
 
-# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
+log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# 检查 root 权限
 if [ "$EUID" -ne 0 ]; then
     log_error "请使用 sudo 或 root 用户运行此脚本"
     exit 1
 fi
 
-# 检查系统
 if ! grep -qs "ubuntu" /etc/os-release; then
     log_warn "此脚本针对 Ubuntu 优化，其他系统可能需要手动调整"
 fi
 
-log_info "开始部署 Trend Quant ..."
+log_info "开始部署 Trend Quant（$INSTALL_DIR，服务用户 $SERVICE_USER）..."
 
 # =============================================================================
-# 1. 系统更新与基础依赖
+# 1. 系统依赖（无 nginx：frp 直连 8000）
 # =============================================================================
-log_info "更新系统并安装依赖 ..."
+log_info "安装系统依赖 ..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get upgrade -y -qq
-
-apt-get install -y -qq \
-    python3.11 \
-    python3.11-venv \
-    python3-pip \
-    git \
-    nginx \
-    curl \
-    ufw \
-    apache2-utils
+apt-get install -y -qq python3.11 python3.11-venv python3-pip git curl
 
 # =============================================================================
-# 2. 克隆/更新代码
+# 2. 专用服务用户（降权运行，不再 root）
+# =============================================================================
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+    log_info "创建服务用户 $SERVICE_USER ..."
+    useradd --system --shell /usr/sbin/nologin --home-dir "$INSTALL_DIR" "$SERVICE_USER"
+fi
+
+# =============================================================================
+# 3. 克隆/更新代码（分发方式与 README/server-rollout 统一：git）
 # =============================================================================
 if [ -d "$INSTALL_DIR/.git" ]; then
     log_info "检测到已有代码，执行 git pull ..."
     cd "$INSTALL_DIR"
-    git pull --quiet
+    sudo -u "$SERVICE_USER" git pull --quiet
 else
+    if [ -e "$INSTALL_DIR" ]; then
+        # 目录存在但不是 git 仓库：可能含 data/ 生产库，绝不静默删除
+        log_error "$INSTALL_DIR 已存在但不是 git 仓库。请人工确认 data/ 等资产已备份后，"
+        log_error "手动移走该目录再重跑（脚本不会对非 git 目录执行 rm -rf）。"
+        exit 1
+    fi
     log_info "从 GitHub 克隆项目 ..."
-    rm -rf "$INSTALL_DIR"
     git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 fi
 
-# =============================================================================
-# 3. Python 虚拟环境与依赖
-# =============================================================================
 cd "$INSTALL_DIR"
 
+# =============================================================================
+# 4. Python 虚拟环境与依赖
+# =============================================================================
 if [ ! -d ".venv" ]; then
     log_info "创建 Python 虚拟环境 ..."
-    python3.11 -m venv .venv
+    sudo -u "$SERVICE_USER" python3.11 -m venv .venv
 fi
 
 log_info "安装 Python 依赖（可能需要几分钟）..."
-source .venv/bin/activate
-pip install --upgrade pip --quiet
-pip install -e . --quiet
+sudo -u "$SERVICE_USER" .venv/bin/pip install --upgrade pip --quiet
+sudo -u "$SERVICE_USER" .venv/bin/pip install -e . --quiet
 
 # =============================================================================
-# 4. 配置 Systemd 服务
+# 5. .env 引导（密钥不入库；缺则生成模板并提示补全）
+# =============================================================================
+if [ ! -f ".env" ]; then
+    log_warn ".env 不存在，生成模板——请编辑补全后重启服务："
+    cat > .env << 'EOF'
+# TickFlow 实时报价密钥（必需，盘中/实时功能依赖）
+TICKFLOW_API_KEY=
+# MCP 通道 Bearer token（token=用户名 映射；不配则 /mcp 对所有请求 401 失败关闭）
+TREND_MCP_TOKENS=
+# MCP DNS rebinding 保护（frp 域名，可带端口或 :* 通配；先验证 token 再开启）
+# TREND_MCP_ALLOWED_HOSTS=mcp.example.com:* 
+# 内置管理员 yyx 的引导密码（仅首次创建时生效；缺省见 README，首次登录后请改密）
+# TREND_QUANT_BOOTSTRAP_ADMIN_PASSWORD=
+EOF
+    chown "$SERVICE_USER:$SERVICE_USER" .env
+    chmod 600 .env
+    log_warn "  → $INSTALL_DIR/.env"
+else
+    log_info ".env 已存在，跳过（密钥不落脚本）"
+fi
+
+# 数据与日志目录归属服务用户
+mkdir -p data logs
+chown -R "$SERVICE_USER:$SERVICE_USER" data logs
+
+# =============================================================================
+# 6. Systemd 服务（专用用户降权；frp 直连 8000，无 nginx）
 # =============================================================================
 log_info "配置 Systemd 服务 ..."
 
-cat > /etc/systemd/system/trend-quant.service << 'EOF'
+cat > /etc/systemd/system/trend-quant.service << EOF
 [Unit]
 Description=Trend Quant System
 After=network.target
 
 [Service]
 Type=simple
-User=root
-Group=root
-WorkingDirectory=/opt/trend-quant
+User=$SERVICE_USER
+Group=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
 Environment="PYTHONPATH=src"
-Environment="PATH=/opt/trend-quant/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/opt/trend-quant/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Environment="PATH=$INSTALL_DIR/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=$INSTALL_DIR/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -117,109 +143,38 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable trend-quant.service
+systemctl enable "$SERVICE_NAME.service"
 
-# 启动/重启服务
-if systemctl is-active --quiet trend-quant; then
-    systemctl restart trend-quant
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+    systemctl restart "$SERVICE_NAME"
 else
-    systemctl start trend-quant
+    systemctl start "$SERVICE_NAME"
 fi
 
 sleep 2
-if systemctl is-active --quiet trend-quant; then
+if systemctl is-active --quiet "$SERVICE_NAME"; then
     log_info "Trend Quant 服务运行正常"
 else
-    log_error "服务启动失败，请查看日志：journalctl -u trend-quant -n 50"
+    log_error "服务启动失败，请查看日志：journalctl -u $SERVICE_NAME -n 50"
     exit 1
 fi
 
 # =============================================================================
-# 5. 配置 Nginx
+# 7. 完成信息
 # =============================================================================
-log_info "配置 Nginx ..."
-
-if [ -z "$DOMAIN" ]; then
-    SERVER_NAME="_"
-    log_warn "未配置域名，将使用服务器 IP 访问"
-else
-    SERVER_NAME="$DOMAIN"
-    log_info "使用域名：$DOMAIN"
-fi
-
-cat > /etc/nginx/sites-available/trend-quant << EOF
-server {
-    listen 80;
-    server_name $SERVER_NAME;
-
-    client_max_body_size 20M;
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    location /static {
-        alias /opt/trend-quant/web/static;
-        expires 7d;
-        add_header Cache-Control "public, immutable";
-    }
-
-    # 如需密码保护，取消下面两行注释并运行：htpasswd -c /etc/nginx/.htpasswd admin
-    # auth_basic "Restricted";
-    # auth_basic_user_file /etc/nginx/.htpasswd;
-}
-EOF
-
-# 启用配置，禁用默认站点
-ln -sf /etc/nginx/sites-available/trend-quant /etc/nginx/sites-enabled/trend-quant
-rm -f /etc/nginx/sites-enabled/default
-
-nginx -t && systemctl restart nginx
-
-# =============================================================================
-# 6. 防火墙配置
-# =============================================================================
-log_info "配置防火墙 ..."
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 'Nginx Full' >/dev/null 2>&1 || true
-ufw allow OpenSSH >/dev/null 2>&1 || true
-ufw --force enable
-
-# =============================================================================
-# 7. 部署完成信息
-# =============================================================================
-PUBLIC_IP=$(curl -s -4 ifconfig.me || echo "未知")
-
 log_info "========================================"
 log_info "部署完成！"
 log_info "========================================"
 echo ""
 echo -e "  项目目录：${GREEN}$INSTALL_DIR${NC}"
-echo -e "  服务状态：${GREEN}systemctl status trend-quant${NC}"
-echo -e "  查看日志：${GREEN}journalctl -u trend-quant -f${NC}"
-echo -e "  重启服务：${GREEN}systemctl restart trend-quant${NC}"
-echo ""
-
-if [ -z "$DOMAIN" ]; then
-    echo -e "  访问地址：${GREEN}http://$PUBLIC_IP${NC}"
-    echo -e "  ${YELLOW}提示：如需绑定域名，请修改 DNS 指向此服务器 IP，${NC}"
-    echo -e "  ${YELLOW}      然后编辑本脚本修改 DOMAIN 变量重新运行。${NC}"
-else
-    echo -e "  访问地址：${GREEN}http://$DOMAIN${NC}"
-    echo -e "  ${YELLOW}提示：建议配置 HTTPS，可运行：certbot --nginx -d $DOMAIN${NC}"
-fi
-
+echo -e "  服务状态：${GREEN}systemctl status $SERVICE_NAME${NC}"
+echo -e "  查看日志：${GREEN}journalctl -u $SERVICE_NAME -f${NC}"
+echo -e "  应用日志：${GREEN}$INSTALL_DIR/logs/app/${NC}"
+echo -e "  重启服务：${GREEN}systemctl restart $SERVICE_NAME${NC}"
 echo ""
 echo -e "  ${YELLOW}重要提醒：${NC}"
-echo -e "  1. 请确保云厂商安全组已放行 TCP 80/443 端口"
-echo -e "  2. 如需密码保护，编辑 /etc/nginx/sites-available/trend-quant 取消注释 auth_basic 两行"
-echo -e "  3. 生产环境建议配置 HTTPS（安装 certbot）"
+echo -e "  1. 公网入口为 frp 直连 8000 端口（无 nginx），frp 配置不在本脚本范围"
+echo -e "  2. 首次部署请编辑 .env 补全 TICKFLOW_API_KEY / TREND_MCP_TOKENS 后重启服务"
+echo -e "  3. 内置管理员 yyx 首次登录后请立即改密（网页端无改密入口时见 README）"
+echo -e "  4. 全新部署还需导入类目种子与行情数据，见 README 部署章节"
 echo ""

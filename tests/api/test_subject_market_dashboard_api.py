@@ -62,7 +62,7 @@ def test_dashboard_ignores_snapshot_when_eod_current(client, test_db, monkeypatc
     monkeypatch.setattr(
         type(test_db),
         "get_market_dashboard_revision",
-        lambda self: (f"{TODAY} 00:00:00", 100, "", 1),
+        lambda self: (f"{TODAY} 00:00:00", "", 1),
     )
     resp = client.get("/subject-market/api/dashboard")
     assert resp.status_code == 200

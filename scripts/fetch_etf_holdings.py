@@ -2,7 +2,7 @@
 
 方案文档：
 - docs/stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md
-- docs/etf-weighted-stocks/2026-07-30-etf-weighted-stocks-plan.md §5（本脚本即其落地）
+- （注：早期 docs/etf-weighted-stocks/ 方案文档已删除，本脚本即其落地实现）
 
 tushare fund_portfolio（5000 积分，季度更新，季报口径天然即前十大重仓）。
 应用运行时对 tushare 零依赖；快照按 (etf_symbol, period) 幂等 upsert，
@@ -24,15 +24,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _common  # .env 加载 + DB_PATH + TickFlow 构造（P2-13）
 
-from data.storage.db import init_db, record_job_run_safely  # noqa: E402
-from services.stock_industry import (  # noqa: E402
+logger = _common.setup_script_logging(__name__)
+
+from tushare_common import call_with_retry, get_pro_api, prev_period, target_period
+
+from data.storage.db import init_db, record_job_run_safely
+from services.stock_industry import (
     project_symbol_to_tushare,
     tickflow_symbol_to_project,
 )
-from tushare_common import call_with_retry, get_pro_api, prev_period, target_period  # noqa: E402
 
-DB_PATH = Path("data/trend_quant.db")
+DB_PATH = _common.DB_PATH
 _JOB_TYPE = "etf_constituents_fetch"
 _MAX_CONSECUTIVE_ERRORS = 5
 
@@ -79,16 +83,14 @@ def fetch_top10(pro, etf_symbol: str, period: str) -> tuple[list[dict], str | No
 
 def make_tickflow_client():
     """tickflow 客户端（补股票名称用，fund_portfolio 只给代码）。缺 key 时返回 None。"""
-    import os
+    from core.env import tickflow_api_key
 
-    api_key = str(os.getenv("TICKFLOW_API_KEY", "") or "").strip()
-    if not api_key:
+    if not tickflow_api_key():
         return None
     try:
-        from tickflow import TickFlow
+        return _common.make_tickflow_client()
     except ImportError:
         return None
-    return TickFlow(api_key=api_key, base_url="https://api.tickflow.org")
 
 
 def fill_stock_names(rows: list[dict], client) -> None:
@@ -104,7 +106,7 @@ def fill_stock_names(rows: list[dict], client) -> None:
         for r in rows:
             r["stock_name"] = names.get(project_symbol_to_tushare(r["stock_symbol"]), "")
     except Exception as exc:
-        print(f"[fetch] 名称补全失败（不影响落库）: {exc}")
+        logger.info(f"[fetch] 名称补全失败（不影响落库）: {exc}")
 
 
 def main() -> int:
@@ -118,16 +120,16 @@ def main() -> int:
     args = parser.parse_args()
 
     if not Path(args.db).exists():
-        print(f"[fetch] 找不到数据库 {args.db}", file=sys.stderr)
+        logger.info(f"[fetch] 找不到数据库 {args.db}")
         return 1
 
     db = init_db(args.db)
     pro = get_pro_api()
     tf_client = make_tickflow_client()
     if tf_client is None:
-        print("[fetch] 警告：无 TICKFLOW_API_KEY，重仓股名称将为空（不影响导入流程）")
+        logger.info("[fetch] 警告：无 TICKFLOW_API_KEY，重仓股名称将为空（不影响导入流程）")
     period = str(args.period or target_period())
-    print(f"[fetch] 目标期次: {period}")
+    logger.info(f"[fetch] 目标期次: {period}")
 
     etfs = [
         item
@@ -139,8 +141,8 @@ def main() -> int:
         etfs = [item for item in etfs if item["symbol"] in wanted]
         missing = wanted - {item["symbol"] for item in etfs}
         if missing:
-            print(f"[fetch] 警告：以下代码不是在管 ETF: {sorted(missing)}")
-    print(f"[fetch] 在管 ETF {len(etfs)} 只")
+            logger.info(f"[fetch] 警告：以下代码不是在管 ETF: {sorted(missing)}")
+    logger.info(f"[fetch] 在管 ETF {len(etfs)} 只")
 
     summary = {"period": period, "success": 0, "fallback": 0, "no_data": [], "skipped": 0, "failed": []}
     consecutive_errors = 0
@@ -157,9 +159,9 @@ def main() -> int:
         except Exception as exc:  # 单只失败仅记录，连续失败中止（账号/网络问题）
             consecutive_errors += 1
             summary["failed"].append({"etf": etf, "error": str(exc)[:200]})
-            print(f"[fetch] {etf} 失败: {exc}")
+            logger.info(f"[fetch] {etf} 失败: {exc}")
             if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
-                print(f"[fetch] 连续 {consecutive_errors} 次失败，中止（检查账号/网络）")
+                logger.info(f"[fetch] 连续 {consecutive_errors} 次失败，中止（检查账号/网络）")
                 break
             continue
 
@@ -169,14 +171,14 @@ def main() -> int:
         fill_stock_names(rows, tf_client)
         if actual_period != period:
             summary["fallback"] += 1
-        print(f"[fetch] {etf} {item.get('name') or ''}: 期次 {actual_period}，前十 {len(rows)} 只")
+        logger.info(f"[fetch] {etf} {item.get('name') or ''}: 期次 {actual_period}，前十 {len(rows)} 只")
         if not args.dry_run:
             # period 列记录数据的真实报告期（回退期次就如实记回退期次），
             # UI 新鲜度判断才不会被高估；代价是同窗口重跑会重抓回退标的，可接受。
             db.save_etf_constituents(etf, rows, actual_period)
         summary["success"] += 1
 
-    print(
+    logger.info(
         f"[fetch] 汇总：成功={summary['success']}（回退期次 {summary['fallback']}） "
         f"跳过={summary['skipped']} 无数据={len(summary['no_data'])} 失败={len(summary['failed'])}"
     )
@@ -186,7 +188,7 @@ def main() -> int:
             {**summary, "no_data": summary["no_data"], "failed": summary["failed"]},
             status="success" if not summary["failed"] else "partial",
         )
-    print("[fetch] dry-run，未写库。" if args.dry_run else "[fetch] 完成。")
+    logger.info("[fetch] dry-run，未写库。" if args.dry_run else "[fetch] 完成。")
     return 0
 
 

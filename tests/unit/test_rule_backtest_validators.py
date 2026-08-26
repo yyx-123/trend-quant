@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rule_backtest.validators import StrategyConfigValidator, ValidationResult
+from rule_backtest.validators import StrategyConfigValidator
 
 
 class TestStrategyConfigValidator:

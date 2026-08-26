@@ -102,9 +102,14 @@ class TestDetectMacdPhase:
         holed_dates = dates[:10] + ["2020-01-01", "2020-01-02"] + dates[10:]
 
         phase = detect_macd_phase(holed_closes, holed_dates)
+        baseline = detect_macd_phase(closes, dates)
 
         assert phase["phase"] == "golden"
-        assert phase["days"] is not None and phase["days"] >= 1
+        # 挖洞（None 行同步丢日期）后相位与无洞基准一致
+        assert phase["phase"] == baseline["phase"]
+        assert phase["days"] == baseline["days"]
+        assert phase["signal_date"] == baseline["signal_date"]
+        assert phase["change_pct"] == baseline["change_pct"]
 
 
 class TestKlineMini:

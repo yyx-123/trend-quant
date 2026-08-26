@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 
 from rule_backtest.registry import IndicatorSpec, ParamSpec, default_indicator_registry
 
-
 SUPPORTED_OPERATORS = {">=", "<=", "cross_above", "cross_below"}
 SUPPORTED_PRICE_FIELDS = {"open", "high", "low", "close", "volume", "amount"}
 SUPPORTED_VALUE_TYPES = {"price", "literal", "indicator", "state_value"}

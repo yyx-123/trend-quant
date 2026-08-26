@@ -7,12 +7,12 @@ silent degradation, consistent with rule strategy behavior.
 
 from __future__ import annotations
 
-import logging
 import re
 
+from audit.app_logger import get_logger
 from rule_backtest.sizing.registry import validate_position_strategy
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 

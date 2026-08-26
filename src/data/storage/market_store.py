@@ -9,11 +9,13 @@ class MarketStore:
         self.price_mode = price_mode
 
     def _get_db(self):
-        if self._db is None:
-            from data.storage.db import get_db
+        # 每次现取（P2-12）：首次调用即永久缓存会把测试补丁窗口内的
+        # get_db 替身固化进生产路径（main.py:59-63 自警过的模式）。
+        if self._db is not None:
+            return self._db
+        from data.storage.db import get_db
 
-            self._db = get_db()
-        return self._db
+        return get_db()
 
     def save_history(self, symbol: str, df: pd.DataFrame) -> str:
         self._get_db().save_market_data(symbol, df, price_mode=self.price_mode)

@@ -31,6 +31,22 @@ class BacktestExecutionConfig:
     debug_log_enabled: bool | None = None
     debug_auto_enable_max_days: int = 31
 
+    def normalized(self) -> BacktestExecutionConfig:
+        """零值费用参数归一为默认值：系统不提供零成本回测场景
+        （与 service 层 ``or DEFAULT`` 语义一致，消灭 service/engine 双口径）。
+        """
+        from dataclasses import replace
+
+        return replace(
+            self,
+            fee_rate=self.fee_rate if self.fee_rate > 0 else DEFAULT_FEE_RATE,
+            fee_min=self.fee_min if self.fee_min > 0 else 5.0,
+            slippage=self.slippage if self.slippage > 0 else 0.002,
+            stock_stamp_tax_rate=(
+                self.stock_stamp_tax_rate if self.stock_stamp_tax_rate > 0 else 0.001
+            ),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class RuleBacktestRequest:

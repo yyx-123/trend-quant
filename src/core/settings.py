@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +25,6 @@ class LoggingSettings:
 class TickFlowSettings:
     """Limits for the currently subscribed TickFlow CN Starter plan."""
 
-    plan: str
     api_base_url: str
     daily_kline_batch_size: int
     daily_kline_batch_requests_per_minute: int
@@ -42,7 +41,11 @@ class Settings:
     logging: LoggingSettings
 
 
-DEFAULT_CONFIG_PATH = Path("config/app.yaml")
+from core.paths import config_dir
+
+# 以 __file__ 锚定项目根（P2-13）：非项目根启动时 cwd 相对的
+# Path("config/app.yaml") 会静默读错位置。
+DEFAULT_CONFIG_PATH = config_dir() / "app.yaml"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -72,7 +75,6 @@ def load_settings(config_path: Path | None = None) -> Settings:
             daily_update_retry_interval_seconds=int(app_raw.get("daily_update_retry_interval_seconds", 5)),
         ),
         tickflow=TickFlowSettings(
-            plan=str(tickflow_raw.get("plan", "starter")).strip().lower(),
             api_base_url=str(tickflow_raw.get("api_base_url", "https://api.tickflow.org")).strip(),
             daily_kline_batch_size=max(1, min(int(tickflow_raw.get("daily_kline_batch_size", 100)), 100)),
             daily_kline_batch_requests_per_minute=max(

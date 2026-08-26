@@ -17,7 +17,11 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from rule_backtest import BacktestExecutionConfig, RuleBacktestRequest, SingleSymbolAllInBacktestEngine
+from rule_backtest import (
+    BacktestExecutionConfig,
+    RuleBacktestRequest,
+    SingleSymbolAllInBacktestEngine,
+)
 from rule_backtest.loader import StrategyLoader
 from rule_backtest.service import RuleBacktestService
 
@@ -96,7 +100,7 @@ class EngineProgressTest(unittest.TestCase):
                 strategy=flat_strategy("never_entry"),
                 symbol="TEST",
                 bars=bars,
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig(),
                 progress_callback=lambda cur, total: calls.append((cur, total)),
             )
         )
@@ -117,7 +121,7 @@ class EngineProgressTest(unittest.TestCase):
                 bars=bars,
                 start_date=date(2026, 1, 11),
                 end_date=date(2026, 1, 20),
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig(),
                 progress_callback=lambda cur, total: calls.append((cur, total)),
             )
         )
@@ -131,7 +135,7 @@ class EngineProgressTest(unittest.TestCase):
                 strategy=flat_strategy("never_entry"),
                 symbol="TEST",
                 bars=make_bars([10.0] * 5),
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig(),
             )
         )
         self.assertEqual("ok", result["status"])

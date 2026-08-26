@@ -13,10 +13,14 @@ import math
 
 import pandas as pd
 
+from audit.app_logger import get_logger
 from core.display import load_instrument_name_map
+from core.symbols import normalize_symbol
 from data.storage.db import get_db
 from rule_backtest.metrics import compute_summary
 from services.stop_loss import UNSET_INTRADAY_BAR, StopLossError, compute_stop_loss
+
+logger = get_logger(__name__)
 
 __all__ = ["ManualTradeError", "compute_manual_trade", "compute_position_sizing"]
 
@@ -38,7 +42,7 @@ def compute_position_sizing(
     max_qty = 0
     if risk_per_share > 0 and risk_budget > 0:
         # +1e-9 防浮点误差把整百倍误判少一手（如 0.3/0.001 类边界）
-        max_qty = int(math.floor(risk_budget / risk_per_share / 100 + 1e-9)) * 100
+        max_qty = math.floor(risk_budget / risk_per_share / 100 + 1e-9) * 100
     return {
         "risk_budget": risk_budget,
         "risk_per_share": risk_per_share,
@@ -79,6 +83,9 @@ def compute_manual_trade(
         StopLossError: 标的无效、无数据（来自 ``compute_stop_loss``）。
         ManualTradeError: 买入日期晚于最新数据。
     """
+    db = db or get_db()
+    # 同一标的全量行情只读一次（P2-18）：normalize 后加载，复用给止损计算。
+    df = db.load_market_data(normalize_symbol(symbol))
     stops = compute_stop_loss(
         symbol,
         buy_date,
@@ -88,13 +95,13 @@ def compute_manual_trade(
         end_date=end_date,
         intraday_bar=intraday_bar,
         stop_mode=stop_mode,
+        df=df,
     )
     symbol = stops["symbol"]
     buy_ts = pd.Timestamp(buy_date)
     end_ts = pd.Timestamp(end_date) if end_date is not None else None
 
-    db = db or get_db()
-    df = db.load_market_data(symbol).copy()
+    df = df.copy()
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
     if end_ts is not None:
         df = df[df["time"] <= end_ts]

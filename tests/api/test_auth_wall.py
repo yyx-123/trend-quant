@@ -7,18 +7,6 @@ cookie、退出销毁 session、登录页 next 参数。conftest 的 client fixt
 
 from __future__ import annotations
 
-import pytest
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture
-def anon_client(test_db):
-    """未登录的 TestClient（登录墙视角的匿名访客）。"""
-    from app.main import app
-
-    with TestClient(app) as c:
-        yield c
-
 
 class TestWallBlocksAnonymous:
     def test_page_redirects_to_login_with_next(self, anon_client) -> None:
@@ -91,15 +79,77 @@ class TestLoginLogout:
         anon_client.post("/api/auth/login", json={"username": "carol", "password": "pw3"})
         assert anon_client.post("/manual-trade/api/trades/list", json={}).status_code == 200
 
-        resp = anon_client.get("/api/auth/logout", follow_redirects=False)
-        assert resp.status_code == 303
+        resp = anon_client.post("/api/auth/logout")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
         assert anon_client.post("/manual-trade/api/trades/list", json={}).status_code == 401
 
-    def test_me_returns_current_user(self, client) -> None:
-        # client fixture 已自动登录 tester
-        resp = client.get("/api/auth/me")
+    def test_logout_get_not_allowed(self, anon_client, test_db) -> None:
+        """GET 退出已废弃（CSRF 强制退出向量）：GET 不再路由到 logout。"""
+        test_db.create_user("carol", "pw3")
+        anon_client.post("/api/auth/login", json={"username": "carol", "password": "pw3"})
+        resp = anon_client.get("/api/auth/logout", follow_redirects=False)
+        assert resp.status_code == 405
+
+
+class TestCsrfHeader:
+    """P1-10：豁免名单外的 API 变更请求必须携带 X-Requested-With。"""
+
+    def test_mutation_without_header_403(self, anon_client, test_db) -> None:
+        test_db.create_user("carol", "pw3")
+        anon_client.post("/api/auth/login", json={"username": "carol", "password": "pw3"})
+        del anon_client.headers["X-Requested-With"]
+        resp = anon_client.post("/manual-trade/api/trades/list", json={})
+        assert resp.status_code == 403
+        assert "X-Requested-With" in resp.json()["detail"]
+
+    def test_mutation_with_header_passes_wall(self, anon_client, test_db) -> None:
+        test_db.create_user("carol", "pw3")
+        anon_client.post("/api/auth/login", json={"username": "carol", "password": "pw3"})
+        assert anon_client.post("/manual-trade/api/trades/list", json={}).status_code == 200
+
+    def test_login_endpoint_exempt_from_header(self, anon_client, test_db) -> None:
+        """登录接口在豁免名单内：不带自定义头也可登录（login.html 无需改）。"""
+        test_db.create_user("carol", "pw3")
+        del anon_client.headers["X-Requested-With"]
+        resp = anon_client.post(
+            "/api/auth/login", json={"username": "carol", "password": "pw3"}
+        )
         assert resp.status_code == 200
-        assert resp.json()["username"] == "tester"
+
+    def test_get_api_not_affected(self, anon_client, test_db) -> None:
+        """GET API 不要求自定义头（CSRF 防线只针对变更方法）。"""
+        test_db.create_user("carol", "pw3")
+        anon_client.post("/api/auth/login", json={"username": "carol", "password": "pw3"})
+        del anon_client.headers["X-Requested-With"]
+        resp = anon_client.get("/subject-market/api/dashboard")
+        assert resp.status_code == 200
+
+
+class TestWallEdgeCases:
+    def test_api_without_trailing_slash_is_api(self, anon_client) -> None:
+        """/api（无尾斜杠）按 API 处理：401 JSON 而非 303 跳页。"""
+        resp = anon_client.get("/api", follow_redirects=False)
+        assert resp.status_code == 401
+
+    def test_mcp_prefix_exact_segment_match(self, anon_client) -> None:
+        """豁免前缀精确段匹配：/mcpanything 不豁免（页面请求 → 303 跳登录）。"""
+        resp = anon_client.get("/mcpanything", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"].startswith("/login")
+
+    def test_mcp_requires_bearer_token(self, anon_client) -> None:
+        """P0-1：/mcp 登录墙豁免但由 McpBearerMiddleware 把守——
+        无 token 请求 /mcp/sse → 401（失败关闭，未配置 TREND_MCP_TOKENS 同样 401）。"""
+        resp = anon_client.get("/mcp/sse", follow_redirects=False)
+        assert resp.status_code == 401
+        assert "detail" in resp.json()
+
+    def test_mcp_invalid_token_401(self, anon_client) -> None:
+        resp = anon_client.get(
+            "/mcp/sse", headers={"Authorization": "Bearer wrong"}, follow_redirects=False
+        )
+        assert resp.status_code == 401
 
 
 class TestSessionModel:

@@ -48,7 +48,7 @@
       </div>
       <div class="mt-records-controls">
         <div class="mt-seg" id="mtStopModeToggle" role="group" aria-label="止损松紧"
-          title="紧止损：硬止损 1×ATR、吊灯止损 2×ATR；松止损：硬止损 1.5×ATR、吊灯止损 2.5×ATR。切换后持仓记录与试算同步生效">
+          title="{{ stop_mode_title }}。切换后持仓记录与试算同步生效">
           <span class="mt-seg-label">止损</span>
           <button type="button" data-mode="tight" class="is-active">紧止损</button>
           <button type="button" data-mode="loose">松止损</button>
@@ -79,7 +79,7 @@
   </div>
 
   <!-- 录入弹窗 -->
-  <div id="mtEnterModal" class="mt-modal" hidden>
+  <div id="mtEnterModal" class="mt-modal" hidden role="dialog" aria-modal="true" aria-label="录入买入">
     <div class="mt-modal-box">
       <h3>录入交易</h3>
       <div class="bt-form-row">
@@ -104,7 +104,7 @@
   </div>
 
   <!-- 清仓弹窗 -->
-  <div id="mtCloseModal" class="mt-modal" hidden>
+  <div id="mtCloseModal" class="mt-modal" hidden role="dialog" aria-modal="true" aria-label="清仓">
     <div class="mt-modal-box">
       <h3 id="mtCloseTitle">清仓</h3>
       <div class="bt-form-row">
@@ -140,14 +140,12 @@
   const holdingStatsEl = document.getElementById('mtHoldingStats');
   const sizingPanelEl = document.getElementById('mtSizingPanel');
 
-  const recordsPanelEl = document.getElementById('mtRecordsPanel');
   const openEnterBtn = document.getElementById('mtOpenEnterBtn');
   const refreshBtn = document.getElementById('mtRefreshBtn');
   const tradeListEl = document.getElementById('mtTradeList');
   const tradeEmptyEl = document.getElementById('mtTradeEmpty');
   const stopModeToggleEl = document.getElementById('mtStopModeToggle');
   const timeFilterEl = document.getElementById('mtTimeFilter');
-  const closedPanelEl = document.getElementById('mtClosedPanel');
   const closedListEl = document.getElementById('mtClosedList');
   const closedEmptyEl = document.getElementById('mtClosedEmpty');
   const closedTimeFilterEl = document.getElementById('mtClosedTimeFilter');
@@ -194,12 +192,6 @@
   let closedTimeFilter = 'all';
 
   // ── 工具 ────────────────────────────────────────────────
-  function esc(text) {
-    return String(text ?? '').replace(/[&<>"']/g, function(ch) {
-      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch];
-    });
-  }
-
   function showMessage(text, isError) {
     messageEl.textContent = text;
     messageEl.classList.toggle('is-error', !!isError);
@@ -218,15 +210,6 @@
     enterMessageEl.hidden = !text;
   }
 
-  function fmtPrice(v) {
-    return Number(v).toFixed(3);
-  }
-
-  function fmtPct(v) {
-    const n = Number(v);
-    return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
-  }
-
   function fmtMoney(v) {
     const n = Number(v);
     const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
@@ -237,25 +220,8 @@
     return String(Number(v));
   }
 
-  function pctClass(v) {
-    return Number(v) > 0 ? 'metric-positive' : (Number(v) < 0 ? 'metric-negative' : '');
-  }
-
-  // 通用悬停包装：tip 非空时给 HTML 包一层带 title 的 span（cursor: help），
-  // 与止损价/徽章的原生 title 悬停同一机制
-  function withTip(html, tip) {
-    return tip ? '<span class="mt-tip" title="' + esc(tip) + '">' + html + '</span>' : html;
-  }
-
   function todayStr() {
     return localIso(new Date());
-  }
-
-  // 本地日期 → 'YYYY-MM-DD'（不用 toISOString，避免时区把今天变成昨天）
-  function localIso(d) {
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    return d.getFullYear() + '-' + mm + '-' + dd;
   }
 
   // 时间筛选起点（含）：week=7 天前，month=上月同日，ytd=今年 1 月 1 日，all=null 不过滤
@@ -301,108 +267,9 @@
     }).join('');
   }
 
-  function stopPill(triggered, okText, dangerText) {
-    return '<span class="mt-stop-pill ' + (triggered ? 'is-danger' : 'is-ok') + '">' +
-      esc(triggered ? dangerText : okText) + '</span>';
-  }
-
-  function renderStopStats(container, stops) {
-    const hardTriggered = !!stops.hard_stop_triggered;
-    const chandTriggered = !!stops.chandelier_stop_triggered;
-    const ratchetPrice = Number(stops.chandelier_stop_ratchet_price) || 0;
-    const ratchetTriggered = !!stops.chandelier_stop_ratchet_triggered;
-    const ratchetCard = ratchetPrice > 0 ?
-      '<div class="mt-stop-card mt-stop-chandelier">' +
-        '<div class="mt-stop-card-head">' +
-          '<span class="mt-stat-label">棘轮吊灯止损价</span>' +
-          stopPill(ratchetTriggered, '未跌破', '⚠ 已跌破') +
-        '</div>' +
-        withTip('<span class="mt-stop-price">' + esc(fmtPrice(ratchetPrice)) + '</span>',
-          ratchetStopTip(stops)) +
-        '<span class="mt-stat-note">同吊灯公式但只上移不下移 · 现价距 ' +
-          esc(fmtPct(stops.chandelier_stop_ratchet_distance_pct)) + '</span>' +
-      '</div>' : '';
-    container.innerHTML =
-      '<div class="mt-stop-card mt-stop-hard">' +
-        '<div class="mt-stop-card-head">' +
-          '<span class="mt-stat-label">硬止损价</span>' +
-          stopPill(hardTriggered, '未击穿', '⚠ 已击穿') +
-        '</div>' +
-        withTip('<span class="mt-stop-price">' + esc(fmtPrice(stops.hard_stop_price)) + '</span>',
-          hardStopTip(stops)) +
-        '<span class="mt-stat-note">买入价 − ' + esc(stops.hard_stop_atr_mul) + '×ATR(买入日) · 距买入价 ' +
-          esc(fmtPct(stops.hard_stop_pct)) +
-          (hardTriggered ? ' · 于 ' + esc(stops.hard_stop_trigger_date) + ' 被击穿' +
-            (stops.hard_stop_trigger_low != null
-              ? '（当日最低 ' + esc(fmtPrice(stops.hard_stop_trigger_low)) +
-                (stops.hard_stop_trigger_close != null ? '、收盘 ' + esc(fmtPrice(stops.hard_stop_trigger_close)) : '') + '）'
-              : '')
-            : '') + '</span>' +
-      '</div>' +
-      '<div class="mt-stop-card mt-stop-chandelier">' +
-        '<div class="mt-stop-card-head">' +
-          '<span class="mt-stat-label">吊灯止损价</span>' +
-          stopPill(chandTriggered, '未跌破', '⚠ 已跌破') +
-        '</div>' +
-        withTip('<span class="mt-stop-price">' + esc(fmtPrice(stops.chandelier_stop_price)) + '</span>',
-          chandelierStopTip(stops)) +
-        '<span class="mt-stat-note">买入以来最高价 − ' + esc(stops.chandelier_stop_atr_mul) + '×ATR(最新) · 距最高价 ' +
-          esc(fmtPct(stops.chandelier_stop_pct_from_high)) + '</span>' +
-      '</div>' +
-      ratchetCard +
-      '<div class="mt-stop-card mt-stop-dist">' +
-        '<div class="mt-stop-card-head"><span class="mt-stat-label">现价距硬止损</span></div>' +
-        withTip('<span class="mt-stop-price ' + pctClass(stops.hard_stop_distance_pct) + '">' +
-          esc(fmtPct(stops.hard_stop_distance_pct)) + '</span>',
-          stopDistanceTip('现价距硬止损', stops, 'hard_stop_price', 'hard_stop_distance_pct')) +
-        '<span class="mt-stat-note">最新价 ' + esc(fmtPrice(stops.latest_price)) + ' / 止损价 ' +
-          esc(fmtPrice(stops.hard_stop_price)) + '</span>' +
-      '</div>' +
-      '<div class="mt-stop-card mt-stop-dist">' +
-        '<div class="mt-stop-card-head"><span class="mt-stat-label">现价距吊灯止损</span></div>' +
-        withTip('<span class="mt-stop-price ' + pctClass(stops.chandelier_stop_distance_pct) + '">' +
-          esc(fmtPct(stops.chandelier_stop_distance_pct)) + '</span>',
-          stopDistanceTip('现价距吊灯止损', stops, 'chandelier_stop_price', 'chandelier_stop_distance_pct')) +
-        '<span class="mt-stat-note">最新价 ' + esc(fmtPrice(stops.latest_price)) + ' / 止损价 ' +
-          esc(fmtPrice(stops.chandelier_stop_price)) + '</span>' +
-      '</div>';
-  }
-
-  // 当日K线区间（买入提示 / 清仓提示共用）：无K线返回 null，请求失败抛错。
-  // intraday=true：当日K线未落库时由实时报价合成（含盘后收盘快照），
-  // 否则当日买入/清仓在 16:30 补库前拿不到区间提示。
-  async function fetchDayCandle(symbol, date) {
-    const params = new URLSearchParams({
-      symbol: symbol, start_date: date, end_date: date, limit: '1', intraday: 'true',
-    });
-    const resp = await fetch('/market-view/api/daily?' + params.toString());
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || '无法获取当日行情');
-    const candle = (data.candles || [])[0];  // [open, close, low, high]
-    if (!candle) return null;
-    return {low: Number(candle[2]), high: Number(candle[3]), close: Number(candle[1])};
-  }
-
   function rangeHintText(date, range) {
     return date + ' 价格区间：<b>' + esc(fmtPrice(range.low)) + ' ~ ' +
       esc(fmtPrice(range.high)) + '</b>（收盘 ' + esc(fmtPrice(range.close)) + '），价格需落在区间内';
-  }
-
-  // session 过期（401）时统一跳回登录墙，登录后回到当前页
-  function redirectToLogin() {
-    location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
-  }
-
-  async function postJson(url, body) {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    if (resp.status === 401) { redirectToLogin(); return new Promise(function() {}); }
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || '请求失败');
-    return data;
   }
 
   // ── ① 试算区 ───────────────────────────────────────────
@@ -631,32 +498,6 @@
       '<span class="mt-sort-arrow">' + arrow + '</span></th>';
   }
 
-  // 按排序状态排序；值相同或均缺失时保持原始相对顺序（稳定），缺失值恒排最后
-  function sortedWith(trades, state, columns) {
-    if (!state.key || state.dir === 0) return trades;
-    const getter = columns[state.key];
-    if (!getter) return trades;
-    return trades.map(function(t, i) {
-      return {t: t, i: i, v: getter(t)};
-    }).sort(function(a, b) {
-      if (a.v == null && b.v == null) return a.i - b.i;
-      if (a.v == null) return 1;
-      if (b.v == null) return -1;
-      let cmp;
-      if (typeof a.v === 'string') cmp = a.v < b.v ? -1 : (a.v > b.v ? 1 : 0);
-      else cmp = a.v - b.v;
-      if (cmp === 0) return a.i - b.i;
-      return state.dir === -1 ? -cmp : cmp;
-    }).map(function(x) { return x.t; });
-  }
-
-  // 点击同一列循环：降序 → 升序 → 原始顺序
-  function cycleSortState(state, key) {
-    if (state.key !== key) return {key: key, dir: -1};
-    if (state.dir === -1) return {key: key, dir: 1};
-    return {key: null, dir: 0};
-  }
-
   // 止损价单元格：329.06（+20.35%）；两个止损价中较高者更紧、会先触发，价格加下划线提示以其为准。
   // 悬停展示该价格的计算过程（数据来自当前松紧口径的后端响应，切换后自动更新）。
   function stopCellHtml(price, distPct, dominant, tip) {
@@ -667,45 +508,6 @@
       : esc(fmtPrice(price));
     return '<span class="mt-stop-cell"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' +
       priceHtml + '（' + pctHtml + '）</span>';
-  }
-
-  function stopModeLabel(stops) {
-    return stops.stop_mode === 'tight' ? '紧止损' : '松止损';
-  }
-
-  // 硬止损价 = 买入价 − mul×ATR(买入日)
-  function hardStopTip(stops) {
-    if (stops.atr_at_buy == null) return '';
-    return '硬止损价（' + stopModeLabel(stops) + '口径）= 买入价 ' + fmtPrice(stops.buy_price) +
-      ' − ' + stops.hard_stop_atr_mul + ' × ATR(买入日) ' + fmtPrice(stops.atr_at_buy) +
-      ' = ' + fmtPrice(stops.hard_stop_price);
-  }
-
-  // 吊灯止损价 = 买入以来最高价 − mul×ATR(最新)
-  function chandelierStopTip(stops) {
-    if (stops.highest_since_buy == null || stops.current_atr == null) return '';
-    return '吊灯止损价（' + stopModeLabel(stops) + '口径）= 买入以来最高价 ' +
-      fmtPrice(stops.highest_since_buy) +
-      (stops.highest_since_buy_date ? '（' + stops.highest_since_buy_date + '）' : '') +
-      ' − ' + stops.chandelier_stop_atr_mul +
-      ' × ATR(最新) ' + fmtPrice(stops.current_atr) +
-      ' = ' + fmtPrice(stops.chandelier_stop_price);
-  }
-
-  // 棘轮吊灯：与吊灯同公式逐日回放，取历史最大值（只上移不下移）
-  function ratchetStopTip(stops) {
-    const price = Number(stops.chandelier_stop_ratchet_price);
-    if (!isFinite(price) || price <= 0) return '';
-    return '棘轮吊灯止损价（' + stopModeLabel(stops) + '口径）= max(逐日：截至当日最高价 − ' +
-      stops.chandelier_stop_atr_mul + ' × 当日ATR)，只上移不下移 = ' + fmtPrice(price);
-  }
-
-  // 现价距止损 = 最新价 / 止损价 − 1
-  function stopDistanceTip(label, stops, priceKey, pctKey) {
-    const price = Number(stops[priceKey]);
-    if (!isFinite(price) || price <= 0 || stops.latest_price == null) return '';
-    return label + ' = 最新价 ' + fmtPrice(stops.latest_price) + ' / 止损价 ' +
-      fmtPrice(price) + ' − 1 = ' + fmtPct(stops[pctKey]);
   }
 
   // ── 持仓指标悬停明细：展示每个数字的计算过程（数据均来自后端响应） ──
@@ -996,7 +798,7 @@
     });
     tradeListEl.innerHTML = '<div class="mt-trade-table-wrap"><table class="mt-trade-table"><thead><tr>' +
       TRADE_TABLE_HEADERS.map(function(h) { return tradeHeaderHtml(h, sortState, SORTABLE_COLUMNS); }).join('') +
-      '</tr></thead><tbody>' + sortedWith(trades, sortState, SORTABLE_COLUMNS).map(function(t) {
+      '</tr></thead><tbody>' + stableSorted(trades, sortState, SORTABLE_COLUMNS).map(function(t) {
         return renderTradeRow(t, totalValue);
       }).join('') +
       '</tbody></table></div>';
@@ -1011,11 +813,18 @@
     }
     closedListEl.innerHTML = '<div class="mt-trade-table-wrap"><table class="mt-trade-table"><thead><tr>' +
       CLOSED_TABLE_HEADERS.map(function(h) { return tradeHeaderHtml(h, closedSortState, CLOSED_SORTABLE_COLUMNS); }).join('') +
-      '</tr></thead><tbody>' + sortedWith(trades, closedSortState, CLOSED_SORTABLE_COLUMNS).map(renderClosedRow).join('') +
+      '</tr></thead><tbody>' + stableSorted(trades, closedSortState, CLOSED_SORTABLE_COLUMNS).map(renderClosedRow).join('') +
       '</tbody></table></div>';
   }
 
   // ── 录入弹窗 ───────────────────────────────────────────
+  // 弹窗 a11y（P2-28）：Esc 关闭任一打开的弹窗
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    if (!enterModalEl.hidden) enterModalEl.hidden = true;
+    if (!closeModalEl.hidden) closeModalEl.hidden = true;
+  });
+
   function openEnterModal() {
     // 预填试算区的输入，减少重复录入
     enterSymbolEl.value = symbolEl.value.trim();
@@ -1193,7 +1002,7 @@
     // 表头排序点击（事件委托：表头随每次渲染重建，需在容器上拦截）
     const th = ev.target.closest('th[data-sort-key]');
     if (th) {
-      sortState = cycleSortState(sortState, th.dataset.sortKey);
+      sortState = cycleSort(sortState, th.dataset.sortKey);
       renderTradeList();
       return;
     }
@@ -1209,7 +1018,7 @@
   closedListEl.addEventListener('click', function(ev) {
     const th = ev.target.closest('th[data-sort-key]');
     if (th) {
-      closedSortState = cycleSortState(closedSortState, th.dataset.sortKey);
+      closedSortState = cycleSort(closedSortState, th.dataset.sortKey);
       renderClosedList();
     }
   });

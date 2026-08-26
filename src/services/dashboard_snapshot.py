@@ -16,18 +16,18 @@
 
 from __future__ import annotations
 
-import logging
 import threading
 from typing import Any
 
+from audit.app_logger import get_logger
 from core.calendar import is_past_market_open, is_trading_day, market_now
 from core.display import filter_fully_classified
 from data.intraday_service import build_intraday_dashboard
-from data.service import DataService
+from data.service import get_data_service
 from data.storage.db import get_db
 from services.market_indicators import trend_config
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class IntradaySnapshotRunner:
@@ -50,13 +50,14 @@ class IntradaySnapshotRunner:
         """Return the latest snapshot dict (kind/as_of/computed_at/payload)."""
         with self._lock:
             if not self._snapshot_loaded:
-                self._snapshot_loaded = True
-                loaded: dict | None = None
                 try:
-                    loaded = get_db().load_dashboard_snapshot()
+                    self._snapshot = get_db().load_dashboard_snapshot()
+                    # 仅在读取成功后才置位：首次失败（如 DB 短暂不可用）不永久
+                    # 缓存 None，下次访问重试（旧实现先置位导致进程重启前快照
+                    # 展示失效）。
+                    self._snapshot_loaded = True
                 except Exception:
                     logger.exception("Failed to load dashboard snapshot from DB")
-                self._snapshot = loaded
             return self._snapshot
 
     # ------------------------------------------------------------------
@@ -122,17 +123,14 @@ class IntradaySnapshotRunner:
             if not classified:
                 raise RuntimeError("无完整分类的标的")
 
-            data_service = DataService()
-            try:
-                payload = build_intraday_dashboard(
-                    classified,
-                    db=db,
-                    data_service=data_service,
-                    trend_config=trend_config(),
-                    progress_callback=self._on_progress,
-                )
-            finally:
-                data_service.close()
+            data_service = get_data_service()
+            payload = build_intraday_dashboard(
+                classified,
+                db=db,
+                data_service=data_service,
+                trend_config=trend_config(),
+                progress_callback=self._on_progress,
+            )
 
             computed_at = db.save_dashboard_snapshot("intraday", payload.get("as_of"), payload)
             snapshot = {

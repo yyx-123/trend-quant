@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
 import unittest
 from unittest.mock import patch
 
 import pandas as pd
 
-from app.routers.subject_market import build_subject_dashboard_payload
+from services.dashboard import build_subject_dashboard_payload
 
 
 def _rows(symbol: str, l3: str, amount: float, step: float) -> list[dict]:

@@ -8,37 +8,40 @@ calculation.
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
-from datetime import datetime
-from math import isfinite
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 
 import numpy as np
 import pandas as pd
 
-from data.storage.db import Database
-from data.service import DataService
+from audit.app_logger import get_logger
 from core.calendar import is_past_market_open, is_realtime_available, market_now
 from core.indicators import atr as _compute_atr
 from core.indicators import detect_macd_phase, kline_mini, macd_mini
-from core.trend import _detect_trend_phase
-from core.trend import calculate_trend_score_snapshot, safe_float
+from core.numfmt import number_or_none as _number
+from core.trend import _detect_trend_phase, calculate_trend_score_snapshot, safe_float
+from data.service import DataService, get_data_service
+from data.storage.db import Database
+from services.dashboard_common import DISPLAY_DAYS as _DISPLAY_DAYS
+from services.dashboard_common import assign_strength as _assign_strength
+from services.dashboard_common import key_tuple as _key_tuple
+from services.dashboard_common import ma5 as _ma5
+from services.dashboard_common import macd_counts as _macd_counts
+from services.dashboard_common import priority as _priority
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # synthetic bar construction
 # ---------------------------------------------------------------------------
 
-
-def quote_trade_date(quote: dict) -> "date | None":
+def quote_trade_date(quote: dict) -> date | None:
     """Extract the trading date carried by a real-time quote.
 
     Handles ISO-ish strings and epoch seconds/milliseconds; returns None
     when the quote carries no parseable timestamp.
     """
-    from datetime import date, timezone  # noqa: PLC0415
 
     raw = quote.get("ts")
     if raw is None:
@@ -53,7 +56,7 @@ def quote_trade_date(quote: dict) -> "date | None":
     if epoch is not None and epoch > 1e9:
         seconds = epoch / 1000.0 if epoch > 1e12 else epoch
         market_tz = market_now().tzinfo
-        return datetime.fromtimestamp(seconds, tz=timezone.utc).astimezone(market_tz).date()
+        return datetime.fromtimestamp(seconds, tz=UTC).astimezone(market_tz).date()
     parsed = pd.to_datetime(text, errors="coerce")
     if parsed is None or pd.isna(parsed):
         return None
@@ -61,7 +64,6 @@ def quote_trade_date(quote: dict) -> "date | None":
     if ts.tzinfo is not None:
         ts = ts.tz_convert(market_now().tzinfo)
     return ts.date()
-
 
 def is_quote_fresh(quote: dict) -> bool:
     """True when the quote may represent today's session.
@@ -83,15 +85,6 @@ def is_quote_fresh(quote: dict) -> bool:
             trade_date, market_now().date(), quote.get("symbol"),
         )
     return fresh
-
-
-def _number(value: object) -> float | None:
-    try:
-        result = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return result if isfinite(result) else None
-
 
 def build_synthetic_bar(quote: dict, prev_volume: float) -> dict:
     """Build a single synthetic daily bar from a real-time quote.
@@ -132,11 +125,9 @@ def build_synthetic_bar(quote: dict, prev_volume: float) -> dict:
         "amount": quote_amount,
     }
 
-
 # ---------------------------------------------------------------------------
 # intraday overlay — shared by the web daily-K endpoint and MCP symbol_detail
 # ---------------------------------------------------------------------------
-
 
 def _clean_daily_hist(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize a daily-bar frame for intraday computations (time/OHLCV)."""
@@ -154,7 +145,6 @@ def _clean_daily_hist(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
-
 def has_persisted_today_bar(hist: pd.DataFrame) -> bool:
     """True when *hist* already contains today's persisted bar.
 
@@ -167,7 +157,6 @@ def has_persisted_today_bar(hist: pd.DataFrame) -> bool:
     if pd.isna(last):
         return False
     return pd.Timestamp(last).date() >= market_now().date()
-
 
 def build_intraday_overlay(
     symbol: str,
@@ -201,7 +190,8 @@ def build_intraday_overlay(
         if hist.empty or has_persisted_today_bar(hist):
             # Today's bar is already persisted — nothing to overlay.
             return None
-        ds = data_service or DataService()
+        # 进程级单例（P2-11）：不再每次新建/泄漏 client，也无需 close。
+        ds = data_service or get_data_service()
         quote = ds.fetch_latest_quote(symbol)
         if not quote or quote.get("price") is None or not is_quote_fresh(quote):
             return None
@@ -236,11 +226,9 @@ def build_intraday_overlay(
         logger.warning("Intraday overlay failed for %s; falling back to EOD: %s", symbol, exc)
         return None
 
-
 # ---------------------------------------------------------------------------
 # intraday trend score
 # ---------------------------------------------------------------------------
-
 
 def compute_intraday_trend_cached(
     symbol: str,
@@ -280,7 +268,6 @@ def compute_intraday_trend_cached(
     ):
         return {"ok": False, "reason": "stale_anchor", "is_intraday": True}
 
-    prev_close = safe_float(close.iloc[-1], 0.0)
     prev_volume = safe_float(volume.iloc[-1], 0.0)
     synth = build_synthetic_bar(quote, prev_volume)
     synth_close = float(synth["close"])
@@ -307,7 +294,7 @@ def compute_intraday_trend_cached(
         ma_n = float(pd.Series(closes[-n:]).mean())
         bias_parts.append(safe_float((synth_close - ma_n) / fixed_atr))
 
-        ema_prev = safe_float(cache_row.get(ema_col))
+        ema_prev = safe_float(cache_row.get(ema_col), 0.0)
         alpha = 2.0 / (n + 1.0)
         ema_today = alpha * synth_close + (1 - alpha) * ema_prev
         slope_parts.append(safe_float((ema_today - ema_prev) / (fixed_atr * n)))
@@ -378,7 +365,6 @@ def compute_intraday_trend_cached(
         },
     }
 
-
 def compute_intraday_trend_score(
     historical_bars: pd.DataFrame,
     quote: dict,
@@ -422,7 +408,7 @@ def compute_intraday_trend_score(
             "ma_mid": 0.0,
             "is_intraday": True,
             "calc_details": {
-                "rows": int(len(historical_bars)),
+                "rows": len(historical_bars),
                 "required": int(min_bars),
             },
         }
@@ -450,20 +436,11 @@ def compute_intraday_trend_score(
     result["is_intraday"] = True
     return result
 
-
 # ---------------------------------------------------------------------------
 # batch intraday dashboard
 # ---------------------------------------------------------------------------
 
-
-def _ma5(values: list[float | None]) -> list[float | None]:
-    series = pd.Series(values, dtype="float64").rolling(5, min_periods=5).mean()
-    return [_number(v) for v in series]
-
-
-# 走势图/日期窗口，与 EOD 看板 services/dashboard.DISPLAY_DAYS 保持一致。
-_DISPLAY_DAYS = 61
-
+# 走势图/日期窗口 DISPLAY_DAYS：与 EOD 看板同一来源（services.dashboard_common）。
 
 def _weighted_daily_trend_series(rows_df: pd.DataFrame) -> tuple[list[str], list[float]]:
     """按日期对齐成员的趋势序列，成交额加权平均出级别每日序列。
@@ -489,24 +466,6 @@ def _weighted_daily_trend_series(rows_df: pd.DataFrame) -> tuple[list[str], list
             denominator[str(day)] += weight
     days = sorted(day for day in numerator if denominator.get(day, 0.0) > 0)
     return days, [numerator[d] / denominator[d] for d in days]
-
-
-def _strength(values: list[float], value: float | None) -> int | None:
-    if value is None or not values:
-        return None
-    return round(sum(score <= value for score in values) * 100 / len(values))
-
-
-def _priority(value: object) -> int:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 999999
-
-
-def _key_tuple(key: object) -> tuple[object, ...]:
-    return key if isinstance(key, tuple) else (key,)
-
 
 def build_intraday_dashboard(
     symbols: list[str],
@@ -535,7 +494,7 @@ def build_intraday_dashboard(
             "category_count": 0,
             "instrument_count": 0,
             "is_intraday": True,
-            "intraday_ts": datetime.now().isoformat(),
+            "intraday_ts": market_now().replace(tzinfo=None).isoformat(),
         }
 
     def _progress(stage: str, percent: float, message: str = "") -> None:
@@ -576,7 +535,7 @@ def build_intraday_dashboard(
 
     indicator_latest = db.load_indicator_latest(formula_version=INDICATOR_FORMULA_VERSION)
 
-    trend_since = (datetime.now() - pd.Timedelta(days=365)).date().isoformat()
+    trend_since = (market_now().replace(tzinfo=None) - pd.Timedelta(days=365)).date().isoformat()
     trend_by_symbol: dict[str, tuple[list, list]] = {}
     for row in db.load_trend_daily_bulk(trend_since, formula_version=TREND_FORMULA_VERSION):
         entry = trend_by_symbol.setdefault(str(row["symbol"]), ([], []))
@@ -643,7 +602,7 @@ def build_intraday_dashboard(
                 hist = db.load_market_data(symbol, price_mode="qfq")
                 hist["time"] = pd.to_datetime(hist["time"], errors="coerce")
                 hist = hist.dropna(subset=["time", "close"]).sort_values("time").reset_index(drop=True)
-            from services.market_indicators import compute_trend_indicator  # noqa: PLC0415
+            from services.market_indicators import compute_trend_indicator
 
             trend_result = compute_trend_indicator(hist, trend_config)
             hist_scores = trend_result.get("score", [])
@@ -660,12 +619,12 @@ def build_intraday_dashboard(
             }
             hist_closes = [close_map.get(d) for d in hist_dates]
 
-        intraday_ts = result["trend_score"]
+        intraday_score = result["trend_score"]
         intraday_price = _number(quote.get("price")) or 0.0
-        extended_scores = list(hist_scores) + [intraday_ts]
+        extended_scores = list(hist_scores) + [intraday_score]
         extended_ma5 = _ma5(extended_scores)
         extended_closes = list(hist_closes) + [intraday_price]
-        extended_dates = list(hist_dates) + [datetime.now().date().isoformat()]
+        extended_dates = list(hist_dates) + [market_now().replace(tzinfo=None).date().isoformat()]
 
         # 级别聚合（L2/L3）的成交额权重：历史日按当日成交额（优先全量 hist，
         # 缓存路径用 1y tail），今日盘中用实时成交额；缺失日聚合时等权兜底。
@@ -729,7 +688,7 @@ def build_intraday_dashboard(
             {
                 "symbol": symbol,
                 "name": name or symbol,
-                "time": datetime.now(),
+                "time": market_now().replace(tzinfo=None),
                 "trend_score": result["trend_score"],
                 # 初始化为 None：日涨幅必须由「今收/昨收」在下方重算得出，
                 # 尾部数据缺失时保持 None 而不是错误地显示价格本身。
@@ -798,13 +757,13 @@ def build_intraday_dashboard(
     if source.empty:
         _progress("done", 1.0, "无可用盘中数据")
         return {
-            "as_of": datetime.now().isoformat(),
+            "as_of": market_now().replace(tzinfo=None).isoformat(),
             "groups": [],
             "secondary_count": 0,
             "category_count": 0,
             "instrument_count": 0,
             "is_intraday": True,
-            "intraday_ts": datetime.now().isoformat(),
+            "intraday_ts": market_now().replace(tzinfo=None).isoformat(),
         }
 
     # Filter: only instruments with full 3-level classification.
@@ -817,33 +776,55 @@ def build_intraday_dashboard(
     if source.empty:
         _progress("done", 1.0, "无完整分类的标的")
         return {
-            "as_of": datetime.now().isoformat(),
+            "as_of": market_now().replace(tzinfo=None).isoformat(),
             "groups": [],
             "secondary_count": 0,
             "category_count": 0,
             "instrument_count": 0,
             "is_intraday": True,
-            "intraday_ts": datetime.now().isoformat(),
+            "intraday_ts": market_now().replace(tzinfo=None).isoformat(),
         }
 
     # ---- helpers for aggregation ----
+    def _weighted_avg_intra(rows_df: pd.DataFrame, column: str) -> float | None:
+        """成交额加权平均（P2-5：与 EOD 聚合口径对齐，替代原简单平均）。
+
+        权重规则与本模块 ``_weighted_daily_trend_series`` 相同：成交额缺失
+        （≤0 或 None）的成员按等权 1.0 兜底；整列无有效值返回 None
+        （mean 前 dropna，杜绝全 None 产出 NaN 进 JSON）。
+        """
+        if column not in rows_df:
+            return None
+        values = pd.to_numeric(rows_df[column], errors="coerce")
+        amounts = (
+            pd.to_numeric(rows_df["amount"], errors="coerce")
+            if "amount" in rows_df
+            else pd.Series(np.nan, index=rows_df.index)
+        )
+        weights = amounts.where(amounts.notna() & (amounts > 0), 1.0)
+        valid = values.notna()
+        if not bool(valid.any()):
+            return None
+        w = weights[valid].to_numpy(dtype=float)
+        return float((values[valid].to_numpy(dtype=float) * w).sum() / w.sum())
+
     def _metrics_summary_intra(rows_df: pd.DataFrame, meta: dict, *, is_instrument: bool = False) -> dict | None:
         if rows_df.empty:
             return None
         trend_vals: list[float] = []
-        for _, r in rows_df.iterrows():
-            v = _number(r.get("trend_score"))
+        for raw in rows_df["trend_score"]:
+            v = _number(raw)
             if v is not None:
                 trend_vals.append(v)
 
         if not trend_vals:
             return None
 
-        avg_trend = float(np.mean(trend_vals))
-        avg_1d = float(rows_df["return_1d"].mean()) if "return_1d" in rows_df else 0.0
-        avg_5d = float(rows_df["return_5d"].mean()) if "return_5d" in rows_df else 0.0
-        avg_20d = float(rows_df["return_20d"].mean()) if "return_20d" in rows_df else 0.0
-        avg_60d = float(rows_df["return_60d"].mean()) if "return_60d" in rows_df else 0.0
+        avg_trend = _weighted_avg_intra(rows_df, "trend_score")
+        avg_1d = _weighted_avg_intra(rows_df, "return_1d")
+        avg_5d = _weighted_avg_intra(rows_df, "return_5d")
+        avg_20d = _weighted_avg_intra(rows_df, "return_20d")
+        avg_60d = _weighted_avg_intra(rows_df, "return_60d")
         total_amount = float(rows_df["amount"].sum()) if "amount" in rows_df else 0.0
 
         # MA5 历史与 EOD 看板同口径：级别每日趋势序列（成交额加权）→ 5日平滑；
@@ -864,7 +845,7 @@ def build_intraday_dashboard(
             "amount": total_amount,
             "trend_history": ma5_series[-_DISPLAY_DAYS:],
             "trend_dates": series_dates[-_DISPLAY_DAYS:],
-            "as_of": datetime.now().date().isoformat(),
+            "as_of": market_now().replace(tzinfo=None).date().isoformat(),
             "priority_l1": _priority(meta.get("priority_l1", 9999)),
             "priority_l2": _priority(meta.get("priority_l2", 9999)),
             "priority_l3": _priority(meta.get("priority_l3", 9999)),
@@ -938,16 +919,6 @@ def build_intraday_dashboard(
     instruments = _build_summaries(source, inst_columns, is_instrument=True)
 
     # Assign strength percentiles.
-    def _assign_strength(items: list[dict], scope_cols: tuple[str, ...]) -> None:
-        values_by_scope: dict[tuple[str, ...], list[float]] = defaultdict(list)
-        for item in items:
-            v = _number(item.get("trend_ma5"))
-            if v is not None:
-                values_by_scope[tuple(str(item[c]) for c in scope_cols)].append(v)
-        for item in items:
-            scope = tuple(str(item[c]) for c in scope_cols)
-            item["strength"] = _strength(values_by_scope[scope], _number(item.get("trend_ma5")))
-
     _assign_strength(l2_items, ("category_l1",))
     _assign_strength(l3_items, ("category_l1",))
     _assign_strength(instruments, ("category_l1",))
@@ -967,12 +938,6 @@ def build_intraday_dashboard(
 
     for children in inst_by_l3.values():
         _sort(children, "name")
-
-    def _macd_counts(instruments: list[dict]) -> dict:
-        """金叉/死叉家数：类目行的 MACD 相位聚合口径（成员相位计数）。"""
-        golden = sum(1 for item in instruments if item.get("macd_phase") == "golden")
-        dead = sum(1 for item in instruments if item.get("macd_phase") == "dead")
-        return {"macd_golden_count": golden, "macd_dead_count": dead}
 
     l3_by_l2: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for l3 in l3_items:
@@ -1007,13 +972,13 @@ def build_intraday_dashboard(
     _progress("done", 1.0, f"完成 — {len(groups)} 个一级类目, {len(instruments)} 个标的")
 
     return {
-        "as_of": datetime.now().isoformat(),
+        "as_of": market_now().replace(tzinfo=None).isoformat(),
         "groups": groups,
         "secondary_count": len(l2_items),
         "category_count": len(l3_items),
         "instrument_count": len(instruments),
         "is_intraday": True,
-        "intraday_ts": datetime.now().isoformat(),
+        "intraday_ts": market_now().replace(tzinfo=None).isoformat(),
         # 报价失败/停牌/分类不全的标的：让调用方能区分「无数据」与「被省略」。
         "failed_symbols": sorted(set(failed)),
     }

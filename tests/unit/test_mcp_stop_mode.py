@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("mcp")
+
 from trend_mcp import server
 
 
@@ -27,8 +31,8 @@ def test_calc_stop_loss_passes_stop_mode(monkeypatch):
 def test_open_positions_passes_stop_mode(monkeypatch):
     captured = {}
 
-    def fake_authenticate(username, password):
-        return {"id": 1, "username": username, "is_admin": False}
+    def fake_token_user(ctx):
+        return {"id": 1, "username": "alice", "is_admin": False}
 
     def fake_list_trades(user, **kwargs):
         captured.update(kwargs)
@@ -50,14 +54,15 @@ def test_open_positions_passes_stop_mode(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(server.tr, "authenticate", fake_authenticate)
+    monkeypatch.setattr(server, "_token_user", fake_token_user)
     monkeypatch.setattr(server.tr, "list_trades", fake_list_trades)
 
-    result = server.open_positions("alice", "pw", stop_mode="tight")
+    result = server.open_positions(stop_mode="tight", ctx=object())
     assert result["ok"] is True
     assert captured["stop_mode"] == "tight"
     assert captured["intraday"] is True
     assert result["positions"][0]["stop_mode"] == "tight"
+    assert result["user"] == "alice"
 
-    server.open_positions("alice", "pw")
+    server.open_positions(ctx=object())
     assert captured["stop_mode"] is None

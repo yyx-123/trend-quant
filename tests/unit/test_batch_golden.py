@@ -76,7 +76,6 @@ EXPECTED_BENCHMARK = {
 }
 
 
-@pytest.mark.unit
 def test_golden_backtest_summary_is_stable() -> None:
     bars = pd.read_csv(FIXTURE)
     bars["time"] = pd.to_datetime(bars["time"])
@@ -106,7 +105,6 @@ def test_golden_backtest_summary_is_stable() -> None:
     assert result["trades"][0]["side"] == "BUY"
 
 
-@pytest.mark.unit
 def test_golden_strategy_is_batch_eligible() -> None:
     """golden 策略必须能过批量的随机指标校验（防止校验逻辑误伤）。"""
     from rule_backtest.batch_service import strategy_uses_random_indicator

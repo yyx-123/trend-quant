@@ -5,7 +5,7 @@ Mock ``chinese_calendar.is_workday`` to get deterministic results.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime
 
 import pytest
 
@@ -57,10 +57,10 @@ class TestIsTradingTime:
         (15, 1, False),    # after close
     ])
     def test_trading_hours(self, hour: int, minute: int, expected: bool) -> None:
-        from core.calendar import is_trading_time
+        from core.calendar import is_continuous_auction_hours
 
         dt = datetime(2025, 8, 11, hour, minute, 0)
-        assert is_trading_time(dt) == expected, f"Failed at {hour:02d}:{minute:02d}"
+        assert is_continuous_auction_hours(dt) == expected, f"Failed at {hour:02d}:{minute:02d}"
 
 
 class TestIsRealtimeAvailable:
@@ -170,53 +170,3 @@ class TestNextTradingDay:
 
         result = next_trading_day(date(2025, 8, 16))  # Saturday
         assert result == date(2025, 8, 18)  # Monday
-
-
-class TestTradingSessionStatus:
-    def test_in_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("core.calendar.is_workday", lambda d: True)
-        from core.calendar import trading_session_status
-
-        result = trading_session_status(datetime(2025, 8, 11, 10, 0, 0))
-        assert result["is_trading_day"] is True
-        assert result["is_trading_time"] is True
-        assert result["next_session"] == "in_session"
-
-    def test_after_close_on_trading_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("core.calendar.is_workday", lambda d: True)
-        from core.calendar import trading_session_status
-
-        result = trading_session_status(datetime(2025, 8, 11, 15, 30, 0))
-        assert result["is_trading_day"] is True
-        assert result["is_trading_time"] is False
-        assert result["next_session"] == "今日已收盘"
-
-    def test_before_open_on_trading_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("core.calendar.is_workday", lambda d: True)
-        from core.calendar import trading_session_status
-
-        result = trading_session_status(datetime(2025, 8, 11, 9, 0, 0))
-        assert result["is_trading_day"] is True
-        assert result["is_trading_time"] is False
-        assert "09:30" in result["next_session"]
-
-    def test_lunch_break_on_trading_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Lunch break: not in continuous session, but realtime available."""
-        monkeypatch.setattr("core.calendar.is_workday", lambda d: True)
-        from core.calendar import trading_session_status
-
-        result = trading_session_status(datetime(2025, 8, 11, 12, 0, 0))
-        assert result["is_trading_day"] is True
-        assert result["is_trading_time"] is False
-        assert result["is_realtime_available"] is True
-        assert "13:00" in result["next_session"]
-
-    def test_non_trading_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("core.calendar.is_workday", lambda d: False)
-        monkeypatch.setattr("core.calendar.is_workday", lambda d: d.weekday() < 5)
-        from core.calendar import trading_session_status
-
-        result = trading_session_status(datetime(2025, 8, 9, 10, 0, 0))  # Saturday
-        assert result["is_trading_day"] is False
-        assert result["is_trading_time"] is False
-        assert "开盘" in result["next_session"]

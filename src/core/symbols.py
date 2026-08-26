@@ -42,3 +42,23 @@ def symbol_suffix(symbol: str) -> str:
     if "." in text:
         return text.split(".", 1)[1]
     return ""
+
+
+def to_vendor_symbol(symbol: str) -> str:
+    """项目代码 → vendor（tickflow/tushare）格式：.SS → .SH，其余不变。
+
+    P1-14：原 provider_tickflow._to_tickflow_symbol 与
+    stock_industry.project_symbol_to_tushare 两份复制的单一来源。
+    """
+    text = str(symbol or "").strip().upper()
+    if text.endswith(".SS"):
+        return f"{text[:-3]}.SH"
+    return text
+
+
+def from_vendor_symbol(symbol: str) -> str:
+    """vendor（tickflow/tushare）代码 → 项目格式：.SH → .SS，其余不变。"""
+    text = str(symbol or "").strip().upper()
+    if text.endswith(".SH"):
+        return f"{text[:-3]}.SS"
+    return text

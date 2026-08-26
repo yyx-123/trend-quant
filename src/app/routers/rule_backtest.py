@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import threading
 from datetime import date, datetime
 
@@ -9,15 +8,28 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from core.calendar import previous_trading_day
+from audit.app_logger import get_logger
+from core.calendar import market_now, previous_trading_day
 from rule_backtest.models import DEFAULT_FEE_RATE
 from rule_backtest.service import RuleBacktestService, slim_backtest_result
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/rule-backtest", tags=["rule-backtest"])
-templates = Jinja2Templates(directory="web/templates")
-service = RuleBacktestService()
+from core.paths import web_dir as _web_dir
+
+_templates_dir = _web_dir() / "templates"
+templates = Jinja2Templates(directory=str(_templates_dir))
+# 惰性获取（P2-12）：模块级直接实例化会在导入期固化依赖；_get_service()
+# 首次调用才构造，且其下游（MarketStore/Loader）均每次现取 get_db()。
+_service: RuleBacktestService | None = None
+
+
+def _get_service() -> RuleBacktestService:
+    global _service
+    if _service is None:
+        _service = RuleBacktestService()
+    return _service
 
 # In-memory async backtest jobs (no persistence; lost on restart by design).
 _rule_jobs: dict[str, dict] = {}
@@ -69,8 +81,9 @@ def _cap_end_date(end_date_str: str) -> str:
         requested = date.fromisoformat(end_date_str.strip())
     except (ValueError, TypeError):
         return end_date_str
-    yesterday = previous_trading_day(date.today())
-    if requested >= date.today():
+    today = market_now().date()
+    yesterday = previous_trading_day(today)
+    if requested >= today:
         return yesterday.isoformat()
     return end_date_str
 
@@ -87,12 +100,12 @@ async def rule_backtest_page(request: Request) -> HTMLResponse:
 @router.get("/api/meta")
 async def get_rule_backtest_meta() -> dict:
     return {
-        "strategies": service.list_strategies(),
-        "instruments": service.list_instruments(),
-        "indicators": service.list_indicators(),
-        "position_strategies": service.list_position_strategies(),
-        "sizer_types": service.list_sizer_types(),
-        "sizing": service.list_sizing_flags(),
+        "strategies": _get_service().list_strategies(),
+        "instruments": _get_service().list_instruments(),
+        "indicators": _get_service().list_indicators(),
+        "position_strategies": _get_service().list_position_strategies(),
+        "sizer_types": _get_service().list_sizer_types(),
+        "sizing": _get_service().list_sizing_flags(),
         # Frontend form defaults (single source — JS must not hardcode these).
         "state_values": [
             "entry_price",
@@ -171,9 +184,9 @@ async def run_rule_backtest(payload: RuleBacktestRunRequest) -> dict:
                 if job:
                     job["status"] = result.get("status", "ok")
                     job["progress_current"] = job.get("progress_total", 1)
-                    # Full result stays in memory (future on-demand detail
-                    # endpoints); only the slimmed copy goes on the wire.
-                    job["result_full"] = result
+                    # 只存 slim（P2-19）：完整结果（daily_nav/charts/
+                    # condition_trace，单策略数 MB）曾在内存常驻 30 分钟且
+                    # 无任何读取端点；大字段随 result 出作用域即释放。
                     job["result"] = slim_backtest_result(result)
             logger.info(
                 "Rule backtest completed run_id=%s status=%s elapsed=%.1fs",
@@ -240,7 +253,7 @@ async def get_rule_backtest_result(run_id: str) -> dict:
 @router.post("/api/strategies")
 async def save_rule_strategy(payload: RuleStrategySaveRequest) -> dict:
     try:
-        return service.save_strategy(payload.strategy, overwrite=payload.overwrite)
+        return _get_service().save_strategy(payload.strategy, overwrite=payload.overwrite)
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -250,7 +263,7 @@ async def save_rule_strategy(payload: RuleStrategySaveRequest) -> dict:
 @router.delete("/api/strategies/{strategy_id}")
 async def delete_rule_strategy(strategy_id: str) -> dict:
     try:
-        return service.delete_strategy(strategy_id)
+        return _get_service().delete_strategy(strategy_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -260,7 +273,7 @@ async def delete_rule_strategy(strategy_id: str) -> dict:
 @router.post("/api/position-strategies")
 async def save_position_strategy(payload: PositionStrategySaveRequest) -> dict:
     try:
-        return service.save_position_strategy(payload.strategy, overwrite=payload.overwrite)
+        return _get_service().save_position_strategy(payload.strategy, overwrite=payload.overwrite)
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -270,7 +283,7 @@ async def save_position_strategy(payload: PositionStrategySaveRequest) -> dict:
 @router.delete("/api/position-strategies/{strategy_id}")
 async def delete_position_strategy(strategy_id: str) -> dict:
     try:
-        return service.delete_position_strategy(strategy_id)
+        return _get_service().delete_position_strategy(strategy_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

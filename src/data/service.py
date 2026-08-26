@@ -1,21 +1,25 @@
 from __future__ import annotations
 
-import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
-from typing import Callable
 
 import pandas as pd
 
 from audit.app_logger import get_logger
+from core import env
 from core.adjustment import compute_qfq, factors_equal
+from core.bars import date_span
 from core.calendar import is_trading_day as _calendar_is_trading_day
+from core.calendar import market_now
 from core.settings import TickFlowSettings, load_settings
+from core.strategy_config import backfill_start_date
+from core.symbols import normalize_symbol
 from data.provider_tickflow import TickFlowProvider
-from data.storage.market_store import MarketStore
 from data.storage.db import get_db, record_job_run_safely
+from data.storage.market_store import MarketStore
 
 logger = get_logger(__name__)
 _symbol_locks_guard = threading.Lock()
@@ -41,7 +45,7 @@ def _symbol_lock(symbol: str) -> threading.Lock:
 # 打不开）。30s 短缓存让 TTL 内重复请求零网络开销；远短于盘中快照 5 分钟
 # 节奏，不影响新鲜度口径（下游 is_quote_fresh 校验照常作用于报价本身）。
 _QUOTE_CACHE_TTL_SECONDS = max(
-    0.0, float(os.getenv("TICKFLOW_QUOTE_CACHE_TTL_SECONDS", "30") or 30)
+    0.0, env.quote_cache_ttl_seconds(30.0)
 )
 _quote_cache: dict[str, tuple[float, dict]] = {}
 _quote_cache_lock = threading.Lock()
@@ -166,17 +170,8 @@ class DataService:
                 df["provider"] = name
         return data_by_symbol, errors
 
-    def fetch_minute_history(self, symbol: str, period: str = "30", count: int = 48, adjust: str = "qfq") -> pd.DataFrame:
-        name, provider = self._tickflow_provider()
-        data = provider.fetch_minute_history(symbol, period, count, adjust)
-        if data.empty:
-            raise DataProviderError(
-                f"TickFlow returned no {period} minute history for {symbol}, count={count}"
-            )
-        data["provider"] = name
-        return data
-
     def fetch_latest_quote(self, symbol: str) -> dict:
+        symbol = normalize_symbol(symbol)
         cached = _quote_cache_get(symbol)
         if cached is not None:
             return cached
@@ -192,6 +187,8 @@ class DataService:
         """Batch-fetch real-time quotes for multiple symbols."""
         if not symbols:
             return {}
+        # 入口统一归一化，保证缓存键（归一化 symbol）与调用方传参口径一致
+        symbols = [normalize_symbol(s) for s in symbols]
         # TTL 内已有缓存的直接命中，只为缺失/过期的标的发网络请求
         result: dict[str, dict] = {}
         missing: list[str] = []
@@ -231,7 +228,7 @@ class DataService:
                     "symbol": symbol,
                     "name": instrument_name,
                     "provider": name,
-                    "ts": datetime.now().isoformat(),
+                    "ts": market_now().replace(tzinfo=None).isoformat(),
                 }
         quote = provider.fetch_latest_quote(symbol)
         instrument_name = str(quote.get("name", "") or "").strip()
@@ -388,7 +385,7 @@ class DataService:
         return {
             "symbol": symbol,
             "status": status,
-            "rows": int(len(existing)),
+            "rows": len(existing),
             "path": f"sqlite/raw/{symbol}",
             "fetched_from": fetch_start.isoformat() if raw_updated else None,
             "fetched_to": end_date.isoformat() if raw_updated else None,
@@ -398,12 +395,7 @@ class DataService:
 
     @staticmethod
     def _date_span(df: pd.DataFrame) -> tuple[str | None, str | None]:
-        if df.empty or "time" not in df.columns:
-            return None, None
-        time_series = pd.to_datetime(df["time"], errors="coerce").dropna()
-        if time_series.empty:
-            return None, None
-        return time_series.min().date().isoformat(), time_series.max().date().isoformat()
+        return date_span(df)
 
     def backfill_daily_history(self, symbol: str, start_date: date, end_date: date, adjust: str = "qfq") -> dict:
         if end_date < start_date:
@@ -436,7 +428,7 @@ class DataService:
     def _effective_fetch_start(self, symbol: str, requested_start: date) -> tuple[date, int, str | None, str | None]:
         with _symbol_lock(symbol):
             existing = self.raw_store.load_history(symbol)
-            existing_rows = int(len(existing))
+            existing_rows = len(existing)
             local_start_before, local_end_before = self._date_span(existing)
             if existing.empty:
                 return requested_start, existing_rows, local_start_before, local_end_before
@@ -466,12 +458,12 @@ class DataService:
             requested_start, requested_end = requested_end, requested_start
 
         store = self.raw_store  # backfill 一律写 raw 真源
-        fetched_rows = int(len(fetched))
+        fetched_rows = len(fetched)
         fetched_start, fetched_end = self._date_span(fetched)
         if fetched.empty:
             with _symbol_lock(symbol):
                 existing = store.load_history(symbol)
-                existing_rows = int(len(existing))
+                existing_rows = len(existing)
                 local_start_after, local_end_after = self._date_span(existing)
             return {
                 "symbol": symbol,
@@ -488,12 +480,12 @@ class DataService:
                 "local_end_before": local_end_before,
                 "local_start_after": local_start_after,
                 "local_end_after": local_end_after,
-                "path": f"sqlite/{symbol}",
+                "path": f"sqlite/raw/{symbol}",
             }
 
         with _symbol_lock(symbol):
             existing = store.load_history(symbol)
-            existing_rows = int(len(existing))
+            existing_rows = len(existing)
             current_local_start, current_local_end = self._date_span(existing)
             local_start_before = local_start_before or current_local_start
             local_end_before = local_end_before or current_local_end
@@ -503,7 +495,7 @@ class DataService:
             to_save = to_save.reset_index(drop=True)
             path = store.save_history(symbol, to_save)
             saved = store.load_history(symbol)
-            rows_after = int(len(saved))
+            rows_after = len(saved)
             local_start_after, local_end_after = self._date_span(saved)
         return {
             "symbol": symbol,
@@ -548,7 +540,7 @@ class DataService:
             "local_end_before": local_end,
             "local_start_after": local_start,
             "local_end_after": local_end,
-            "path": f"sqlite/{symbol}",
+            "path": f"sqlite/raw/{symbol}",
         }
 
     def backfill_daily_histories(
@@ -568,10 +560,9 @@ class DataService:
             symbol = str(item.get("symbol") or "").strip().upper()
             if not symbol or symbol in normalized_items:
                 continue
-            raw_start = item.get("start_date", date(2020, 1, 1))
+            raw_start = item.get("start_date") or backfill_start_date()
             start = raw_start if isinstance(raw_start, date) else datetime.strptime(str(raw_start), "%Y-%m-%d").date()
-            if end_date < start:
-                start = end_date
+            start = min(start, end_date)
             normalized_items[symbol] = start
 
         results: dict[str, dict] = {}
@@ -762,7 +753,7 @@ class DataService:
                         {"event": "item_done", "symbol": symbol, "finished": index, "total": len(ok_symbols)}
                     )
 
-        return [results[symbol] for symbol in normalized_items.keys() if symbol in results]
+        return [results[symbol] for symbol in normalized_items if symbol in results]
 
     def update_pool_daily(
         self,
@@ -822,7 +813,7 @@ class DataService:
         failed_count = len(failed_symbols)
 
         payload = {
-            "ts": datetime.now().isoformat(),
+            "ts": market_now().replace(tzinfo=None).isoformat(),
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "total": len(symbols),
@@ -855,3 +846,24 @@ class DataService:
         if provider is None:
             raise DataProviderError("TickFlow provider is not configured")
         return "tickflow", provider
+
+
+# ---------------------------------------------------------------------------
+# 进程级单例（P2-11）
+# ---------------------------------------------------------------------------
+# DataService 随处 new 会让实例级资源被无限分身（每个实例一个 TickFlow/
+# httpx client）；进程内共享一个实例即可——provider 限流状态已模块级化，
+# 多入口并发不会再稀释 vendor 预算。内部调用方一律不再 close() 共享实例
+# （close 保留给显式生命周期管理的场景，如测试）。
+_data_service_lock = threading.Lock()
+_data_service_instance: DataService | None = None
+
+
+def get_data_service() -> DataService:
+    """返回进程级共享的 DataService（双检锁单飞构造）。"""
+    global _data_service_instance
+    if _data_service_instance is None:
+        with _data_service_lock:
+            if _data_service_instance is None:
+                _data_service_instance = DataService()
+    return _data_service_instance

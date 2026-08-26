@@ -7,12 +7,17 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
-from rule_backtest import BacktestExecutionConfig, RuleBacktestRequest, SingleSymbolAllInBacktestEngine
+from rule_backtest import (
+    BacktestExecutionConfig,
+    RuleBacktestRequest,
+    SingleSymbolAllInBacktestEngine,
+)
 from rule_backtest.models import PositionState
 from rule_backtest.validators import StrategyConfigValidator
 from rule_backtest.value_resolver import ValueResolver
 
-NO_COST = BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0)
+# 默认费率（滑点 0.002 / 佣金率 0.0000854 / 最低佣金 5）——全系统不提供零成本场景
+STANDARD_COST = BacktestExecutionConfig()
 
 
 def make_bars(days: int) -> pd.DataFrame:
@@ -72,7 +77,7 @@ def coin_strategy(seed: int | None, entry_threshold: float, exit_threshold: floa
 
 def run_engine(strategy: dict, days: int = 10) -> dict:
     return SingleSymbolAllInBacktestEngine().run(
-        RuleBacktestRequest(strategy=strategy, symbol="TEST", bars=make_bars(days), execution=NO_COST)
+        RuleBacktestRequest(strategy=strategy, symbol="TEST", bars=make_bars(days), execution=STANDARD_COST)
     )
 
 

@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-import logging
-
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from core.calendar import market_now, trading_session_status
+from core.calendar import market_now
 from data.storage.db import get_db
 from services import auth
-from services.dashboard import RevisionCache, build_subject_dashboard_payload
+from services.dashboard import build_subject_dashboard_payload, dashboard_revision_cache
 from services.dashboard_snapshot import snapshot_runner
 
 router = APIRouter(prefix="/subject-market", tags=["subject-market"])
-templates = Jinja2Templates(directory="web/templates")
-logger = logging.getLogger(__name__)
+from audit.app_logger import get_logger
+from core.paths import web_dir as _web_dir
 
-_dashboard_cache = RevisionCache()
+_templates_dir = _web_dir() / "templates"
+templates = Jinja2Templates(directory=str(_templates_dir))
+logger = get_logger(__name__)
+
 
 
 def _overlay_holdings(payload: dict, user_id: int, db) -> dict:
@@ -100,7 +101,7 @@ def warm_dashboard_cache() -> None:
     """
     db = get_db()
     revision = db.get_market_dashboard_revision()
-    _dashboard_cache.get_or_compute(revision, lambda: build_subject_dashboard_payload(db))
+    dashboard_revision_cache.get_or_compute(revision, lambda: build_subject_dashboard_payload(db))
 
 
 @router.get("", response_class=HTMLResponse)
@@ -130,17 +131,11 @@ async def subject_market_dashboard(user: dict = Depends(auth.get_current_user)) 
     # 冷缓存重建是全市场秒级 CPU 计算 —— 放到线程池，避免在事件循环上
     # 同步执行时把整个服务卡住（RevisionCache 内部有锁，并发冷请求只算一次）。
     payload = await run_in_threadpool(
-        _dashboard_cache.get_or_compute,
+        dashboard_revision_cache.get_or_compute,
         revision,
         lambda: build_subject_dashboard_payload(db),
     )
     return _overlay_holdings(payload, user["id"], db)
-
-
-@router.get("/api/trading-status")
-async def get_trading_status() -> dict:
-    """Return current A-share trading session status."""
-    return trading_session_status()
 
 
 @router.get("/api/dashboard/refresh-status")

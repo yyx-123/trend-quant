@@ -30,11 +30,12 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import _common  # .env 加载 + DB_PATH + TickFlow 构造（P2-13）
 
-from data.storage.db import Database, init_db, record_job_run_safely  # noqa: E402
-from services.stock_industry import STOCK_L1, UNCLASSIFIED_L2, UNCLASSIFIED_L3  # noqa: E402
+from data.storage.db import init_db, record_job_run_safely
+from services.stock_industry import STOCK_L1, UNCLASSIFIED_L2, UNCLASSIFIED_L3
 
-DB_PATH = Path("data/trend_quant.db")
+DB_PATH = _common.DB_PATH
 MIGRATION_TAG = "sw2021_2026_q3"
 _PENDING_PATHS = {f"{STOCK_L1}-{UNCLASSIFIED_L2}", f"{STOCK_L1}-{UNCLASSIFIED_L2}-{UNCLASSIFIED_L3}"}
 
@@ -76,11 +77,36 @@ def validate_tree(tree: list[dict]) -> list[str]:
     return errors
 
 
+def _service_running_guard(db_path: Path) -> None:
+    """迁移会大规模改写类目/元数据，要求停服执行（P2-24：不再靠自觉）。
+
+    仅在目标是默认生产库时检测（测试/临时库豁免）：本机 8000 端口有
+    服务在跑即拒绝执行（启发式——trend-quant web 的监听端口）。
+    """
+    if db_path.resolve() != Path(DB_PATH).resolve():
+        return
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 8000), timeout=1):
+            print(
+                "[migrate] 检测到本机 8000 端口有服务在跑（疑似 trend-quant web）。\n"
+                "[migrate] 迁移要求停服执行：请先 systemctl stop trend-quant（或停掉本地 uvicorn）再跑。",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+    except (TimeoutError, ConnectionRefusedError, OSError):
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="股票类目树重建为申万 2021（存量重归类）")
     parser.add_argument("--dry-run", action="store_true", help="只打印对照报告，不写库")
     parser.add_argument("--db", default=str(DB_PATH), help="数据库路径")
     args = parser.parse_args()
+
+    if not args.dry_run:
+        _service_running_guard(Path(args.db))
 
     if not Path(args.db).exists():
         print(f"[migrate] 找不到数据库 {args.db}", file=sys.stderr)

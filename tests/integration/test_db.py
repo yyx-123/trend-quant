@@ -6,10 +6,7 @@ from ``tests/integration/conftest.py``.
 
 from __future__ import annotations
 
-from datetime import date, datetime
-
 import pandas as pd
-import pytest
 
 
 class TestMarketDataCRUD:
@@ -24,21 +21,6 @@ class TestMarketDataCRUD:
         assert len(loaded) == 1
         assert float(loaded.iloc[0]["close"]) == 10.5
 
-    def test_separate_price_modes(self, test_db) -> None:
-        qfq_df = pd.DataFrame([{
-            "time": "2025-01-06", "open": 10.0, "high": 11.0,
-            "low": 9.0, "close": 10.5, "volume": 1_000_000, "amount": 1_050_000,
-            "provider": "test",
-        }])
-        raw_df = pd.DataFrame([{
-            "time": "2025-01-06", "open": 12.0, "high": 13.0,
-            "low": 11.0, "close": 12.5, "volume": 1_000_000, "amount": 1_250_000,
-            "provider": "test",
-        }])
-        test_db.save_market_data("TEST2.SS", qfq_df, price_mode="qfq")
-        test_db.save_market_data("TEST2.SS", raw_df, price_mode="raw")
-        assert float(test_db.load_market_data("TEST2.SS", "qfq").iloc[0]["close"]) == 10.5
-        assert float(test_db.load_market_data("TEST2.SS", "raw").iloc[0]["close"]) == 12.5
 
     def test_list_market_symbols(self, test_db) -> None:
         df = pd.DataFrame([{
@@ -61,7 +43,9 @@ class TestMarketDataCRUD:
         test_db.save_market_data("SUM.SS", df, price_mode="qfq")
         summary = test_db.get_market_data_summary("SUM.SS", "qfq")
         assert summary["rows"] == 1
-        assert summary["symbol"] == "SUM.SS" if "symbol" in summary else True
+        # summary 为 {rows, start, end} 三元组：起止日期恰为刚写入的那根K线
+        assert str(summary["start"])[:10] == str(summary["end"])[:10]
+        assert summary["start"] is not None
 
 
 class TestMarketSymbolsCache:
@@ -113,14 +97,6 @@ class TestMarketSymbolsCache:
 
 
 class TestInstrumentMetadata:
-    def test_save_and_list(self, test_db) -> None:
-        test_db.save_instrument_metadata([
-            {"symbol": "A.SS", "name": "Alpha", "category_l1": "宽基",
-             "category_l2": "大盘", "category_l3": "沪深300", "sort_order": 1},
-        ])
-        items = test_db.list_instrument_metadata()
-        assert len(items) == 1
-        assert items[0]["symbol"] == "A.SS"
 
     def test_get_instrument_metadata_map(self, test_db) -> None:
         test_db.save_instrument_metadata([

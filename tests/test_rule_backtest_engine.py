@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import pytest
+
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
+
+
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import ClassVar
 
 import pandas as pd
 import yaml
 
 from core import indicators as core_ind
 from data.storage.db import Database
-from rule_backtest import BacktestExecutionConfig, RuleBacktestRequest, SingleSymbolAllInBacktestEngine
+from rule_backtest import (
+    BacktestExecutionConfig,
+    RuleBacktestRequest,
+    SingleSymbolAllInBacktestEngine,
+)
 from rule_backtest.loader import StrategyLoader
 from rule_backtest.models import PositionState
 from rule_backtest.service import RuleBacktestService
@@ -160,7 +170,7 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
 
@@ -208,7 +218,7 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
 
@@ -263,7 +273,7 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 symbol="TEST",
                 bars=bars,
                 start_date=date(2026, 2, 10),
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
 
@@ -291,17 +301,20 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
 
         sell = result["trades"][1]
         self.assertEqual("hard_stop", sell["reason"])
-        self.assertEqual(98.0, sell["reference_price"])
-        self.assertEqual(98.0, sell["exec_price"])
+        # 默认费率（零值归一）：买入 exec=100×1.002=100.2 → 止损=100.2−TR(2)=98.2
+        self.assertEqual(98.2, sell["reference_price"])
+        self.assertAlmostEqual(98.2 * 0.998, sell["exec_price"], places=4)
         self.assertIn("commission", sell)
         self.assertIn("stamp_tax", sell)
+        # ETF 无印花税；佣金按 max(gross×0.0000854, 5) 正常计收
         self.assertEqual(0.0, sell["stamp_tax"])
+        self.assertAlmostEqual(sell["gross_amount"] * 0.0000854, sell["commission"], places=6)
 
     def test_chandelier_stop_sells_at_stop_price(self) -> None:
         bars = make_bars(
@@ -326,25 +339,26 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
 
         sell = result["trades"][1]
         self.assertEqual("chandelier_stop", sell["reason"])
         self.assertEqual(101.0, sell["reference_price"])
-        self.assertEqual(101.0, sell["exec_price"])
+        # 默认滑点 0.002：卖出 exec = 止损价 × (1−0.002)
+        self.assertAlmostEqual(101.0 * 0.998, sell["exec_price"], places=3)
 
     # 棘轮版吊灯止损的判别性场景（atr_period=1, atr_mul=1.0）：
     #   Day0 买入 close=100，止损初始化为 101−TR(2)=99
     #   Day1 新高 110、TR=10 → 候选 100，棘轮 max(99,100)=100（原版同为 100）
     #   Day2 振幅剧增 TR=21 → 候选 111−21=90；原版下移到 90（不触发卖出），
     #        棘轮保持 100，close=95 ≤ 100 → 以 100 卖出。
-    _RATCHET_BARS = dict(
-        closes=[100.0, 109.0, 95.0],
-        highs=[101.0, 110.0, 111.0],
-        lows=[99.0, 108.0, 90.0],
-    )
+    _RATCHET_BARS: ClassVar[dict] = {
+        "closes": [100.0, 109.0, 95.0],
+        "highs": [101.0, 110.0, 111.0],
+        "lows": [99.0, 108.0, 90.0],
+    }
 
     def _run_chandelier_variant(self, state_value_name: str) -> dict:
         bars = make_bars(**self._RATCHET_BARS)
@@ -364,7 +378,7 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
 
@@ -376,7 +390,8 @@ class RuleBacktestEngineTest(unittest.TestCase):
         self.assertEqual("chandelier_stop_ratchet", sell["reason"])
         # 棘轮价保持 Day1 的 100，而非随 ATR 扩张下移到 90
         self.assertEqual(100.0, sell["reference_price"])
-        self.assertEqual(100.0, sell["exec_price"])
+        # 默认滑点 0.002：卖出 exec = 100 × 0.998
+        self.assertAlmostEqual(99.8, sell["exec_price"], places=4)
         self.assertEqual("stop_price", sell["reference_price_source"])
 
     def test_chandelier_stop_plain_moves_down_and_does_not_sell(self) -> None:
@@ -434,7 +449,7 @@ class CrossOperatorEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
 
@@ -835,8 +850,8 @@ class RuleBacktestLoaderServiceTest(unittest.TestCase):
         service = RuleBacktestService(strategy_loader=StrategyLoader(), market_store=UninitializedMarketStore())
         instruments = service.list_instruments()
         self.assertTrue(isinstance(instruments, list))
-        if instruments:
-            self.assertFalse(instruments[0]["has_market_data"])
+        # 无数据环境下也必须返回（可能为空的）列表；非空时标记 has_market_data=False
+        self.assertTrue(all(not item.get("has_market_data") for item in instruments))
 
     def test_service_exposes_indicator_metadata(self) -> None:
         service = RuleBacktestService(strategy_loader=StrategyLoader(), market_store=object())
@@ -855,7 +870,7 @@ class CooldownStateValueTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
-                execution=BacktestExecutionConfig(slippage=0.0, fee_rate=0.0, fee_min=0.0),
+                execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
 

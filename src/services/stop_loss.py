@@ -21,37 +21,41 @@
 
 from __future__ import annotations
 
-import logging
 import sqlite3
 
 import pandas as pd
 
+from audit.app_logger import get_logger
 from core.calendar import is_past_market_open
 from core.strategy_config import get_strategy_config
 from core.symbols import normalize_symbol
 from core.trend import safe_float
 from data.indicator_store import get_series
 from data.intraday_service import build_synthetic_bar, has_persisted_today_bar, is_quote_fresh
-from data.service import DataService
+from data.service import get_data_service
 from data.storage.db import get_db
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 #: 哨兵值：调用方未提供预取的盘中合成K线 —— 按默认路径实时拉取。
 #: 显式传 None 表示「已确认无盘中数据，直接用 EOD」（交易记录列表的同 symbol 去重用）。
 UNSET_INTRADAY_BAR: object = object()
 
 
+def stop_mode_toggle_title() -> str:
+    """止损松紧档位开关的统一悬停文案（P2-28：market_view 与 manual_trade
+    原两处硬编码且措辞已不一致，后端按当前配置下发唯一口径）。"""
+    cfg = get_strategy_config()
+    loose_hard = cfg.get("hard_stop_atr_mul_default", 1.5)
+    loose_chand = cfg.get("chandelier_stop_atr_mul", 2.5)
+    return (
+        f"紧止损：硬止损 1×ATR、吊灯止损 2×ATR；"
+        f"松止损：硬止损 {loose_hard}×ATR、吊灯止损 {loose_chand}×ATR"
+    )
+
+
 class StopLossError(ValueError):
     """止损计算中的业务错误（无效输入 / 数据不足）。"""
-
-
-def _load_instrument_metadata(db) -> list[dict]:
-    try:
-        return [dict(item) for item in db.list_instrument_metadata()]
-    except (RuntimeError, sqlite3.Error) as exc:
-        logger.warning("Instrument metadata unavailable: %s", exc)
-        return []
 
 
 def _synthesize_intraday_bar(symbol: str, df: pd.DataFrame, quote: dict | None) -> dict | None:
@@ -80,11 +84,7 @@ def _fetch_intraday_bar(symbol: str, df: pd.DataFrame) -> dict | None:
         # 当日K线已由盘后任务落库 —— 与图表 overlay 一致，DB 数据优先。
         return None
     try:
-        service = DataService()
-        try:
-            quote = service.fetch_latest_quote(symbol)
-        finally:
-            service.close()
+        quote = get_data_service().fetch_latest_quote(symbol)
         return _synthesize_intraday_bar(symbol, df, quote)
     except Exception as exc:
         logger.warning("Intraday quote failed for %s; falling back to EOD: %s", symbol, exc)
@@ -108,11 +108,7 @@ def fetch_intraday_bars(dfs: dict[str, pd.DataFrame]) -> dict[str, dict | None]:
     if not pending:
         return result
     try:
-        service = DataService()
-        try:
-            quotes = service.fetch_latest_quotes(list(pending))
-        finally:
-            service.close()
+        quotes = get_data_service().fetch_latest_quotes(list(pending))
     except Exception as exc:
         logger.warning("Batch intraday quotes failed; falling back to EOD: %s", exc)
         return result
@@ -136,6 +132,7 @@ def compute_stop_loss(
     end_date: str | None = None,
     intraday_bar: dict | None | object = UNSET_INTRADAY_BAR,
     stop_mode: str | None = None,
+    df: pd.DataFrame | None = None,
 ) -> dict:
     """计算给定买入的硬止损价和吊灯止损价。
 
@@ -153,6 +150,8 @@ def compute_stop_loss(
 
     ``end_date`` 用于已清仓交易：数据与 ATR 均截断到该日（含），
     "最新价 / 买入以来最高价" 都按截止日口径，且强制关闭 intraday。
+    ``df`` 预加载的日K（P2-18：持仓列表同一标的只读一次全量行情，
+    调用方传入后不再重复 ``db.load_market_data``）。
 
     Raises:
         StopLossError: 标的无效、无数据或 ATR 异常。
@@ -178,7 +177,8 @@ def compute_stop_loss(
         intraday = False  # 历史截断口径，不叠加盘中
 
     db = db or get_db()
-    df = db.load_market_data(symbol)
+    if df is None:
+        df = db.load_market_data(symbol)
     if df.empty:
         raise StopLossError(f"未找到 {symbol} 的数据")
 
@@ -191,12 +191,14 @@ def compute_stop_loss(
         hard_stop_mul = float(strategy_cfg.get("hard_stop_atr_mul_default", 1.5))
         chandelier_mul = float(strategy_cfg.get("chandelier_stop_atr_mul", 2.5))
 
-        # Per-instrument stop_atr_mul override (DB rows may carry NULL)
-        for item in _load_instrument_metadata(db):
-            if str(item.get("symbol", "")).strip().upper() == symbol:
-                if item.get("stop_atr_mul") is not None:
-                    hard_stop_mul = float(item["stop_atr_mul"])
-                break
+        # Per-instrument stop_atr_mul override（主键查询；DB 行可能为 NULL）
+        item = None
+        try:
+            item = db.get_instrument_metadata(symbol)
+        except (RuntimeError, sqlite3.Error) as exc:
+            logger.warning("Instrument metadata unavailable: %s", exc)
+        if item and item.get("stop_atr_mul") is not None:
+            hard_stop_mul = float(item["stop_atr_mul"])
 
     # ATR from the precomputed cache (single source, D11); the store falls
     # back to a live full-history compute when the cache is stale/missing.

@@ -8,26 +8,28 @@ pool update -> post-update pipeline (dividend check + indicator rebuild).
 Usage:  .venv/bin/python scripts/rerun_daily_update.py
 """
 
+import sys
+from pathlib import Path as _Path
+
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 from datetime import date
 
-from dotenv import load_dotenv
+import _common  # .env 加载（锚定项目根）+ DB_PATH（P2-13）
 
-load_dotenv()
-
-from core.jobs import daily_market_update_job  # noqa: E402
-from core.settings import load_settings  # noqa: E402
-from data.service import DataService  # noqa: E402
-from data.storage.db import init_db, record_job_run_safely  # noqa: E402
-from services.indicator_builder import run_post_update_pipeline  # noqa: E402
+from core.jobs import daily_market_update_job
+from core.settings import load_settings
+from data.service import DataService
+from data.storage.db import init_db, record_job_run_safely
+from services.indicator_builder import run_post_update_pipeline
 
 
 def main() -> None:
-    init_db()  # same default path data/trend_quant.db as app startup
+    init_db(_common.DB_PATH)  # 与应用启动同一路径（锚定项目根）
     settings = load_settings()
     payload = daily_market_update_job(settings, force=True)
     print(
-        "daily update: %(success)s success, %(failed)s failed out of %(total)s"
-        % {"success": payload.get("success", 0), "failed": payload.get("failed", 0), "total": payload.get("total", 0)}
+        f"daily update: {payload.get('success', 0)} success, "
+        f"{payload.get('failed', 0)} failed out of {payload.get('total', 0)}"
     )
     if payload.get("failed_symbols"):
         print("failed symbols:", payload["failed_symbols"])

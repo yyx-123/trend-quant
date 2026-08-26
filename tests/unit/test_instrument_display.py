@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from app.instrument_display import (
-    strip_etf_suffix,
-    symbol_to_code,
-    format_symbol_display,
     build_symbol_display,
+    format_symbol_display,
+    strip_etf_suffix,
 )
 
 
@@ -24,14 +23,6 @@ class TestStripEtfSuffix:
         assert strip_etf_suffix(None) == ""
         assert strip_etf_suffix("") == ""
 
-
-class TestSymbolToCode:
-    def test_strips_suffix(self) -> None:
-        assert symbol_to_code("510300.SS") == "510300"
-        assert symbol_to_code("300760.SZ") == "300760"
-
-    def test_no_suffix(self) -> None:
-        assert symbol_to_code("510300") == "510300"
 
 
 class TestFormatSymbolDisplay:

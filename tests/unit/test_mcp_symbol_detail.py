@@ -20,7 +20,10 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-import data.intraday_service as intraday_service
+from data import intraday_service
+
+pytest.importorskip("mcp")
+
 from trend_mcp import server
 
 
@@ -47,19 +50,20 @@ def _daily_bars_ending(end_day: date, rows: int = 80) -> pd.DataFrame:
     return pd.DataFrame(items)
 
 
-FAKE_QUOTE = {
-    "symbol": "518850.SS",
-    "name": "Gold",
-    "price": 2.0,
-    "open": 1.9,
-    "high": 2.1,
-    "low": 1.8,
-    "volume": 500000,
-    "amount": 1000000,
-    # ts 必须是“今天”——陈旧报价（如停牌股的上一交易日快照）会被
-    # is_quote_fresh 拒绝，不合成当日K线。
-    "ts": date.today().isoformat() + "T15:00:00",
-}
+def _fake_quote() -> dict:
+    return {
+        "symbol": "518850.SS",
+        "name": "Gold",
+        "price": 2.0,
+        "open": 1.9,
+        "high": 2.1,
+        "low": 1.8,
+        "volume": 500000,
+        "amount": 1000000,
+        # ts 必须是“今天”——陈旧报价（如停牌股的上一交易日快照）会被
+        # is_quote_fresh 拒绝，不合成当日K线。
+        "ts": date.today().isoformat() + "T15:00:00",
+    }
 
 FAKE_INTRADAY_RESULT = {
     "ok": True,
@@ -94,12 +98,12 @@ def _call_symbol_detail(df: pd.DataFrame, *, past_open: bool):
     with (
         patch.object(server, "get_db", return_value=_FakeDb(df)),
         patch.object(intraday_service, "is_past_market_open", return_value=past_open),
-        patch.object(intraday_service, "DataService") as mock_ds_cls,
+        patch.object(intraday_service, "get_data_service") as mock_ds_cls,
         patch.object(intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT),
         patch.object(server, "_config_name_map", return_value={}),
         patch.object(server, "_load_instruments_raw", return_value=[]),
     ):
-        mock_ds_cls.return_value.fetch_latest_quote.return_value = FAKE_QUOTE
+        mock_ds_cls.return_value.fetch_latest_quote.return_value = _fake_quote()
         payload = server.symbol_detail("518850.SS", days=60, intraday=True)
     return payload, mock_ds_cls
 
@@ -129,7 +133,7 @@ class TestSymbolDetailIntradayOverlay:
         assert len(payload["dates"]) == self.DAYS + 1
         assert payload["dates"][-1] == date.today().isoformat()
         assert len(payload["candles"]["close"]) == self.DAYS + 1
-        assert payload["candles"]["close"][-1] == pytest.approx(FAKE_QUOTE["price"])
+        assert payload["candles"]["close"][-1] == pytest.approx(_fake_quote()["price"])
         assert "trend_intraday" in payload["indicators"]
         mock_ds_cls.return_value.fetch_latest_quote.assert_called_once()
 
@@ -149,12 +153,12 @@ class TestSymbolDetailIntradayOverlay:
         """Rule 4: quote carries an old trade date (e.g. suspended symbol)
         -> no synthetic bar, fall back to EOD even though the gate passed."""
         df = _daily_bars_ending(date.today() - timedelta(days=1))
-        stale_quote = dict(FAKE_QUOTE, ts=(date.today() - timedelta(days=3)).isoformat() + "T15:00:00")
+        stale_quote = dict(_fake_quote(), ts=(date.today() - timedelta(days=3)).isoformat() + "T15:00:00")
 
         with (
             patch.object(server, "get_db", return_value=_FakeDb(df)),
             patch.object(intraday_service, "is_past_market_open", return_value=True),
-            patch.object(intraday_service, "DataService") as mock_ds_cls,
+            patch.object(intraday_service, "get_data_service") as mock_ds_cls,
             patch.object(intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT),
             patch.object(server, "_config_name_map", return_value={}),
             patch.object(server, "_load_instruments_raw", return_value=[]),

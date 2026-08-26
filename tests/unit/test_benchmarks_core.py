@@ -1,46 +1,8 @@
-"""Unit tests for core.benchmarks — benchmark options and utilities."""
+"""Unit tests for core.benchmarks — 存活接口（P2-6 死 API 已删）。"""
 
 from __future__ import annotations
 
-from core.benchmarks import (
-    normalize_benchmark_mode,
-    benchmark_symbol_for_mode,
-    benchmark_label_for_mode,
-    benchmark_market_symbols,
-    benchmark_instruments,
-    BENCHMARK_MODE_EQUAL_WEIGHT,
-)
-
-
-class TestNormalizeBenchmarkMode:
-    def test_known_modes(self) -> None:
-        assert normalize_benchmark_mode("equal_weight_pool") == "equal_weight_pool"
-        assert normalize_benchmark_mode("csi500") == "csi500"
-
-    def test_case_insensitive(self) -> None:
-        assert normalize_benchmark_mode("CSI500") == "csi500"
-
-    def test_unknown_falls_back(self) -> None:
-        assert normalize_benchmark_mode("unknown") == BENCHMARK_MODE_EQUAL_WEIGHT
-
-    def test_none_falls_back(self) -> None:
-        assert normalize_benchmark_mode("") == BENCHMARK_MODE_EQUAL_WEIGHT
-
-
-class TestBenchmarkSymbolForMode:
-    def test_index_mode(self) -> None:
-        assert benchmark_symbol_for_mode("csi500") == "510500.SS"
-        assert benchmark_symbol_for_mode("chinext") == "159915.SZ"
-
-    def test_equal_weight_returns_empty(self) -> None:
-        assert benchmark_symbol_for_mode("equal_weight_pool") == ""
-
-
-class TestBenchmarkLabelForMode:
-    def test_returns_label(self) -> None:
-        label = benchmark_label_for_mode("csi500")
-        assert "中证500" in label
-        assert "510500" in label
+from core.benchmarks import benchmark_instruments, benchmark_market_symbols
 
 
 class TestBenchmarkUtilities:
@@ -51,5 +13,7 @@ class TestBenchmarkUtilities:
 
     def test_instruments(self) -> None:
         instruments = benchmark_instruments()
-        assert len(instruments) >= 2
-        assert instruments[0]["symbol"]
+        assert {i["symbol"] for i in instruments} == {"510500.SS", "159915.SZ"}
+        for item in instruments:
+            assert item["name"]
+            assert item["benchmark_mode"] in ("csi500", "chinext")

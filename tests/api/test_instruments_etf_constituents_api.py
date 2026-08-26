@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import time
 
-import pytest
-from fastapi.testclient import TestClient
 
+def _fresh_period() -> str:
+    """最近的季末日期（YYYYmmdd），保证 months_since_period 远小于 stale 阈值（>4 个月）。
 
-@pytest.fixture
-def anon_client(test_db):
-    from app.main import app
+    硬编码期次会随时间推移变成 stale 导致测试无故变红（时间炸弹）。
+    """
+    from datetime import date
 
-    with TestClient(app) as c:
-        yield c
+    today = date.today()
+    # 当季季末：3/6/9/12 月最后一天；取最近一个已过的季末
+    quarter_ends = [(3, 31), (6, 30), (9, 30), (12, 31)]
+    candidates = []
+    for year in (today.year - 1, today.year):
+        for month, day in quarter_ends:
+            d = date(year, month, day)
+            if d <= today:
+                candidates.append(d)
+    return max(candidates).strftime("%Y%m%d")
 
 
 def _seed_constituents(test_db) -> None:
@@ -25,7 +33,7 @@ def _seed_constituents(test_db) -> None:
             {"stock_symbol": "688999.SS", "stock_name": "未知次新", "weight": 1.0, "rank": 3},
             {"stock_symbol": "02269.HK", "stock_name": "药明生物", "weight": 8.3, "rank": 4},
         ],
-        "20260630",
+        _fresh_period(),
     )
     test_db.upsert_stock_industry(
         [
@@ -104,9 +112,9 @@ class TestPreviewEtfConstituents:
         assert resp.status_code == 200
         data = resp.json()
         assert data["ok"] is True
-        assert data["period"] == "20260630"
+        assert data["period"] == _fresh_period()
         assert isinstance(data["months_since_period"], (int, float))
-        assert data["stale"] is False  # 20260630 距测试当日 <2 个月
+        assert data["stale"] is False  # stale 阈值 = 距今 >4 个月；动态季末期次保证常新
         items = {i["stock_symbol"]: i for i in data["items"]}
         assert items["600519.SS"]["already_managed"] is False
         assert items["600519.SS"]["manageable"] is True

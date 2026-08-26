@@ -307,7 +307,40 @@ class TestEdgeCases:
 
     def test_nans_do_not_crash(self, with_nans) -> None:
         df = _make_bars(with_nans.to_numpy())
-        _ = sma(with_nans, 5)
-        _ = rsi(with_nans, 14)
-        _ = macd(with_nans)
-        _ = atr(df, 20)
+        sma_out = sma(with_nans, 5)
+        rsi_out = rsi(with_nans, 14)
+        macd_out = macd(with_nans)
+        atr_out = atr(df, 20)
+        # 输出长度与输入对齐，且末根 ATR 为有限值（NaN 不传播为崩溃/inf）
+        assert len(sma_out) == len(with_nans)
+        assert len(rsi_out) == len(with_nans)
+        assert len(macd_out["dif"]) == len(with_nans)
+        assert len(atr_out) == len(df)
+        assert np.isfinite(atr_out.iloc[-1])
+
+    # —— 自 test_indicators.py 合并的独有用例（P2-25 重复测试合并）——
+    def test_atr_period_one(self) -> None:
+        """period=1：每根 ATR 等于当根 TR。"""
+        df = pd.DataFrame({"high": [12.0, 13.0], "low": [8.0, 9.0], "close": [10.0, 11.0]})
+        result = atr(df, period=1)
+        assert result.iloc[0] == pytest.approx(4.0, abs=0.01)
+
+    def test_atr_zero_true_range(self) -> None:
+        """high=low=close 时 TR=0、ATR=0（与 test_atr_constant_bars 的非零变体互补）。"""
+        df = pd.DataFrame({"high": [10.0] * 10, "low": [10.0] * 10, "close": [10.0] * 10})
+        assert atr(df, period=5).iloc[-1] == 0.0
+
+    def test_atr_single_row(self) -> None:
+        df = pd.DataFrame({"high": [11.0], "low": [9.0], "close": [10.0]})
+        result = atr(df, period=20)
+        assert len(result) == 1
+        assert result.iloc[0] == 2.0
+
+    def test_er_noisy_sideways(self) -> None:
+        rng = np.random.default_rng(123)
+        s = pd.Series(10.0 + rng.normal(0, 0.5, 50), dtype=float)
+        assert efficiency_ratio(s, period=10).iloc[-1] < 0.5
+
+    def test_er_period_larger_than_data(self) -> None:
+        s = pd.Series([10.0, 11.0, 12.0], dtype=float)
+        assert efficiency_ratio(s, period=10).iloc[-1] == 0.0

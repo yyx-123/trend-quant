@@ -77,7 +77,7 @@ class ValueResolver:
             value = position.chandelier_stop if position.is_open else None
         elif name == "chandelier_stop_ratchet":
             value = position.chandelier_stop_ratchet if position.is_open else None
-        elif name == "days_since_last_exit":
+        elif name == "days_since_last_exit":  # noqa: SIM102 —— 冷却期语义注释块保留嵌套结构
             # 离场冷却期：空仓也可解析（区别于上面四个持仓期状态值）。
             # 从未卖出 → None；condition_engine 对 `>=` 特判为通过
             # （首次入场不受冷却限制）。bar_idx 与 last_exit_bar_idx 同

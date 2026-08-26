@@ -10,15 +10,20 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path as _Path
+
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 import sqlite3
 import sys
 from pathlib import Path
 
-DB_PATH = Path("data/trend_quant.db")
+import _common  # .env 加载 + DB_PATH + TickFlow 构造（P2-13）
+
+DB_PATH = _common.DB_PATH
 OUT_PATH = Path("scripts/temp/sw2021_seed.sql")
 
 TABLES = ("stock_industry", "etf_constituents")
-
 
 def main() -> int:
     if not DB_PATH.exists():
@@ -64,7 +69,6 @@ def main() -> int:
     OUT_PATH.write_text("\n".join(lines), encoding="utf-8")
     print(f"[export] 已生成 {OUT_PATH}（{total} 行 + 树配置）")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

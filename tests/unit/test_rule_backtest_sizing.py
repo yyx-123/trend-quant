@@ -15,7 +15,11 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
-from rule_backtest import BacktestExecutionConfig, RuleBacktestRequest, SingleSymbolAllInBacktestEngine
+from rule_backtest import (
+    BacktestExecutionConfig,
+    RuleBacktestRequest,
+    SingleSymbolAllInBacktestEngine,
+)
 from rule_backtest.sizing import FixedPctSizer, KellySizer, RiskBudgetSizer
 
 
@@ -70,7 +74,7 @@ def run_engine(bars, sizer=None, strategy=None, initial_capital=100_000.0):
             symbol="TEST",
             bars=bars,
             execution=BacktestExecutionConfig(
-                initial_capital=initial_capital, slippage=0.0, fee_rate=0.0, fee_min=0.0
+                initial_capital=initial_capital  # 默认费率（系统不提供零成本场景）
             ),
             sizer=sizer,
         )
@@ -82,19 +86,24 @@ class TestFixedPctIntegration:
         result = run_engine(make_bars([10.0, 10.0, 10.0]), sizer=FixedPctSizer(pct=0.5))
         buys = [t for t in result["trades"] if t["side"] == "BUY"]
         assert len(buys) == 1
-        assert buys[0]["qty"] == 5000  # 50% of 100k at 10.0
+        # 默认费率（零值归一）：exec=10.02，target=floor(50000/10.02/100)*100=4900
+        assert buys[0]["qty"] == 4900
         sizing = buys[0]["sizing"]
         assert sizing["sizer_type"] == "fixed_pct"
-        assert sizing["position_pct"] == pytest.approx(0.5)
+        # position_pct 含费用口径：(4900×10.02+5)/100000
+        assert sizing["position_pct"] == pytest.approx(0.49103)
         assert sizing["flags"] == []
         nav = result["daily_nav"][-1]
-        assert nav["cash"] == pytest.approx(50_000.0)  # idle cash, no P&L
-        assert nav["equity"] == pytest.approx(100_000.0)
+        # cash = 100000 − 4900×10.02 − max(gross×0.0000854, 5) = 50897
+        assert nav["cash"] == pytest.approx(50_897.0)
+        # equity = cash + 4900×10 = 99897（买入佣金与滑点成本已实现）
+        assert nav["equity"] == pytest.approx(99_897.0)
 
     def test_no_sizer_keeps_all_in(self):
         result = run_engine(make_bars([10.0, 10.0, 10.0]), sizer=None)
         buys = [t for t in result["trades"] if t["side"] == "BUY"]
-        assert buys[0]["qty"] == 10000
+        # 默认费率（零值归一）：全仓 affordable = 9900（10000 会超出预算）
+        assert buys[0]["qty"] == 9900
         assert "sizing" not in buys[0]
         assert result["sizer_id"] == ""
 
@@ -111,7 +120,9 @@ class TestKellyIntegration:
 
         buys = [t for t in result["trades"] if t["side"] == "BUY"]
         sells = [t for t in result["trades"] if t["side"] == "SELL"]
-        assert [t["qty"] for t in buys] == [10000, 600, 600]
+        # 默认费率（零值归一）：首笔全仓 affordable=9900；后两笔 Kelly 地板 10%
+        # equity 下取整到百位均为 600（与零费率时相同）
+        assert [t["qty"] for t in buys] == [9900, 600, 600]
         # first buy: no history -> all-in, unflagged
         assert buys[0]["sizing"]["flags"] == []
         # later buys: all-loss history -> Kelly floor (10% of equity)
@@ -119,8 +130,10 @@ class TestKellyIntegration:
         assert buys[2]["sizing"]["flags"] == ["kelly_floor_applied"]
         assert buys[1]["sizing"]["position_pct"] == pytest.approx(0.10, abs=0.02)  # lot rounding: 7200/80000
         # SELL trades carry avg_cost for the net-return basis
-        assert sells[0]["avg_cost"] == pytest.approx(10.0)
-        assert sells[0]["pnl"] == pytest.approx(-20_000.0)
+        # 默认费率：avg_cost=(gross+commission)/qty=99206.47/9900≈10.02086
+        assert sells[0]["avg_cost"] == pytest.approx(99206.47 / 9900, rel=1e-6)
+        # pnl = 卖出净额 − 买入净成本 ≈ 79034.85 − 99206.47
+        assert sells[0]["pnl"] == pytest.approx(79034.85 - 99206.47, rel=1e-6)
         assert result["sizer_id"] == "k1"
         assert result["sizer_name"] == "凯利"
 
@@ -144,11 +157,11 @@ class TestKellyIntegration:
         sizer = KellySizer()
         result = run_engine(make_bars(closes), sizer=sizer, strategy=strategy)
         buys = [t for t in result["trades"] if t["side"] == "BUY"]
-        # day1 buy@10 all-in 10000; day2 sell@12 (+20%); day3 buy: history=1 win,
-        # no losses -> f*=p=1.0 -> all-in of 120000 at 8 -> 15000; day4 sell@20 (+150%)...
-        # Actually simpler assertion: second buy uses Kelly with only wins -> all-in.
-        assert buys[0]["qty"] == 10000
-        assert buys[1]["qty"] == 15000
+        # day1 buy@10 all-in（默认费率 affordable=9900）；day2 sell@12 (+20%)；
+        # day3 buy: history=1 win, no losses -> f*=p=1.0 -> all-in at 8
+        # （现金≈119345.80，exec=8.016 → 14800）；day4 sell@20 (+150%)
+        assert buys[0]["qty"] == 9900
+        assert buys[1]["qty"] == 14800
         assert buys[1]["sizing"]["flags"] == []
 
 

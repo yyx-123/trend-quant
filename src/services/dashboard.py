@@ -10,19 +10,39 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict
-from math import isfinite
 
 import numpy as np
 import pandas as pd
 
-from data.indicator_store import get_series
+from audit.app_logger import get_logger
 from core.indicators import detect_macd_phase, kline_mini, macd_mini
-from core.trend import _detect_trend_phase
+from core.trend import TREND_FORMULA_VERSION, _detect_trend_phase
+from data.indicator_store import get_series
 from data.storage.db import get_db
-from core.trend import TREND_FORMULA_VERSION
-from services.market_indicators import compute_trend_indicator, trend_config
 
-DISPLAY_DAYS = 61
+logger = get_logger(__name__)
+
+# 看板共用件（EOD/盘中同一来源，P1-14；盘中侧在 data/intraday_service）
+from core.numfmt import number_or_none as _number
+from services.dashboard_common import (
+    DISPLAY_DAYS,
+)
+from services.dashboard_common import (
+    assign_strength as _assign_strength,
+)
+from services.dashboard_common import (
+    key_tuple as _key_tuple,
+)
+from services.dashboard_common import (
+    ma5 as _ma5,
+)
+from services.dashboard_common import (
+    macd_counts as _macd_counts,
+)
+from services.dashboard_common import (
+    priority as _priority,
+)
+
 SOURCE_HISTORY_DAYS = 90
 # MACD 相位/K线 mini 图的历史窗口：与盘中看板 (intraday_service) 同口径，
 # EMA26/DEA9 需要足够预热长度，且长趋势的金叉日可能远在 90 日窗口之前。
@@ -50,34 +70,10 @@ class RevisionCache:
             return payload
 
 
-def _number(value: object) -> float | None:
-    try:
-        result = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return result if isfinite(result) else None
-
-
-def _ma5(values: list[float | None]) -> list[float | None]:
-    series = pd.Series(values, dtype="float64").rolling(5, min_periods=5).mean()
-    return [_number(value) for value in series]
-
-
-def _strength(values: list[float], value: float | None) -> int | None:
-    if value is None or not values:
-        return None
-    return round(sum(score <= value for score in values) * 100 / len(values))
-
-
-def _priority(value: object) -> int:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 999999
-
-
-def _key_tuple(key: object) -> tuple[object, ...]:
-    return key if isinstance(key, tuple) else (key,)
+# 模块级单例（P2-10）：Web（routers/subject_market）与 MCP（trend_mcp/server）
+# 共用同一份缓存——此前两边各 new 一个，同一份秒级全市场计算被缓存两份，
+# 冷启动/数据更新后双倍开销。
+dashboard_revision_cache = RevisionCache()
 
 
 def _aggregate_daily(frame: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:
@@ -174,17 +170,6 @@ def _build_level_summaries(calculated: pd.DataFrame, group_columns: list[str]) -
     return summaries
 
 
-def _assign_strength(items: list[dict], scope_columns: tuple[str, ...]) -> None:
-    values_by_scope: dict[tuple[str, ...], list[float]] = defaultdict(list)
-    for item in items:
-        value = _number(item.get("trend_ma5"))
-        if value is not None:
-            values_by_scope[tuple(str(item[column]) for column in scope_columns)].append(value)
-    for item in items:
-        scope = tuple(str(item[column]) for column in scope_columns)
-        item["strength"] = _strength(values_by_scope[scope], _number(item.get("trend_ma5")))
-
-
 def _assign_envelope(item: dict, components: list[dict]) -> None:
     """Attach MA5 extrema of ``components`` to ``item``, aligned by trading date."""
     values_by_date: dict[str, list[float]] = defaultdict(list)
@@ -221,23 +206,13 @@ def _empty_macd_kline() -> dict:
     }
 
 
-def _macd_counts(instruments: list[dict]) -> dict:
-    """金叉/死叉家数：类目行的 MACD 相位聚合口径（成员相位计数）。"""
-    golden = sum(1 for item in instruments if item.get("macd_phase") == "golden")
-    dead = sum(1 for item in instruments if item.get("macd_phase") == "dead")
-    return {"macd_golden_count": golden, "macd_dead_count": dead}
-
-
 def _macd_kline_payloads(db) -> dict[str, dict]:
     """Per-symbol MACD cross phase + 10-day kline mini from the 1y qfq tail.
 
     仅具体标的级使用。MACD 用与盘中看板同口径的 1 年尾部收盘价计算
     （warmup=True，与 indicator_daily 缓存的 macd_dif/dea 一致）。
     """
-    try:
-        rows = db.load_market_tail(days=MACD_HISTORY_DAYS)
-    except AttributeError:
-        return {}
+    rows = db.load_market_tail(days=MACD_HISTORY_DAYS)
     if not rows:
         return {}
     frame = pd.DataFrame(rows)

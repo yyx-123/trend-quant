@@ -11,10 +11,13 @@ from pydantic import BaseModel, Field
 from services import auth
 from services import trade_records as tr
 from services.manual_trade import compute_manual_trade
-from services.stop_loss import StopLossError
+from services.stop_loss import StopLossError, stop_mode_toggle_title
 
 router = APIRouter(prefix="/manual-trade", tags=["manual-trade"])
-templates = Jinja2Templates(directory="web/templates")
+from core.paths import web_dir as _web_dir
+
+_templates_dir = _web_dir() / "templates"
+templates = Jinja2Templates(directory=str(_templates_dir))
 
 StopMode = Literal["tight", "loose"]
 
@@ -51,7 +54,7 @@ class TradeListRequest(BaseModel):
 @router.get("", response_class=HTMLResponse)
 async def manual_trade_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
-        name="manual_trade.html", request=request, context={"title": "手工交易"}
+        name="manual_trade.html", request=request, context={"stop_mode_title": stop_mode_toggle_title(), "title": "手工交易"}
     )
 
 

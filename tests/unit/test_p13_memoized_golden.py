@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from rule_backtest import BacktestExecutionConfig, RuleBacktestRequest, SingleSymbolAllInBacktestEngine
+from rule_backtest import (
+    BacktestExecutionConfig,
+    RuleBacktestRequest,
+    SingleSymbolAllInBacktestEngine,
+)
 from rule_backtest.value_resolver import ValueResolver
 
 

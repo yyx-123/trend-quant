@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
 
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -34,6 +35,7 @@ class SchedulerManager:
         update_job: Callable[[], None],
         intraday_snapshot_job: Callable[[], None] | None = None,
         industry_sync_job: Callable[[], None] | None = None,
+        backup_job: Callable[[], None] | None = None,
     ) -> None:
         if self.scheduler is not None:
             return
@@ -51,6 +53,18 @@ class SchedulerManager:
             misfire_grace_time=7200,
             coalesce=True,
         )
+
+        if backup_job is not None:
+            # 每日 DB 备份（P1-2）：凌晨 3:00 低峰执行，keep=1 只留最新一份；
+            # 错过当天不补（次日再备），misfire 宽限 2h。
+            scheduler.add_job(
+                backup_job,
+                trigger=CronTrigger(hour=3, minute=0),
+                id="daily_db_backup",
+                replace_existing=True,
+                misfire_grace_time=7200,
+                coalesce=True,
+            )
 
         if industry_sync_job is not None:
             # 申万行业分类月度同步（TickFlow universes，免费）：每月 1 日凌晨
@@ -79,6 +93,18 @@ class SchedulerManager:
                     misfire_grace_time=60,
                     coalesce=True,
                 )
+
+        # 任务执行异常/misfire 显式记日志（默认只进 apscheduler logger 的
+        # 低级别记录，容易被淹没，P2-22）
+        def _job_event(event):
+            if event.exception:
+                logger.error(
+                    "Scheduled job %s raised: %s", event.job_id, event.exception, exc_info=event.exception
+                )
+            else:
+                logger.warning("Scheduled job %s missed its run time", event.job_id)
+
+        scheduler.add_listener(_job_event, EVENT_JOB_ERROR | EVENT_JOB_MISSED)
 
         scheduler.start()
         self.scheduler = scheduler

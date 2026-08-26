@@ -34,9 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from dotenv import load_dotenv
-
-load_dotenv()
+import _common  # .env 加载（锚定项目根）+ DB_PATH（P2-13）
 
 from data.service import DataService
 from data.storage.db import init_db
@@ -59,7 +57,7 @@ def save_checkpoint(state: dict) -> None:
 
 
 def qfq_nonpositive_symbols(db) -> list[str]:
-    with db._connect() as conn:  # noqa: SLF001 — 迁移脚本允许直连
+    with db._connect() as conn:
         rows = conn.execute(
             "SELECT DISTINCT symbol FROM market_data_qfq WHERE close <= 0 OR open <= 0"
         ).fetchall()
@@ -85,7 +83,7 @@ def verify_against_vendor(service: DataService, symbols: list[str], start: date,
             merged = local.merge(vendor, on="d", suffixes=("_local", "_vendor"))
             rel = (merged["close_local"] - merged["close_vendor"]).abs() / merged["close_vendor"].replace(0, 1)
             report[symbol] = f"rows={len(merged)} max_rel_err={float(rel.max()):.2e}"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             report[symbol] = f"error: {exc}"
     return report
 
@@ -104,7 +102,7 @@ def main() -> int:
 
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end)
-    db = init_db()
+    db = init_db(_common.DB_PATH)
     service = DataService()
 
     if args.symbols:

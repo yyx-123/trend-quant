@@ -76,8 +76,12 @@ class TestDestroy:
         assert auth.resolve_session(token, db=db) == (None, False)
 
     def test_destroy_none_is_noop(self, env) -> None:
-        db, _ = env
-        auth.destroy_session(None, db=db)  # 不抛异常即可
+        db, user = env
+        token = auth.issue_session(user["id"], db=db)
+        auth.destroy_session(None, db=db)  # None 不应误删任何 session
+        resolved, _ = auth.resolve_session(token, db=db)
+        assert resolved is not None
+        assert resolved["username"] == user["username"]
 
     def test_issue_cleans_expired_sessions(self, env) -> None:
         db, user = env

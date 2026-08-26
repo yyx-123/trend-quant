@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
-import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-LOG_DIR = Path("logs/app")
+from core.env import trend_log_dir
+from core.paths import logs_dir
+
+LOG_DIR = logs_dir() / "app"
 APP_LOG_PATH = LOG_DIR / "app.log"
 ACCESS_LOG_PATH = LOG_DIR / "access.log"
 
@@ -26,8 +28,10 @@ def _log_dir() -> Path:
     测试进程（tests/api/conftest.py）指向 logs/test，避免 TestClient 的
     httpx/uvicorn 日志混进生产日志文件。注意在 setup_logging 调用时取值
     （而非模块导入时），保证 conftest 先设环境变量再 import app.main 生效。
+    默认目录以 __file__ 锚定项目根（P2-13）。
     """
-    return Path(os.getenv("TREND_QUANT_LOG_DIR", str(LOG_DIR)))
+    override = trend_log_dir()
+    return Path(override) if override else LOG_DIR
 
 
 def setup_logging(level: str = "INFO") -> None:

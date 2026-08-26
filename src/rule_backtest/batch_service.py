@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import math
 import threading
 from datetime import date, datetime
@@ -19,6 +18,8 @@ from typing import Any
 
 import pandas as pd
 
+from audit.app_logger import get_logger
+from core.calendar import market_now
 from data.storage import db as db_module
 from data.storage.db import Database
 from data.storage.market_store import MarketStore
@@ -26,7 +27,7 @@ from rule_backtest.engine import SingleSymbolAllInBacktestEngine
 from rule_backtest.loader import StrategyLoader
 from rule_backtest.models import DEFAULT_FEE_RATE, BacktestExecutionConfig, RuleBacktestRequest
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # 低于该 K 线数的标的整标的记 skipped（指标 warmup 都不够）。
 MIN_BARS = 60
@@ -137,7 +138,7 @@ def default_batch_name(
     if start_date is not None or end_date is not None:
         window = f"{start_date.isoformat() if start_date else '上市'}~{end_date.isoformat() if end_date else '最新'}"
         return f"{base}-{window}"
-    return f"{base}-{date.today().isoformat()}"
+    return f"{base}-{market_now().date().isoformat()}"
 
 
 def compute_features(
@@ -421,6 +422,10 @@ class BatchBacktestService:
             # 实际 window_end（= end_date or 锚定日）。展示/重跑预填用原始值。
             "end_date": end_date.isoformat() if end_date else None,
             "estimated_seconds": round(estimate_batch_seconds(eta_symbols, len(snapshot))),
+            # 标的快照随批次冻结（与策略快照同理）：run_batch 直接读快照，
+            # prepare 之后新增/禁用/改类目标的不影响本批次的格子集合，
+            # 实际执行格子数与 total_cells 始终一致。
+            "symbols": symbols,
         }
         return {
             "batch_id": batch_id,
@@ -453,7 +458,9 @@ class BatchBacktestService:
         window_start = date.fromisoformat(config["start_date"]) if config.get("start_date") else None
         window_end_cfg = date.fromisoformat(config["end_date"]) if config.get("end_date") else None
         window_end = min(window_end_cfg, anchor) if window_end_cfg else anchor
-        symbols = resolve_batch_symbols(self.db, categories)
+        # 标的快照在 prepare 时已冻结进 config；旧批次（无快照字段）回退为
+        # 按类目重新解析（行为与之前一致）。
+        symbols = config.get("symbols") or resolve_batch_symbols(self.db, categories)
 
         counts = {"done": 0, "ok": 0, "failed": 0, "skipped": 0}
         started_at = datetime.now()
@@ -537,6 +544,7 @@ class BatchBacktestService:
                         break
 
             cancelled = cancel_event.is_set()
+            self._flush_counts(batch_id, counts, force=True)
             self.db.update_batch_run(
                 batch_id,
                 status="cancelled" if cancelled else "completed",
@@ -575,7 +583,13 @@ class BatchBacktestService:
             }
         )
 
-    def _flush_counts(self, batch_id: str, counts: dict) -> None:
+    # counts 每 20 格 flush 一次（终态强制 flush）：单格 insert + counts 更新
+    # 是两次事务，3000 格批次从 6000+ 次 WAL 刷盘降到约 1/20（P2-18）。
+    _COUNTS_FLUSH_EVERY = 20
+
+    def _flush_counts(self, batch_id: str, counts: dict, *, force: bool = False) -> None:
+        if not force and counts["done"] % self._COUNTS_FLUSH_EVERY != 0:
+            return
         self.db.update_batch_run(
             batch_id,
             done_cells=counts["done"],

@@ -7,26 +7,33 @@ instrument_add / instrument_bulk_backfill / instrument_backfill).
 
 from __future__ import annotations
 
-import logging
 import threading
 from collections.abc import Callable
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
-from data.service import DataService
+from core.symbols import normalize_symbol
+
+if TYPE_CHECKING:
+    from data.service import DataService
+
+# P1-14：原 instrument_admin 的纯转发包装已删，直接用 core 层实现
+_normalize_symbol = normalize_symbol
+from audit.app_logger import get_logger
+from data.service import get_data_service
 from data.storage.db import get_db, record_job_run_safely
 from services.indicator_builder import rebuild_after_backfill
 from services.instrument_admin import (
     _append_instrument_config,
     _build_new_instrument_record,
     _known_managed_symbols,
-    _normalize_symbol,
     add_constituent_stock,
 )
 from services.stock_industry import is_a_share
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 def _empty_bulk_status() -> dict:
     return {
@@ -50,6 +57,10 @@ def _empty_bulk_status() -> dict:
     }
 
 
+
+from core.strategy_config import backfill_start_date as _backfill_start_date
+
+
 class BulkBackfillJobManager:
     def __init__(
         self,
@@ -58,7 +69,7 @@ class BulkBackfillJobManager:
         self._lock = threading.Lock()
         self._status = _empty_bulk_status()
         self._data_service_factory = data_service_factory or (
-            lambda provider_priority: DataService(provider_priority=provider_priority)
+            lambda provider_priority: get_data_service()
         )
 
     def snapshot(self) -> dict:
@@ -86,6 +97,12 @@ class BulkBackfillJobManager:
             if self._status.get("status") == "running":
                 return False, self._copy_status()
 
+            record_job_run_safely(
+                "instrument_bulk_backfill",
+                {"job_id": job_id, "total": len(items)},
+                run_date=now.date().isoformat(),
+                status="running",
+            )
             self._status = {
                 "job_id": job_id,
                 "status": "running",
@@ -277,9 +294,9 @@ class BulkBackfillJobManager:
                     self._status["error"] = str(exc)
                     self._status["message"] = f"后台补齐任务失败：{exc}"
         finally:
-            close = getattr(data_service, "close", None)
-            if callable(close):
-                close()
+            # 默认 factory 返回进程级共享单例（P2-11），一律不 close；
+            # 测试注入的私有 fake 由测试自行管理生命周期。
+            pass
 
 
 bulk_backfill_manager = BulkBackfillJobManager()
@@ -315,7 +332,7 @@ class InstrumentAddJobManager:
         self._status = _empty_add_status()
         self._pending_symbols: set[str] = set()
         self._data_service_factory = data_service_factory or (
-            lambda provider_priority: DataService(provider_priority=provider_priority)
+            lambda provider_priority: get_data_service()
         )
 
     def snapshot(self) -> dict:
@@ -348,6 +365,13 @@ class InstrumentAddJobManager:
         with self._lock:
             if self._status.get("status") == "running":
                 return False, self._copy_status()
+
+            record_job_run_safely(
+                "instrument_add",
+                {"job_id": job_id, "symbol": str(item.get("symbol") or "")},
+                run_date=now.date().isoformat(),
+                status="running",
+            )
             if symbol in self._pending_symbols:
                 return False, self._copy_status()
 
@@ -429,7 +453,7 @@ class InstrumentAddJobManager:
 
             result = data_service.backfill_daily_history(
                 symbol=symbol,
-                start_date=date(2020, 1, 1),
+                start_date=_backfill_start_date(),
                 end_date=end_date,
                 adjust=adjust,
             )
@@ -469,9 +493,6 @@ class InstrumentAddJobManager:
                     self._status["error"] = str(exc)
                     self._status["message"] = f"新增标的任务失败：{exc}"
         finally:
-            close = getattr(data_service, "close", None)
-            if callable(close):
-                close()
             with self._lock:
                 self._pending_symbols.discard(symbol)
 
@@ -516,7 +537,7 @@ class EtfConstituentImportJobManager:
         self._lock = threading.Lock()
         self._status = _empty_etf_import_status()
         self._data_service_factory = data_service_factory or (
-            lambda provider_priority: DataService(provider_priority=provider_priority)
+            lambda provider_priority: get_data_service()
         )
 
     def snapshot(self) -> dict:
@@ -548,6 +569,13 @@ class EtfConstituentImportJobManager:
         with self._lock:
             if self._status.get("status") == "running":
                 return False, self._copy_status()
+
+            record_job_run_safely(
+                "etf_constituent_import",
+                {"job_id": job_id, "etf_symbol": etf_symbol},
+                run_date=now.date().isoformat(),
+                status="running",
+            )
             self._status = {
                 **_empty_etf_import_status(),
                 "job_id": job_id,
@@ -625,7 +653,7 @@ class EtfConstituentImportJobManager:
                             "hit": bool(outcome.get("hit")),
                         }
                     )
-                    backfill_items.append({"symbol": symbol, "start_date": date(2020, 1, 1)})
+                    backfill_items.append({"symbol": symbol, "start_date": _backfill_start_date()})
                 elif status == "skipped":
                     skipped.append({"symbol": symbol, "name": name, "reason": "already_managed"})
                 else:
@@ -710,9 +738,25 @@ class EtfConstituentImportJobManager:
                     self._status["error"] = str(exc)
                     self._status["message"] = f"ETF 重仓股导入失败：{exc}"
         finally:
-            close = getattr(data_service, "close", None)
-            if callable(close):
-                close()
+            # 默认 factory 返回进程级共享单例（P2-11），一律不 close；
+            # 测试注入的私有 fake 由测试自行管理生命周期。
+            pass
 
 
 etf_constituent_import_manager = EtfConstituentImportJobManager()
+
+# ---------------------------------------------------------------------------
+# 进程重启清理（P2-9）
+# ---------------------------------------------------------------------------
+def mark_interrupted_at_startup(db=None) -> int:
+    """启动清扫（P2-9）：job_runs 中停在 running 且无配对终态行的任务
+    标记为 interrupted（比照批量回测的 mark_interrupted_batch_runs）。
+
+    任务运行时状态虽在内存，但 start() 会落 status=running 的 job_run；
+    进程重启后该行为孤儿——启动时清扫标记，任务历史可追溯。
+    返回被标记的行数。
+    """
+    db = db or get_db()
+    return db.mark_interrupted_job_runs(
+        ["instrument_bulk_backfill", "instrument_add", "etf_constituent_import"]
+    )

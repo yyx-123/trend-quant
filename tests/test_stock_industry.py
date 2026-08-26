@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.integration
+
+
 import tempfile
 import unittest
 from pathlib import Path
 
-from data.storage.db import Database, init_db
+from data.storage.db import Database, init_db, reset_db_instance_for_tests
 from services.stock_industry import (
     _build_industry_rows,
     add_missing_tree_branches,
@@ -40,6 +45,7 @@ class MergeTreeBranchesTest(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        reset_db_instance_for_tests()
         self._tmp.cleanup()
 
     def test_adds_missing_l2_branch(self) -> None:
@@ -191,6 +197,7 @@ class StockIndustryDbTest(unittest.TestCase):
         self.db = Database(Path(self._tmp.name) / "test.db")
 
     def tearDown(self) -> None:
+        reset_db_instance_for_tests()
         self._tmp.cleanup()
 
     def _row(self, symbol: str, l1: str = "电子", l2: str = "半导体") -> dict:
@@ -255,6 +262,7 @@ class EtfConstituentsDbTest(unittest.TestCase):
         self.db = Database(Path(self._tmp.name) / "test.db")
 
     def tearDown(self) -> None:
+        reset_db_instance_for_tests()
         self._tmp.cleanup()
 
     def _rows(self, stocks: list[str], start_rank: int = 1) -> list[dict]:
@@ -306,6 +314,7 @@ class ResolveAndReclassifyTest(unittest.TestCase):
         self.db = init_db(Path(self._tmp.name) / "test.db")  # get_db() 全局可用
 
     def tearDown(self) -> None:
+        reset_db_instance_for_tests()
         self._tmp.cleanup()
 
     def _seed_tree(self) -> None:
@@ -396,7 +405,6 @@ class ResolveAndReclassifyTest(unittest.TestCase):
             "tickflow_universe",
         )
 
-        before = self.db.get_instrument_metadata("600519.SS")["updated_at"]
         result = reclassify_pending_stocks(db=self.db)
 
         self.assertEqual(result["pending"], 2)
@@ -472,6 +480,7 @@ class AddConstituentStockTest(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        reset_db_instance_for_tests()
         self._tmp.cleanup()
 
     def test_add_with_classification(self) -> None:

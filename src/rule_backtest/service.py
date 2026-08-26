@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import date, datetime
-import logging
-from pathlib import Path
-import re
 
 import pandas as pd
 
+from audit.app_logger import get_logger
 from data.storage.market_store import MarketStore
 from rule_backtest.engine import SingleSymbolAllInBacktestEngine
 from rule_backtest.loader import StrategyLoader
 from rule_backtest.models import DEFAULT_FEE_RATE, BacktestExecutionConfig, RuleBacktestRequest
 from rule_backtest.registry import registry_payload
-from rule_backtest.sizing import PositionStrategyLoader, build_sizer, sizer_types_payload, sizing_flags_payload
+from rule_backtest.sizing import (
+    PositionStrategyLoader,
+    build_sizer,
+    sizer_types_payload,
+    sizing_flags_payload,
+)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Per-strategy fields kept when a backtest result is serialized for the
 # frontend. Per-bar series (daily_nav, charts, drawdown, benchmark.series,
@@ -337,8 +341,11 @@ class RuleBacktestService:
         if bars.empty:
             return bars
         df = bars.copy()
-        if "date" not in df.columns and "time" in df.columns:
-            df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+        if "date" not in df.columns:
+            if "time" in df.columns:
+                df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+            else:
+                raise ValueError("行情数据缺少时间列（需要 date 或 time 列）")
         else:
             df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
         if start_date is not None:

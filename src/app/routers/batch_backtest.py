@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import threading
 from datetime import date
 
@@ -17,6 +16,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from audit.app_logger import get_logger
 from data.storage import db as db_module
 from rule_backtest.batch_service import (
     BatchBacktestService,
@@ -26,10 +26,13 @@ from rule_backtest.batch_service import (
 )
 from rule_backtest.loader import StrategyLoader
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/batch-backtest", tags=["batch-backtest"])
-templates = Jinja2Templates(directory="web/templates")
+from core.paths import web_dir as _web_dir
+
+_templates_dir = _web_dir() / "templates"
+templates = Jinja2Templates(directory=str(_templates_dir))
 
 # In-memory cancel events for running batches (per-process, like _rule_jobs;
 # a restart orphans the worker thread anyway and startup cleanup marks the

@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import pandas as pd
 
+from audit.app_logger import get_logger
 from core import indicators as core_ind
 from core.indicators import INDICATOR_FORMULA_VERSION
 from core.strategy_config import get_strategy_config
 from core.trend import TREND_FORMULA_VERSION, calculate_trend_score_series
 from data.storage.db import get_db
+
+logger = get_logger(__name__)
 
 INDICATOR_COLUMNS: tuple[str, ...] = (
     "atr", "vol_ma20", "er10",
@@ -53,11 +56,8 @@ def compute_indicator_frame(df: pd.DataFrame, trend_cfg: dict | None = None) -> 
     close = pd.to_numeric(df["close"], errors="coerce")
     volume = pd.to_numeric(df["volume"], errors="coerce") if "volume" in df.columns else pd.Series(0.0, index=df.index)
 
-    delta = close.diff()
-    gain = delta.clip(lower=0.0)
-    loss = (-delta).clip(lower=0.0)
-    avg_gain = gain.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    avg_gain = _rsi_components(close, "rsi_avg_gain")
+    avg_loss = _rsi_components(close, "rsi_avg_loss")
 
     macd_out = core_ind.macd(close, warmup=True)
     boll_out = core_ind.bollinger(close)
@@ -211,6 +211,9 @@ def get_series(symbol: str, indicator: str, db=None, since: str | None = None) -
             out.index = pd.to_datetime(frame["time"], errors="coerce")
             return out
 
+    # 缓存未命中/过期 → live 重算回退（P2-21：回退路径补日志，原先静默——
+    # 缓存长期失效时每次读都在全量重算而无人知晓）
+    logger.info("indicator cache miss for %s/%s; falling back to live compute", symbol, indicator)
     bars = db.load_market_data(symbol)
     if bars.empty:
         return pd.Series(dtype=float)

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
 import sys
 import tempfile
 import unittest
@@ -13,10 +18,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from data.storage.db import Database  # noqa: E402
-from fetch_etf_holdings import fetch_top10  # noqa: E402
-from sync_sw_tushare import fetch_sw_rows, industry_change_report  # noqa: E402
-from tushare_common import prev_period, target_period  # noqa: E402
+from fetch_etf_holdings import fetch_top10
+from sync_sw_tushare import fetch_sw_rows, industry_change_report
+from tushare_common import prev_period, target_period
+
+from data.storage.db import Database
 
 
 class PeriodLogicTest(unittest.TestCase):

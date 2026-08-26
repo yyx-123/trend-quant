@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.integration
+
+
 import sys
 import tempfile
 import unittest
@@ -11,8 +16,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import migrate_category_sw2021 as mig  # noqa: E402
-from data.storage.db import Database  # noqa: E402
+import migrate_category_sw2021 as mig
+
+from data.storage.db import Database
 
 TREE = [
     {

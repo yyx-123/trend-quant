@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from core.settings import load_settings, Settings, AppSettings
+from core.settings import Settings, load_settings
 
 
 class TestLoadSettings:
@@ -47,5 +47,4 @@ class TestLoadSettings:
             )
             settings = load_settings(config_path)
             assert settings.app.daily_update_max_retries == 2
-            assert settings.tickflow.plan == "starter"
             assert settings.app.data_provider_priority == ["tickflow"]

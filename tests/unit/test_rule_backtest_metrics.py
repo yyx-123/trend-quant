@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 
 from rule_backtest.metrics import (
+    annual_returns,
     compute_annual_returns,
     compute_drawdown,
     compute_monthly_heatmap,
     compute_summary,
-    annual_returns,
     monthly_returns,
 )
 
@@ -145,9 +145,17 @@ class TestAnnualReturns:
 
 class TestMonthlyReturns:
     def test_returns_monthly_data(self) -> None:
-        nav = _make_nav([100_000, 105_000] * 15)
+        # 1月 30 天（末日 10 万）+ 2月 28 天（末日 11 万）→ 2月收益 +10%
+        nav = _make_nav([100_000] * 30 + [110_000] * 28)
         result = monthly_returns(nav)
-        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["month"] == "2025-02"
+        assert result[0]["return"] == pytest.approx(0.1)
+
+    def test_single_month_returns_empty(self) -> None:
+        """单月份数据无跨月 pct_change → 空列表（不是 None、不是占位行）。"""
+        nav = _make_nav([100_000, 105_000] * 15)
+        assert monthly_returns(nav) == []
 
 
 class TestComputeMonthlyHeatmap:

@@ -32,6 +32,17 @@ def _disable_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_login_guard() -> None:
+    """每个用例重置登录限流状态：全测试会话共享 testclient IP，累计登录
+    尝试不应触发 20 次/分钟的生产阈值。"""
+    from services.login_guard import login_guard
+
+    login_guard._ip_hits.clear()
+    login_guard._fail_counts.clear()
+    login_guard._locked_until.clear()
+
+
+@pytest.fixture(autouse=True)
 def isolate_api_db(test_db, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the FastAPI app use *test_db* instead of the production DB."""
     import data.storage.db as db_module
@@ -55,8 +66,25 @@ def client(test_db) -> Generator[TestClient, None, None]:
 
     test_db.create_user("tester", "pw-tester")
     with TestClient(app) as c:
+        # 浏览器行为：app-common.js 的 fetch 拦截器为同源请求统一携带
+        # X-Requested-With（AuthWall 的 CSRF 防线），测试客户端对齐。
+        c.headers.update({"X-Requested-With": "XMLHttpRequest"})
         resp = c.post("/api/auth/login", json={"username": "tester", "password": "pw-tester"})
         assert resp.status_code == 200
+        yield c
+
+
+@pytest.fixture
+def anon_client(test_db):
+    """未登录的 TestClient（登录墙视角的匿名访客）。
+
+    默认携带 X-Requested-With（对齐浏览器 app-common.js 的 fetch 拦截器）；
+    需要验证 CSRF 头缺失行为的用例显式删该头。
+    """
+    from app.main import app
+
+    with TestClient(app) as c:
+        c.headers.update({"X-Requested-With": "XMLHttpRequest"})
         yield c
 
 

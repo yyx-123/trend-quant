@@ -25,9 +25,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _common  # .env 加载 + DB_PATH + TickFlow 构造（P2-13）
+from tushare_common import call_with_retry, get_pro_api
 
-from data.storage.db import init_db, record_job_run_safely  # noqa: E402
-from services.stock_industry import (  # noqa: E402
+from data.storage.db import init_db, record_job_run_safely
+from services.stock_industry import (
     SOURCE_TUSHARE,
     STOCK_L1,
     UNCLASSIFIED_L2,
@@ -37,9 +39,8 @@ from services.stock_industry import (  # noqa: E402
     reclassify_pending_stocks,
     tickflow_symbol_to_project,
 )
-from tushare_common import call_with_retry, get_pro_api  # noqa: E402
 
-DB_PATH = Path("data/trend_quant.db")
+DB_PATH = _common.DB_PATH
 _JOB_TYPE = "stock_industry_sync_tushare"
 
 

@@ -11,22 +11,21 @@ from __future__ import annotations
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-import time
 
 import pytest
 
 
 def _poll_until_terminal(client, run_id: str, timeout_s: float = 5.0) -> dict:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        resp = client.get(f"/rule-backtest/api/progress/{run_id}")
-        assert resp.status_code == 200
-        data = resp.json()
-        if data["status"] != "running":
-            return data
-        time.sleep(0.05)
-    raise AssertionError("backtest job did not reach a terminal state in time")
+    from conftest import poll_until_terminal
 
+    return poll_until_terminal(client, f"/rule-backtest/api/progress/{run_id}", timeout_s)
+
+
+
+
+def _remove_route(app, path: str) -> None:
+    """卸载测试动态注册的路由，避免污染后续用例。"""
+    app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) != path]
 
 class TestSetupLogging:
     def test_rotating_handlers_and_access_log(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -127,15 +126,20 @@ class TestGlobalExceptionHandlers:
         # Starlette's ServerErrorMiddleware re-raises after the handler runs;
         # disable client-side re-raise to assert on the actual 500 response.
         # 登录墙后匿名请求会被 303 拦走，local_client 需先登录（tester 由 client fixture 创建）。
-        with caplog.at_level(logging.ERROR, logger="app.main"):
-            with TestClient(app, raise_server_exceptions=False) as local_client:
+        try:
+            with (
+                caplog.at_level(logging.ERROR, logger="app.main"),
+                TestClient(app, raise_server_exceptions=False) as local_client,
+            ):
                 local_client.post(
                     "/api/auth/login", json={"username": "tester", "password": "pw-tester"}
                 )
                 resp = local_client.get("/_test_observability_boom")
-        assert resp.status_code == 500
-        assert resp.json() == {"detail": "Internal Server Error"}
-        assert "Unhandled error on GET /_test_observability_boom" in caplog.text
+                assert resp.status_code == 500
+                assert resp.json() == {"detail": "Internal Server Error"}
+                assert "Unhandled error on GET /_test_observability_boom" in caplog.text
+        finally:
+            _remove_route(app, "/_test_observability_boom")
 
     def test_http_exception_5xx_is_logged(self, client, caplog) -> None:
         from fastapi import HTTPException
@@ -146,11 +150,14 @@ class TestGlobalExceptionHandlers:
             raise HTTPException(status_code=502, detail="upstream broke")
 
         app.add_api_route("/_test_observability_502", _boom_502)
-        with caplog.at_level(logging.WARNING, logger="app.main"):
-            resp = client.get("/_test_observability_502")
-        assert resp.status_code == 502
-        assert resp.json() == {"detail": "upstream broke"}
-        assert "HTTP 502" in caplog.text
+        try:
+            with caplog.at_level(logging.WARNING, logger="app.main"):
+                resp = client.get("/_test_observability_502")
+            assert resp.status_code == 502
+            assert resp.json() == {"detail": "upstream broke"}
+            assert "HTTP 502" in caplog.text
+        finally:
+            _remove_route(app, "/_test_observability_502")
 
     def test_http_exception_4xx_is_not_logged(self, client, caplog) -> None:
         with caplog.at_level(logging.WARNING, logger="app.main"):

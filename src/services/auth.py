@@ -7,21 +7,21 @@ cookie（``SESSION_COOKIE``）下发；之后浏览器对全站每个页面 / AP
 过期策略为滑动续期：剩余有效期不足一半时自动顺延 ``SESSION_TTL`` 并重新
 下发 cookie，活跃用户实际永不过期；连续 ``SESSION_TTL`` 未访问才需重新登录。
 
-MCP 工具（trend_mcp）不走 cookie，仍以 username+password 参数逐次调
-``services.trade_records.authenticate``，与本模块互不干扰。
+MCP 工具（trend_mcp）不走 cookie：通道级 Bearer token 鉴权（``app/mcp_auth.py``），
+token→用户映射后由工具侧换取 user，与本模块互不干扰。
 """
 
 from __future__ import annotations
 
-import logging
 import secrets
 from datetime import datetime, timedelta
 
 from fastapi import HTTPException, Request
 
+from audit.app_logger import get_logger
 from data.storage.db import get_db
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SESSION_COOKIE = "tq_session"
 SESSION_TTL = timedelta(days=30)
@@ -31,10 +31,10 @@ _RENEW_THRESHOLD = SESSION_TTL / 2
 __all__ = [
     "SESSION_COOKIE",
     "SESSION_TTL",
-    "issue_session",
-    "resolve_session",
     "destroy_session",
     "get_current_user",
+    "issue_session",
+    "resolve_session",
 ]
 
 

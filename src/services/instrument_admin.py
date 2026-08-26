@@ -6,16 +6,16 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-import logging
-
 import pandas as pd
 
-from core.display import load_instrument_name_map
+from audit.app_logger import get_logger
+from core.bars import date_span
 from core.benchmarks import benchmark_instruments
-from core.symbols import normalize_symbol, symbol_suffix, symbol_to_code
+from core.display import category_path_from_parts
+from core.symbols import normalize_symbol
 from data.storage.db import get_db
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 def _to_date(text: str, fallback: date) -> date:
     raw = str(text or "").strip()
@@ -24,25 +24,8 @@ def _to_date(text: str, fallback: date) -> date:
     return datetime.strptime(raw, "%Y-%m-%d").date()
 
 
-def _symbol_to_code(symbol: str) -> str:
-    return symbol_to_code(symbol)
-
-
-def _symbol_suffix(symbol: str) -> str:
-    return symbol_suffix(symbol)
-
-
-def _normalize_symbol(raw_symbol: str) -> str:
-    return normalize_symbol(raw_symbol)
-
-
 def _date_span(df: pd.DataFrame) -> tuple[str | None, str | None]:
-    if df.empty or "time" not in df.columns:
-        return None, None
-    series = pd.to_datetime(df["time"], errors="coerce").dropna()
-    if series.empty:
-        return None, None
-    return series.min().date().isoformat(), series.max().date().isoformat()
+    return date_span(df)
 
 
 def _config_name_map() -> dict[str, str]:
@@ -65,24 +48,22 @@ def _config_items() -> list[dict]:
 
 def _known_managed_symbols() -> set[str]:
     symbols: set[str] = set()
-    for item in _config_items():
-        if isinstance(item, dict):
-            symbol = _normalize_symbol(item.get("symbol", ""))
-            if symbol:
-                symbols.add(symbol)
-    for item in benchmark_instruments():
-        symbol = _normalize_symbol(item.get("symbol", ""))
+    db = get_db()
+    # metadata 只加载一次（N3：原实现经 _config_items + 直查各一次共两次全表）
+    for item in db.list_instrument_metadata():
+        symbol = normalize_symbol(item.get("symbol", ""))
         if symbol:
             symbols.add(symbol)
-
-    db = get_db()
-    symbols.update(str(item.get("symbol") or "").strip().upper() for item in db.list_instrument_metadata())
+    for item in benchmark_instruments():
+        symbol = normalize_symbol(item.get("symbol", ""))
+        if symbol:
+            symbols.add(symbol)
     symbols.update(str(symbol or "").strip().upper() for symbol in db.list_market_symbols())
     return {symbol for symbol in symbols if symbol}
 
 
 def _category_path_from_parts(l1: str, l2: str = "", l3: str = "") -> str:
-    return "-".join(part for part in [l1, l2, l3] if str(part or "").strip())
+    return category_path_from_parts(l1, l2, l3)
 
 
 def _category_priority_map() -> dict[str, int | None]:
@@ -119,25 +100,26 @@ def category_priorities(
 
 def _next_sort_order(config_items: list[dict] | None = None) -> int:
     values: list[int] = []
-    for item in config_items if config_items is not None else _config_items():
+    if config_items is not None:
+        candidates = config_items
+    else:
+        try:
+            # 缺省路径只查一次（N3：原实现 config_items + 直查共两次全表）
+            candidates = get_db().list_instrument_metadata()
+        except RuntimeError as exc:
+            logger.warning("Instrument metadata unavailable while computing sort order: %s", exc)
+            candidates = []
+    for item in candidates:
         if isinstance(item, dict):
             try:
                 values.append(int(item.get("sort_order") or 0))
             except (TypeError, ValueError):
                 pass
-    try:
-        for item in get_db().list_instrument_metadata():
-            try:
-                values.append(int(item.get("sort_order") or 0))
-            except (TypeError, ValueError):
-                pass
-    except RuntimeError as exc:
-        logger.warning("Instrument metadata unavailable while computing sort order: %s", exc)
     return max(values or [0]) + 1
 
 
 def _build_new_instrument_record(item: dict) -> dict:
-    symbol = _normalize_symbol(item.get("symbol", ""))
+    symbol = normalize_symbol(item.get("symbol", ""))
     name = str(item.get("name") or "").strip()
     l1 = str(item.get("category_l1") or "").strip()
     l2 = str(item.get("category_l2") or "").strip()
@@ -174,7 +156,7 @@ def _build_new_instrument_record(item: dict) -> dict:
 def _append_instrument_config(record: dict) -> int:
     """Insert a new managed instrument into the metadata table (dup-rejecting)."""
     db = get_db()
-    symbol = _normalize_symbol(record.get("symbol", ""))
+    symbol = normalize_symbol(record.get("symbol", ""))
     if db.get_instrument_metadata(symbol) is not None:
         raise ValueError(f"{symbol} 已在标的配置中")
 
@@ -211,7 +193,7 @@ def add_constituent_stock(
     """
     from services.stock_industry import resolve_category  # 延迟导入避免环依赖
 
-    normalized = _normalize_symbol(symbol)
+    normalized = normalize_symbol(symbol)
     name = str(name or "").strip() or normalized
     if not normalized:
         return {"symbol": "", "name": name, "status": "failed", "error": "标的代码无效"}

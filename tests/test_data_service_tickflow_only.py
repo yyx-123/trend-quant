@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
 import unittest
 from datetime import date
 
@@ -28,20 +33,8 @@ class FakeTickFlowProvider:
     ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
         return {symbol: self.daily.copy() for symbol in symbols}, {}
 
-    def fetch_minute_history(
-        self,
-        symbol: str,
-        period: str,
-        count: int,
-        adjust: str,
-    ) -> pd.DataFrame:
-        return self.daily.copy()
-
     def fetch_latest_quote(self, symbol: str) -> dict:
         return dict(self.quote)
-
-    def fetch_trading_calendar(self, start: date, end: date) -> list[date]:
-        return []
 
 
 class FakeMarketStore:

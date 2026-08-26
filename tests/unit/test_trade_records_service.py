@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import pandas as pd
 import pytest
 
 from core.strategy_config import DEFAULT_STRATEGY_CONFIG
@@ -182,7 +181,7 @@ class TestListTrades:
         回归防护：逐标的单调实时行情会打满 tickflow 10/min 限流，
         曾导致列表接口耗时 115 秒。
         """
-        db, bars, alice, *_ = env
+        db, bars, _alice, *_ = env
         from conftest import make_bull_bars
 
         bars2 = make_bull_bars(40)
@@ -207,7 +206,7 @@ class TestListTrades:
         assert calls == [["510050.SS", "510300.SS"]]
 
     def test_open_sorted_by_position_value_closed_last(self, env) -> None:
-        db, bars, alice, *_ = env
+        db, bars, _alice, *_ = env
         # 小持仓先录入，大持仓后录入 —— 验证不是按录入顺序而是按持仓金额
         d1, p1 = _day(bars, -6)
         d2, p2 = _day(bars, -4)
@@ -288,7 +287,7 @@ class TestSymbolAnnotations:
     """symbol_annotations：标的查看页的买卖点 + 双档止损标注数据。"""
 
     def test_open_trade_has_dual_mode_stops(self, env) -> None:
-        db, bars, alice, *_ = env
+        db, bars, _alice, *_ = env
         d, p = _day(bars, -5)
         tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
                         buy_price=p, shares=1000, db=db)
@@ -324,7 +323,7 @@ class TestSymbolAnnotations:
         assert "stops" not in item
 
     def test_isolated_between_users_and_symbols(self, env) -> None:
-        db, bars, alice, bob, _ = env
+        db, bars, _alice, _bob, _ = env
         d, p = _day(bars, -3)
         tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
                         buy_price=p, shares=100, db=db)

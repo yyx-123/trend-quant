@@ -27,7 +27,7 @@ def make_ctx(
     affordable_qty: int = 0,
 ) -> SizingContext:
     """atr_gap_days: number of most recent days whose ATR is None (warmup gap)."""
-    execution = BacktestExecutionConfig(slippage=0.002, fee_rate=0.0, fee_min=0.0, lot_size=100)
+    execution = BacktestExecutionConfig(lot_size=100)  # 默认费率（不提供零成本场景）
 
     def atr_at(period: int, lookback: int = 0) -> float | None:
         if lookback >= history_bars:
@@ -59,15 +59,16 @@ def make_trade(pnl: float, qty: int = 100, avg_cost: float = 10.0) -> dict:
 class TestFixedPctSizer:
     def test_full_pct_is_all_in(self):
         d = FixedPctSizer(pct=1.0).decide(make_ctx())
-        # per-share cost = 10.02 -> floor(100000 / 10.02) = 9980
-        assert d.target_qty == 9980
+        # per-share 含佣金 = 10.02×(1+0.0000854) ≈ 10.020856
+        # → floor(100000 / 10.020856) = 9979
+        assert d.target_qty == 9979
         assert d.action == "buy"
         assert d.flags == []
-        assert d.position_pct == pytest.approx(9980 * 10.02 / 100_000.0)
+        assert d.position_pct == pytest.approx(9979 * 10.020855708 / 100_000.0)
 
     def test_partial_pct(self):
         d = FixedPctSizer(pct=0.7).decide(make_ctx())
-        assert d.target_qty == int(70_000.0 // 10.02)  # 6986
+        assert d.target_qty == 6985  # 70000 // 10.020856
         assert d.position_pct == pytest.approx(0.7, abs=0.01)
 
     @pytest.mark.parametrize("bad", [0.0, -0.5, 1.5])
@@ -85,7 +86,7 @@ class TestRiskBudgetSizer:
         d = RiskBudgetSizer(mode="absolute", value=3000.0).decide(make_ctx())
         assert d.target_qty == 4000
         assert "risk_budget_unconstrained" not in d.flags
-        assert d.position_pct == pytest.approx(4000 * 10.02 / 100_000.0)
+        assert d.position_pct == pytest.approx(4000 * 10.020855708 / 100_000.0)
 
     def test_absolute_budget_unconstrained_means_full_buy(self):
         # floor(50000 / 0.75) = 66666 >= affordable 9980 -> full buy stays in budget
@@ -99,12 +100,12 @@ class TestRiskBudgetSizer:
         assert d.target_qty == 1333
 
     def test_unconstrained_uses_engine_affordable_qty(self):
-        # target 7500/0.75 = 10000: above the engine's exact affordable 9900
-        # (fee/lot aligned) but below the rough per-share estimate 9980 — the
-        # exact reference must still flag it unconstrained.
+        # target 7450/0.75 = 9933：≥ 引擎精确 affordable 9900（费用/整手对齐后），
+        # 但 < 粗略每股估算 9980 —— 只有以引擎精确值为准才会打 unconstrained；
+        # 若误用粗略估算则不达标（该场景对两种实现可鉴别）。
         ctx = make_ctx(affordable_qty=9900)
-        d = RiskBudgetSizer(mode="absolute", value=7500.0).decide(ctx)
-        assert d.target_qty == 10000
+        d = RiskBudgetSizer(mode="absolute", value=7450.0).decide(ctx)
+        assert d.target_qty == 9933
         assert "risk_budget_unconstrained" in d.flags
 
     def test_atr_lookback_uses_previous_day(self):
@@ -116,8 +117,8 @@ class TestRiskBudgetSizer:
     def test_atr_unavailable_falls_back_to_fallback_pct(self):
         d = RiskBudgetSizer(mode="absolute", value=3000.0).decide(make_ctx(atr=None))
         assert "atr_unavailable_fallback" in d.flags
-        # fallback 10% of equity: floor(10000 / 10.02) = 998
-        assert d.target_qty == 998
+        # fallback 10% of equity: floor(10000 / 10.020856) = 997
+        assert d.target_qty == 997
 
     def test_atr_gap_beyond_series_start_falls_back(self):
         # history has only 3 bars, all with ATR None
@@ -141,14 +142,14 @@ class TestRiskBudgetSizer:
 class TestKellySizer:
     def test_first_trade_all_in(self):
         d = KellySizer().decide(make_ctx(closed_trades=[]))
-        assert d.target_qty == 9980  # same as all-in
+        assert d.target_qty == 9979  # same as all-in（含佣金 per-share）
         assert d.flags == []
 
     def test_kelly_fraction_from_net_returns(self):
         # 3 wins +10%, 1 loss -5% -> p=0.75, b=2 -> f*=0.75-0.25/2=0.625
         trades = [make_trade(100.0)] * 3 + [make_trade(-50.0)]
         d = KellySizer().decide(make_ctx(closed_trades=trades))
-        assert d.target_qty == int(62_500.0 // 10.02)
+        assert d.target_qty == 6236  # 62500 // 10.020856
         assert d.position_pct == pytest.approx(0.625, abs=0.01)
         assert d.flags == []
 
@@ -168,7 +169,7 @@ class TestKellySizer:
         trades = [make_trade(50.0)] + [make_trade(-50.0)] * 3
         d = KellySizer().decide(make_ctx(closed_trades=trades))
         assert "kelly_floor_applied" in d.flags
-        assert d.target_qty == 998  # 10% fallback
+        assert d.target_qty == 997  # 10% fallback（含佣金 per-share）
 
     def test_all_losses_floor(self):
         trades = [make_trade(-50.0)] * 4
@@ -178,33 +179,33 @@ class TestKellySizer:
     def test_no_losses_gives_full_kelly(self):
         trades = [make_trade(100.0)] * 3
         d = KellySizer().decide(make_ctx(closed_trades=trades))
-        assert d.target_qty == 9980  # f* = p = 1.0 -> all-in
+        assert d.target_qty == 9979  # f* = p = 1.0 -> all-in（含佣金 per-share）
         assert d.flags == []
 
     def test_max_pct_caps(self):
         trades = [make_trade(100.0)] * 3
         d = KellySizer(max_pct=0.5).decide(make_ctx(closed_trades=trades))
-        assert d.target_qty == int(50_000.0 // 10.02)
+        assert d.target_qty == 4989  # 50000 // 10.020856
         assert d.position_pct == pytest.approx(0.5, abs=0.01)
 
     def test_fraction_multiplier(self):
         trades = [make_trade(100.0)] * 3 + [make_trade(-50.0)]  # f* = 0.625
         d = KellySizer(fraction=0.5).decide(make_ctx(closed_trades=trades))
-        assert d.target_qty == int(31_250.0 // 10.02)
+        assert d.target_qty == 3118  # 31250 // 10.020856
 
     def test_lookback_windows_history(self):
         # last-2 window [+10%, -5%]: p=0.5, b=2 -> f*=0.25
         trades = [make_trade(100.0), make_trade(100.0), make_trade(-50.0)]
         d2 = KellySizer(lookback=2).decide(make_ctx(closed_trades=trades))
-        assert d2.target_qty == int(25_000.0 // 10.02)
+        assert d2.target_qty == 2494  # 25000 // 10.020856
         # full window: p=2/3, b=2 -> f*=0.5
         d3 = KellySizer(lookback=3).decide(make_ctx(closed_trades=trades))
-        assert d3.target_qty == int(50_000.0 // 10.02)
+        assert d3.target_qty == 4989  # 50000 // 10.020856
 
     def test_trade_without_avg_cost_is_ignored(self):
         trades = [{"side": "SELL", "pnl": -50.0, "qty": 100}]  # no avg_cost
         d = KellySizer().decide(make_ctx(closed_trades=trades))
-        assert d.target_qty == 9980  # treated as no history -> all-in
+        assert d.target_qty == 9979  # treated as no history -> all-in（含佣金 per-share）
         assert d.flags == []
 
     def test_invalid_params_rejected(self):

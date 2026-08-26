@@ -12,14 +12,15 @@
 
 from __future__ import annotations
 
-import logging
-import os
 import re
 import unicodedata
 
+from audit.app_logger import get_logger
+from core import env as _env
+from core.symbols import from_vendor_symbol, to_vendor_symbol
 from data.storage.db import Database, get_db, record_job_run_safely
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 STOCK_L1 = "股票"
 UNCLASSIFIED_L2 = "待分类"
@@ -30,6 +31,16 @@ SOURCE_TUSHARE = "tushare_sw2021"
 SOURCE_MANUAL = "manual"
 
 _TICKFLOW_BASE_URL = "https://api.tickflow.org"
+
+def _tickflow_api_key() -> str:
+    """TickFlow API key：缺失时给可操作提示而非 KeyError 裸抛（P2-5）。"""
+    key = _env.tickflow_api_key()
+    if not key:
+        raise RuntimeError(
+            "缺少 TICKFLOW_API_KEY 环境变量：请在 .env 配置后重试（月度行业同步跳过）"
+        )
+    return key
+
 _UNIVERSE_BATCH = 50
 
 # NFKC 之后 Unicode 罗马数字（Ⅱ U+2161 等）与全角字母都已归一为 ASCII，
@@ -60,24 +71,18 @@ def parse_tickflow_universe_name(name: str) -> tuple[int, str] | None:
 
 def tickflow_symbol_to_project(symbol: str) -> str:
     """tickflow/tushare 代码 → 项目格式：.SH → .SS，其余不变。"""
-    text = str(symbol or "").strip().upper()
-    if text.endswith(".SH"):
-        return text[: -len(".SH")] + ".SS"
-    return text
+    return from_vendor_symbol(symbol)
 
 
 def project_symbol_to_tushare(symbol: str) -> str:
     """项目代码 → tushare 格式：.SS → .SH，其余不变。"""
-    text = str(symbol or "").strip().upper()
-    if text.endswith(".SS"):
-        return text[: -len(".SS")] + ".SH"
-    return text
+    return to_vendor_symbol(symbol)
 
 
 def is_a_share(symbol: str) -> bool:
     """仅保留上交所（.SS）与深交所（.SZ）A 股；北交所（.BJ）等丢弃。"""
     text = str(symbol or "").strip().upper()
-    return text.endswith(".SS") or text.endswith(".SZ")
+    return text.endswith((".SS", ".SZ"))
 
 
 def resolve_category(symbol: str, db: Database | None = None) -> dict:
@@ -223,18 +228,6 @@ def build_sw_tree(code_names: dict[str, dict[int, str]]) -> list[dict]:
     """
     l1_order: dict[str, int] = {}
     l2_order: dict[tuple[str, str], int] = {}
-    for code, names in sorted(code_names.items()):
-        if not code.isdigit() or len(code) != 6:
-            continue
-        if not all(level in names for level in (1, 2)):
-            continue
-        l1 = normalize_industry_name(names[1])
-        l2 = normalize_industry_name(names[2])
-        if "-" in l1 or "-" in l2:
-            logger.error("行业名含路径分隔符 '-'，剔除: %s / %s (code=%s)", l1, l2, code)
-            continue
-    l1_order: dict[str, int] = {}
-    l2_order: dict[tuple[str, str], int] = {}
     l2_raw: dict[tuple[str, str], str] = {}
     for code, names in sorted(code_names.items()):
         if not code.isdigit() or len(code) != 6:
@@ -352,7 +345,7 @@ def sync_industry_from_tickflow(
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("缺少 tickflow 依赖") from exc
         client = TickFlow(
-            api_key=os.environ["TICKFLOW_API_KEY"], base_url=_TICKFLOW_BASE_URL
+            api_key=_tickflow_api_key(), base_url=_TICKFLOW_BASE_URL
         )
 
     universes = client.universes.list()
@@ -396,4 +389,18 @@ def record_industry_sync_job(job_type: str, summary: dict) -> None:
             "still_unclassified": reclassify.get("still_unclassified"),
         },
     }
-    record_job_run_safely(job_type, payload, status="success")
+    # 状态按实际形态：部分行被高优先级挡下 / 回补 deferred / 仍有未分类 →
+    # partial；全部成功 → success；全未写入 → failed（旧实现无条件 success，
+    # job_runs 失去监控意义）。
+    skipped = int(summary.get("skipped_by_priority") or 0)
+    rows = int(summary.get("rows") or 0)
+    written = int(summary.get("written") or 0)
+    deferred = reclassify.get("deferred") or []
+    still_unclassified = reclassify.get("still_unclassified") or []
+    if rows > 0 and written == 0:
+        status = "failed"
+    elif skipped > 0 or deferred or still_unclassified:
+        status = "partial"
+    else:
+        status = "success"
+    record_job_run_safely(job_type, payload, status=status)

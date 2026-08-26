@@ -13,7 +13,7 @@ def compute_drawdown(daily_nav: list[dict]) -> list[dict]:
     equity = pd.to_numeric(df["equity"], errors="coerce")
     rolling_max = equity.cummax().replace(0, np.nan)
     dd = (equity / rolling_max - 1.0).fillna(0.0)
-    return [{"date": str(row["date"]), "drawdown": float(dd.iloc[idx])} for idx, row in df.iterrows()]
+    return [{"date": str(day), "drawdown": float(dd_)} for day, dd_ in zip(df["date"], dd)]
 
 
 def flat_run_days(trades: list[dict], dates: list[str]) -> list[float]:
@@ -170,7 +170,7 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
         "sharpe": float(sharpe),
         "sortino": float(sortino),
         "calmar": float(calmar),
-        "n_returns": int(len(returns)),
+        "n_returns": len(returns),
         "mean_daily_return": float(mean_ret),
         "std_daily_return": float(std_ret),
         "downside_std": float(downside_std),
@@ -180,8 +180,8 @@ def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: f
         "max_dd_trough_equity": max_dd_trough_equity,
         "win_rate": float(win_rate),
         "profit_factor": float(profit_factor),
-        "trade_count": int(len(trades)),
-        "closed_trade_count": int(len(sell_pnls)),
+        "trade_count": len(trades),
+        "closed_trade_count": len(sell_pnls),
         "avg_holding_days": float(avg_holding_days),
         "avg_flat_days": float(avg_flat_days) if avg_flat_days is not None else None,
         "avg_win": float(avg_win),

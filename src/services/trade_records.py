@@ -3,7 +3,8 @@
 鉴权分两路（2026-08 登录墙改造）：
 - Web：全站登录墙签发 session cookie，路由层解析出 user 后直接传入本模块
   的 create/close/list（不再逐请求带密码）；
-- MCP 工具：仍以 username+password 逐次调 ``authenticate`` 换取 user。
+- MCP 工具：通道级 Bearer token 鉴权（``app/mcp_auth.py``），token→用户
+  映射后由工具侧 ``_token_user`` 换取 user，不再以工具参数传密码。
 
 密码 pbkdf2 哈希存储（历史明文由 db 层迁移）。每个用户只能查看自己的交易
 记录；admin 保留清仓任意记录的权限。
@@ -15,10 +16,9 @@
 
 from __future__ import annotations
 
-import logging
-
 import pandas as pd
 
+from audit.app_logger import get_logger
 from core.display import load_instrument_name_map
 from core.symbols import normalize_symbol
 from core.trend import safe_float
@@ -26,15 +26,15 @@ from data.storage.db import get_db, verify_password
 from services import stop_loss as sl
 from services.manual_trade import compute_manual_trade
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 __all__ = [
     "TradeAuthError",
     "TradePermissionError",
     "TradeRecordError",
     "authenticate",
-    "create_trade",
     "close_trade",
+    "create_trade",
     "list_trades",
     "symbol_annotations",
 ]
@@ -58,8 +58,8 @@ class TradeRecordError(ValueError):
 def authenticate(username: str, password: str, db=None) -> dict:
     """校验用户名 + 密码，返回 ``{id, username, is_admin}``；失败抛 TradeAuthError。
 
-    调用方：登录接口（签发 session）与 MCP 工具（逐次鉴权）。Web 登录墙内部
-    请求不经过这里——session 解析由 ``services.auth`` 完成。
+    调用方：登录接口（签发 session）。Web 登录墙内部请求不经过这里——
+    session 解析由 ``services.auth`` 完成；MCP 工具走 token 映射不经过这里。
     """
     db = db or get_db()
     user = db.get_user_by_username(str(username))

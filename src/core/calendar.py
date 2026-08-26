@@ -85,31 +85,33 @@ def is_trading_day(day: date) -> bool:
         return day.weekday() < 5
 
 
-def is_trading_time(dt: datetime | None = None) -> bool:
+def is_continuous_auction_hours(dt: datetime | None = None) -> bool:
     """Return True if *dt* falls within continuous trading hours
     (9:30–11:30 or 13:00–15:00 Beijing time), excluding the
     pre-market call-auction period (9:15–9:25).
+
+    注意：本函数只看时间窗、不校验交易日（原名 is_trading_time 易误导，
+    P2-31 改名明示）；需要交易日门控请组合 is_trading_day 或直接用
+    is_realtime_available / is_past_market_open。
     """
     now = dt or market_now()
     t = now.time()
     if _MORNING_START <= t <= _MORNING_END:
         return True
-    if _AFTERNOON_START <= t <= _AFTERNOON_END:
-        return True
-    return False
+    return _AFTERNOON_START <= t <= _AFTERNOON_END
 
 
 def is_realtime_available(dt: datetime | None = None) -> bool:
     """Return True if real-time quotes are meaningful at *dt*.
 
-    Unlike ``is_trading_time`` this treats the trading day as one
+    Unlike ``is_continuous_auction_hours`` this treats the trading day as one
     continuous window (9:30–15:00 Beijing time) — the midday lunch
     break (11:30–13:00) is INCLUDED, because quotes fetched during
     the break still reflect the morning session's latest state and
     make a valid intraday snapshot.
 
     Use this to gate intraday / real-time data features; keep using
-    ``is_trading_time`` where actual continuous-auction sessions
+    ``is_continuous_auction_hours`` where actual continuous-auction sessions
     matter.
     """
     now = dt or market_now()
@@ -143,7 +145,7 @@ def previous_trading_day(day: date | None = None) -> date:
     distance is never more than ~10 calendar days (longest
     holiday break).
     """
-    cursor = day or date.today()
+    cursor = day or market_now().date()
     # Walk back at most 20 calendar days.
     for _ in range(20):
         if is_trading_day(cursor):
@@ -155,7 +157,7 @@ def previous_trading_day(day: date | None = None) -> date:
 
 def next_trading_day(day: date | None = None) -> date:
     """Return the earliest trading day on or after *day*."""
-    cursor = day or date.today()
+    cursor = day or market_now().date()
     for _ in range(20):
         if is_trading_day(cursor):
             return cursor
@@ -163,38 +165,33 @@ def next_trading_day(day: date | None = None) -> date:
     return cursor
 
 
-def trading_session_status(now: datetime | None = None) -> dict:
-    """Convenience helper for API endpoints.
+def calendar_data_status() -> dict:
+    """chinese_calendar 数据新鲜度（P2-30）。
 
-    Returns a dict with keys:
-      is_trading_day, is_trading_time, is_realtime_available,
-      is_past_market_open, next_session
-    where *next_session* is a human-readable string.
+    库数据超界的年份会退化为 weekday-only 判定（法定假日被当成交易日，
+    还会触发启动补偿的无效补跑）——用当年 12/31 与次年首个工作日探测，
+    任一 NotImplementedError 即判过期，页面与部署文档同步提示升级。
     """
-    dt = now or market_now()
-    today = dt.date()
-    trading_day = is_trading_day(today)
-    trading_time = is_trading_time(dt) if trading_day else False
-    realtime_available = is_realtime_available(dt)
-    past_market_open = is_past_market_open(dt)
-
-    if trading_time:
-        next_session = "in_session"
-    elif trading_day:
-        if dt.time() < _MORNING_START:
-            next_session = f"今日 {_MORNING_START.strftime('%H:%M')} 开盘"
-        elif dt.time() < _AFTERNOON_START:
-            next_session = f"午间休盘，今日 {_AFTERNOON_START.strftime('%H:%M')} 开盘"
-        else:
-            next_session = "今日已收盘"
-    else:
-        nxt = next_trading_day(today + timedelta(days=1) if dt.time() >= _AFTERNOON_END else today)
-        next_session = f"{nxt.isoformat()} 开盘"
-
+    now = market_now()
+    stale_years: list[int] = []
+    # 当年超库 → 过期（假日已被误判为交易日）
+    try:
+        is_workday(date(now.year, 12, 31))
+    except NotImplementedError:
+        stale_years.append(now.year)
+    # 12 月进入升级窗口：次年数据未发布则提示升级（其余月份不误报——
+    # 次年度安排通常 12 月才公布）
+    if now.month >= 12 and not stale_years:
+        try:
+            is_workday(date(now.year + 1, 1, 4))
+        except NotImplementedError:
+            stale_years.append(now.year + 1)
     return {
-        "is_trading_day": trading_day,
-        "is_trading_time": trading_time,
-        "is_realtime_available": realtime_available,
-        "is_past_market_open": past_market_open,
-        "next_session": next_session,
+        "stale": bool(stale_years),
+        "stale_years": stale_years,
+        "message": (
+            "交易日历数据过期：请执行 pip install --upgrade chinese_calendar 后重启服务"
+            if stale_years
+            else ""
+        ),
     }

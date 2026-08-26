@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import logging
-
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-logger = logging.getLogger(__name__)
+from audit.app_logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/position-strategies", tags=["position-strategies"])
-templates = Jinja2Templates(directory="web/templates")
+from core.paths import web_dir as _web_dir
+
+_templates_dir = _web_dir() / "templates"
+templates = Jinja2Templates(directory=str(_templates_dir))
 
 
 @router.get("", response_class=HTMLResponse)

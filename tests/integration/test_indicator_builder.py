@@ -14,7 +14,6 @@ from core.strategy_config import DEFAULT_STRATEGY_CONFIG
 from core.trend import TREND_FORMULA_VERSION
 from data.indicator_store import get_series
 from data.storage.db import Database
-from data.storage.market_store import MarketStore
 from services.indicator_builder import (
     default_param_set_needs_rebuild,
     detect_adjustment_breaks,

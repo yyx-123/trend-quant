@@ -8,7 +8,7 @@ FastAPI + SQLite 的单机应用：日 K 行情驱动的趋势看板、单标的
 - **标的查看**（`/market-view`）：单标的 K 线 + 全套指标（MA/ATR/RSI/MACD/BOLL/BIAS/趋势值），支持盘中实时叠加；
 - **策略管理**（`/rule-backtest`）：配置化规则策略（JSON 条件树）的创建与单标的回测，多策略对比；
 - **标的管理**（`/instruments`）：标的增改、分类编辑、历史行情回填；
-- **MCP 服务**（`/mcp/sse`）：5 个工具（trend_dashboard / intraday_dashboard / symbol_detail / calc_stop_loss / list_instruments）；
+- **MCP 服务**（`/mcp/sse`）：7 个工具（trend_dashboard / intraday_dashboard / symbol_detail / calc_stop_loss / list_instruments / add_trade / open_positions）；通道级 Bearer token 鉴权（`TREND_MCP_TOKENS=token=用户名`，写工具身份来自 token 映射，不再传密码）；
 - **每日任务**：16:30 增量补齐日 K（raw append-only）→ 除权因子 diff（变化标的本地重物化 qfq）→ 指标缓存重建。
 
 ## 架构
@@ -63,6 +63,20 @@ PYTHONPATH=src .venv/bin/python -m uvicorn app.main:app --reload
 sudo systemctl restart trend-quant.service
 ```
 
+## 部署（全新实例）
+
+1. `sudo bash scripts/deploy.sh`（/srv/trend-quant、专用非 root 用户 trendquant、frp 直连 8000 无 nginx；详见脚本头注释）；
+2. 编辑 `.env` 补全 `TICKFLOW_API_KEY` 与 `TREND_MCP_TOKENS`（模板见 `.env.example`）；
+3. **登录**：内置管理员 `yyx` 随首次启动自动创建（引导密码读 env `TREND_QUANT_BOOTSTRAP_ADMIN_PASSWORD`，缺省为约定默认值，首次登录后请改密；已存在时不重置密码、仅确保 is_admin）；
+4. **类目种子**：`instrument_categories` 表在 src 内无种子来源——全新部署需先导入类目（`scripts/migrate_category_sw2021.py` 或从已有实例导出/导入），否则标的的新增/更新会因类目校验为空集而全部 400；
+5. 行情数据：启动后经「标的管理」批量回填，或从已有实例拷贝 `data/trend_quant.db`。
+
+## 运维约定
+
+- **chinese_calendar 每年 12 月升级**：`pip install --upgrade chinese_calendar`，否则次年法定假日会被误判为交易日（库数据超界时应用启动与导航栏均有「日历数据过期」提示）；
+- 脚本直写库后需重启 web 服务（进程内标的符号缓存跨进程不失效）；
+- tushare 镜像站：`scripts/tushare_common.py` 经 tushare 私有属性改写镜像地址——对 tushare 升级脆弱，且 token 与全部请求经第三方镜像，属知情风险，仅在临时账号窗口期使用。
+
 ## 备份
 
-代码用 git bundle（仓库根目录带时间戳的 `.bundle`）；数据 = `data/trend_quant.db`（含全部行情/策略/缓存）+ `.env`。恢复：clone bundle → 放回 DB 与 .env → 装依赖 → deploy.sh。
+数据备份由调度器每日 03:00 自动执行（`data/backups/`，VACUUM INTO 在线备份，只保留最新一份）；另需自行保管 `.env`。代码即 Git 仓库（GitHub 远端为副本），不再使用 git bundle 备份约定。恢复：clone 仓库 → 放回 DB 与 .env → 装依赖 → deploy.sh。

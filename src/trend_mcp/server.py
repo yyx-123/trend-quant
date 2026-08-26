@@ -13,43 +13,59 @@ Exposes 7 tools to external agents via MCP SSE transport:
    a given buy entry.
 5. **list_instruments** -- 标的列表: searchable / filterable instrument
    catalogue.
-6. **add_trade** -- 手工交易录入: record a buy trade for a user
-   (username/password authenticated, same path as the web UI).
-7. **open_positions** -- 持仓概览: realtime overview of a user's open
-   (not yet closed) positions.
+6. **add_trade** -- 手工交易录入: record a buy trade for the token-mapped
+   user (Bearer token channel auth, same path as the web UI).
+7. **open_positions** -- 持仓概览: realtime overview of the token-mapped
+   user's open (not yet closed) positions.
+
+通道鉴权：/mcp 由 McpBearerMiddleware（app/mcp_auth.py）做 Bearer token
+校验，token→用户映射见 TREND_MCP_TOKENS；工具不再接收 username/password。
 """
 
 from __future__ import annotations
 
-import logging
-from datetime import datetime
-
 import pandas as pd
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
+from app.mcp_auth import load_mcp_allowed_hosts
+from audit.app_logger import get_logger
+from core.calendar import is_past_market_open, is_realtime_available, is_trading_day, market_now
+from core.display import category_path as _category_path
 from core.display import filter_fully_classified, format_symbol_display
 from core.display import load_instrument_name_map as _config_name_map
-from services.market_indicators import compute_market_indicators, trend_config as _trend_config
-from services.dashboard import RevisionCache, build_subject_dashboard_payload
-from core.calendar import is_past_market_open, is_realtime_available, is_trading_day
 from core.symbols import normalize_symbol as _normalize_symbol
 from data.intraday_service import build_intraday_dashboard, build_intraday_overlay
-from data.service import DataService
+from data.service import get_data_service
 from data.storage.db import get_db
 from services import trade_records as tr
+from services.dashboard import build_subject_dashboard_payload, dashboard_revision_cache
+from services.market_indicators import compute_market_indicators
+from services.market_indicators import trend_config as _trend_config
 from services.stop_loss import StopLossError, compute_stop_loss
 
 # ---------------------------------------------------------------------------
 # Server instance
 # ---------------------------------------------------------------------------
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+# DNS rebinding 保护：配置 TREND_MCP_ALLOWED_HOSTS（frp 域名，可带端口或
+# :* 通配）后开启；空配置保持关闭——上线顺序为先验证 Bearer token 中间件，
+# 再配置域名开启保护（配错 allowed_hosts 会导致所有 MCP 请求 421）。
+_mcp_allowed_hosts = load_mcp_allowed_hosts()
 
 mcp = FastMCP(
     "trend-quant",
-    transport_security={"enable_dns_rebinding_protection": False},
+    transport_security=(
+        TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=_mcp_allowed_hosts,
+        )
+        if _mcp_allowed_hosts
+        else TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    ),
 )
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -64,7 +80,6 @@ def _load_instruments_raw() -> list[dict]:
         logger.warning("Instrument metadata unavailable: %s", exc)
         return []
 
-
 def _instrument_metadata_map(instruments: list[dict]) -> dict[str, dict]:
     return {
         str(item.get("symbol", "")).strip().upper(): item
@@ -72,24 +87,34 @@ def _instrument_metadata_map(instruments: list[dict]) -> dict[str, dict]:
         if str(item.get("symbol", "")).strip().upper()
     }
 
+def _token_user(ctx: Context) -> dict:
+    """从 Bearer token 映射取用户身份（P0-2：工具不再接收 username/password）。
 
-def _category_path(meta: dict | None) -> str:
-    if not meta:
-        return ""
-    parts = [
-        str(meta.get("category_l1") or "").strip(),
-        str(meta.get("category_l2") or "").strip(),
-        str(meta.get("category_l3") or "").strip(),
-    ]
-    return "-".join(p for p in parts if p)
+    McpBearerMiddleware 校验通过后把用户名写入 ``scope["state"]["mcp_user"]``；
+    SSE transport 将 Starlette Request 塞进 ``ServerMessageMetadata.request_context``，
+    工具经 ``ctx.request_context.request.scope`` 取回。
+    """
+    username: str | None = None
+    try:
+        request = ctx.request_context.request
+    except (ValueError, AttributeError):
+        request = None
+    if request is not None:
+        state = request.scope.get("state") or {}
+        username = state.get("mcp_user")
+    if not username:
+        raise tr.TradeAuthError(
+            "MCP 通道缺少 token 用户映射（请求未经过 McpBearerMiddleware 或 token 无效）"
+        )
+    user = get_db().get_user_by_username(username)
+    if user is None:
+        raise tr.TradeAuthError(
+            f"token 映射的用户「{username}」在 users 表中不存在，请检查 TREND_MCP_TOKENS 配置"
+        )
+    return {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
 
-
-# ---------------------------------------------------------------------------
-# Dashboard cache — shared RevisionCache from services.dashboard
-# ---------------------------------------------------------------------------
-
-_dashboard_cache = RevisionCache()
-
+# Dashboard cache：services.dashboard 的模块级 RevisionCache 单例（P2-10），
+# 与 Web 标的看板共用同一份缓存。
 
 # ---------------------------------------------------------------------------
 # Tool 1 -- trend_dashboard
@@ -113,8 +138,7 @@ def trend_dashboard() -> dict:
     """
     db = get_db()
     revision = db.get_market_dashboard_revision()
-    return _dashboard_cache.get_or_compute(revision, lambda: build_subject_dashboard_payload(db))
-
+    return dashboard_revision_cache.get_or_compute(revision, lambda: build_subject_dashboard_payload(db))
 
 # ---------------------------------------------------------------------------
 # Tool 2 -- intraday_dashboard (real-time)
@@ -140,7 +164,7 @@ def intraday_dashboard(category: str = "") -> dict:
         - intraday_ts: 计算时间戳
         - 每个标的的 daily_change_pct 为实时涨跌幅
     """
-    now = datetime.now()
+    now = market_now()
     if not is_trading_day(now.date()):
         return {
             "ok": False,
@@ -174,18 +198,13 @@ def intraday_dashboard(category: str = "") -> dict:
     if not classified:
         return {"ok": False, "error": "无符合条件的标的（需完整三级分类）"}
 
-    ds = DataService()
-    try:
-        payload = build_intraday_dashboard(
-            classified, db, ds, _trend_config()
-        )
-    finally:
-        ds.close()
+    payload = build_intraday_dashboard(
+        classified, db, get_data_service(), _trend_config()
+    )
     payload["ok"] = True
     payload["post_close"] = not is_realtime_available(now)
     payload["requested_category"] = category.strip() or None
     return payload
-
 
 # ---------------------------------------------------------------------------
 # Tool 3 -- symbol_detail
@@ -297,7 +316,6 @@ def symbol_detail(symbol: str, days: int = 60, rsi_period: int = 14, intraday: b
 
     return payload
 
-
 # ---------------------------------------------------------------------------
 # Tool 4 -- calc_stop_loss
 # ---------------------------------------------------------------------------
@@ -338,7 +356,6 @@ def calc_stop_loss(
     except StopLossError as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, **payload}
-
 
 # ---------------------------------------------------------------------------
 # Tool 5 -- list_instruments
@@ -411,25 +428,23 @@ def list_instruments(
 
     return {"ok": True, "count": len(result), "instruments": result}
 
-
 # ---------------------------------------------------------------------------
 # Tool 6 -- add_trade (manual trade entry)
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
 def add_trade(
-    username: str,
-    password: str,
     symbol: str,
     buy_date: str,
     buy_price: float,
     shares: float,
+    ctx: Context,
 ) -> dict:
     """录入一笔手工交易（买入），与网页端手工交易共用同一条录入链路。
 
+    用户身份来自 Bearer token 映射（TREND_MCP_TOKENS），无需再传账号密码。
+
     Args:
-        username: 手工交易账号用户名
-        password: 手工交易账号密码
         symbol: 标的代码，如 510300.SS 或 510300
         buy_date: 买入日期，格式 YYYY-MM-DD（须不晚于最新数据日期）
         buy_price: 买入均价，必须大于 0，且落在买入当日K线 [low, high] 区间内
@@ -437,11 +452,11 @@ def add_trade(
 
     Returns:
         成功时 ok=True 并返回落库后的完整交易记录（含 id、status=open）；
-        失败时 ok=False 并附 error（凭据错误 / 标的不存在 / 价格超出当日
-        区间 / 参数非法等）。
+        失败时 ok=False 并附 error（token 用户映射缺失 / 标的不存在 /
+        价格超出当日区间 / 参数非法等）。
     """
     try:
-        user = tr.authenticate(username, password)
+        user = _token_user(ctx)
         trade = tr.create_trade(
             user,
             symbol=symbol,
@@ -453,22 +468,21 @@ def add_trade(
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "trade": trade}
 
-
 # ---------------------------------------------------------------------------
 # Tool 7 -- open_positions (realtime overview)
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def open_positions(username: str, password: str, stop_mode: str | None = None) -> dict:
-    """返回指定用户当前持仓（未清仓交易）的实时概览。
+def open_positions(stop_mode: str | None = None, ctx: Context = None) -> dict:
+    """返回当前 token 映射用户当前持仓（未清仓交易）的实时概览。
 
     与网页端手工交易同一口径：交易时段（9:30-15:00，含午间休盘）内
     最新价 / 浮盈 / 吊灯止损价等均含盘中实时报价（is_intraday=True），
     非交易时段回退为最新日K收盘口径。
 
+    用户身份来自 Bearer token 映射（TREND_MCP_TOKENS），无需再传账号密码。
+
     Args:
-        username: 手工交易账号用户名
-        password: 手工交易账号密码
         stop_mode: 止损松紧档位 "tight"（紧：1×ATR/2×ATR）/
             "loose"（松：1.5×ATR/2.5×ATR，默认）
 
@@ -480,7 +494,7 @@ def open_positions(username: str, password: str, stop_mode: str | None = None) -
         - is_intraday / intraday_ts: 数据口径标记
     """
     try:
-        user = tr.authenticate(username, password)
+        user = _token_user(ctx)
         payload = tr.list_trades(user, intraday=True, stop_mode=stop_mode)
     except (tr.TradeAuthError, tr.TradePermissionError, tr.TradeRecordError) as exc:
         return {"ok": False, "error": str(exc)}

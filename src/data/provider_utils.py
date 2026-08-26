@@ -1,28 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from datetime import datetime
-from typing import Iterable
+from collections.abc import Iterable
 
 import pandas as pd
 
-
-def safe_float(value: object, default: float | None = None) -> float | None:
-    if value is None:
-        return default
-    text = str(value).strip().replace(",", "")
-    if text == "" or text.lower() in {"none", "nan", "-"}:
-        return default
-    try:
-        return float(text)
-    except Exception:
-        return default
+from core.trend import safe_float  # noqa: F401  # 公开再导出（provider_* 共用入口）
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out.columns = [str(c).strip() for c in out.columns]
     return out
-
 
 def _first_existing(columns: Iterable[str], aliases: list[str]) -> str | None:
     lower_map = {c.lower(): c for c in columns}
@@ -31,7 +19,6 @@ def _first_existing(columns: Iterable[str], aliases: list[str]) -> str | None:
         if key in lower_map:
             return lower_map[key]
     return None
-
 
 def standardize_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     if df is None or df.empty:
@@ -51,8 +38,17 @@ def standardize_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     normalized = pd.DataFrame()
     if time_col:
         normalized["time"] = pd.to_datetime(data[time_col], errors="coerce")
+        # 时区统一东八区（全项目约定：数据与处理逻辑一律 Asia/Shanghai 墙钟、
+        # A 股交易时段）：vendor 返回的带时区时间（如 UTC ISO 串）在此统一
+        # 转换并去 tz，与 compact 路径（provider_tickflow）及库内既有格式一致。
+        if isinstance(normalized["time"].dtype, pd.DatetimeTZDtype):
+            normalized["time"] = (
+                normalized["time"].dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+            )
     else:
-        normalized["time"] = pd.to_datetime(pd.Series([datetime.now()] * len(data)), errors="coerce")
+        raise ValueError(
+            f"行情数据缺少时间列（time/datetime/date/日期/时间），symbol={symbol}，columns={cols}"
+        )
 
     for out_col, in_col in [
         ("open", open_col),
@@ -71,9 +67,3 @@ def standardize_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     normalized = normalized.dropna(subset=["time"]).drop_duplicates(subset=["time"]).sort_values("time")
     normalized = normalized.reset_index(drop=True)
     return normalized
-
-
-def parse_minute_period(period: str) -> str:
-    value = (period or "30").lower().replace("m", "")
-    digits = "".join(ch for ch in value if ch.isdigit())
-    return digits or "30"

@@ -14,6 +14,7 @@ venv/
 # Secrets
 .env
 .env.*
+!.env.example
 
 # Runtime data
 logs/
@@ -44,3 +45,8 @@ data/backups/
 
 # 一次性脚本产物（种子SQL等传输工件）
 scripts/temp/
+
+# 构建/运行产物（P2-31）
+.coverage
+*.zip
+!web/static/*.zip

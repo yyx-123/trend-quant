@@ -163,9 +163,20 @@ class TestBatchRun:
         )
         assert detail.status_code == 200
         body = detail.json()
+        # blob 解析后必须是结构化的列表（而非 JSON 字符串或 None）
         assert isinstance(body["trades"], list)
         assert isinstance(body["monthly_nav"], list)
         assert isinstance(body["annual_returns"], list)
+        # 单格明细的业务字段与成功回测语义
+        assert body["symbol"] == "BT1.SS"
+        assert body["status"] == "ok"
+        assert body["bar_count"] > 0
+        if body["trades"]:
+            first = body["trades"][0]
+            assert first["side"] in ("BUY", "SELL")
+            assert "date" in first
+        for point in body["monthly_nav"]:
+            assert "month" in point and "equity" in point
 
         # 钻取快照
         snap = client.get(

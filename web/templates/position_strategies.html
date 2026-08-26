@@ -1,94 +1,5 @@
 {% extends "base.html" %}
 {% block content %}
-<style>
-.rule-strategy-page .strategy-row-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-/* 弹窗在 section 之外（见 HTML 注释），弹窗内样式一律用 .sizer-dialog 定向 */
-.sizer-dialog .strategy-danger-btn {
-  border-color: var(--danger);
-  background: linear-gradient(135deg, #c15b58 0%, #a54441 100%);
-  box-shadow: 0 14px 26px rgba(193, 91, 88, 0.24);
-}
-.sizer-dialog .strategy-danger-btn:hover:not(:disabled) {
-  box-shadow: 0 20px 32px rgba(193, 91, 88, 0.28);
-}
-.sizer-dialog .strategy-delete-text {
-  margin: 4px 0 18px;
-  color: var(--text-soft);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-.rule-strategy-page .sizer-type-badge {
-  display: inline-block;
-  padding: 2px 10px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-size: 11px;
-  font-weight: 900;
-  vertical-align: middle;
-}
-.sizer-dialog .sizer-param-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
-  margin: 14px 0;
-}
-
-/* 经典弹窗布局：头部 + 内容滚动区 + 固定底栏。底栏不参与滚动，
-   永远不会遮挡最后的输入框（不再依赖 sticky）。 */
-.sizer-dialog {
-  display: flex;
-  flex-direction: column;
-  width: min(760px, 100%);
-  max-height: calc(100vh - 72px);
-  overflow: hidden;
-}
-
-.sizer-dialog .sizer-dialog-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.sizer-dialog .rule-strategy-dialog-actions {
-  position: static;  /* 覆盖全局 sticky：此处底栏是 flex 固定项 */
-  flex: 0 0 auto;
-}
-
-/* 头部关闭按钮：禁止压缩与换行 */
-.sizer-dialog .rule-strategy-dialog-head .ghost-btn {
-  flex: 0 0 auto;
-  min-width: 0;
-  white-space: nowrap;
-}
-
-.sizer-dialog .rule-strategy-name-field {
-  width: 100%;
-}
-
-.sizer-dialog .sizer-param-grid {
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-}
-.sizer-dialog .sizer-param-field {
-  display: grid;
-  gap: 6px;
-  color: var(--text-soft);
-  font-size: 13px;
-  font-weight: 600;
-}
-.sizer-dialog .sizer-param-field input,
-.sizer-dialog .sizer-param-field select {
-  min-height: 40px;
-  padding: 0 12px;
-  border: 1px solid rgba(20, 41, 51, 0.16);
-  border-radius: 10px;
-  font: inherit;
-}
-</style>
 
 <section class="page-panel rule-strategy-page">
   <h2>仓位策略</h2>
@@ -193,11 +104,6 @@
   const statusEl = document.getElementById("status");
   const gridEl = document.getElementById("strategyGrid");
 
-  function esc(text) {
-    return String(text ?? "").replace(/[&<>"']/g, c => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
-  }
 
   function typeSpec(type) {
     return sizerTypes.find(t => t.type === type) || null;

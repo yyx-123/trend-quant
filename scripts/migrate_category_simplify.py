@@ -22,14 +22,18 @@ instrument_metadata 两张表驱动，前端、看板、MCP、批量回测均动
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path as _Path
+
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 import argparse
-import shutil
 import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path("data/trend_quant.db")
+import _common  # .env 加载 + DB_PATH + TickFlow 构造（P2-13）
+
+DB_PATH = _common.DB_PATH
 BACKUP_DIR = Path("data/backups")
 
 DEMOTE_L1 = ["宽基", "跨境", "策略", "商品"]  # 降级为 ETF 二级类目，保持该顺序
@@ -38,7 +42,6 @@ DROP_L1 = "债券"
 KEEP_L1 = "股票"
 
 MARKET_TABLES = ["market_data_raw", "market_data_qfq", "indicator_daily", "trend_daily", "ex_factors"]
-
 
 def build_new_tree(old_rows: list[sqlite3.Row]) -> list[tuple]:
     """由旧分类树推导新树，保留各层级原有 priority。
@@ -81,7 +84,6 @@ def build_new_tree(old_rows: list[sqlite3.Row]) -> list[tuple]:
 
     return new_rows
 
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="标的分类精简迁移（ETF/股票两级）")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不写库")
@@ -122,10 +124,11 @@ def main() -> int:
         conn.close()
         return 0
 
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    backup = BACKUP_DIR / f"trend_quant_pre_category_simplify_{datetime.now():%Y%m%d_%H%M%S}.db"
     conn.close()
-    shutil.copy2(DB_PATH, backup)
+    # VACUUM INTO 在线备份（WAL 安全；shutil.copy2 活库可能缺最近写入，P2-24）
+    from data.storage.db import Database
+
+    backup = Database(DB_PATH).backup_to(backup_dir=BACKUP_DIR, keep=10)
     print(f"[migrate] 已备份: {backup}")
 
     conn = sqlite3.connect(DB_PATH)
@@ -203,7 +206,6 @@ def main() -> int:
     print("[migrate] 完成。" if ok else "[migrate] 校验未通过，请检查！")
     print("[migrate] 提示：批量回测历史结果未迁移，需要时请重跑回测。")
     return 0 if ok else 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

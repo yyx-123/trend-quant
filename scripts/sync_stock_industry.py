@@ -17,14 +17,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import _common  # .env 加载 + DB_PATH + TickFlow 构造（P2-13）
 
-from data.storage.db import init_db  # noqa: E402
-from services.stock_industry import (  # noqa: E402
+logger = _common.setup_script_logging(__name__)
+
+from data.storage.db import init_db
+from services.stock_industry import (
     record_industry_sync_job,
     sync_industry_from_tickflow,
 )
 
-DB_PATH = Path("data/trend_quant.db")
+DB_PATH = _common.DB_PATH
 
 
 def main() -> int:
@@ -35,7 +38,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if not Path(args.db).exists():
-        print(f"[sync] 找不到数据库 {args.db}", file=sys.stderr)
+        logger.info(f"[sync] 找不到数据库 {args.db}")
         return 1
 
     db = init_db(args.db)
@@ -44,28 +47,28 @@ def main() -> int:
         db=db, reclassify=not args.no_reclassify, write=not args.dry_run
     )
     if args.dry_run:
-        print(
+        logger.info(
             f"[sync] dry-run：universes={summary['universes']} 股票行={summary['rows']}，未写库。"
         )
         return 0
     record_industry_sync_job("stock_industry_sync_tickflow", summary)
 
-    print(
+    logger.info(
         f"[sync] universes={summary['universes']} 股票行={summary['rows']} "
         f"写入={summary['written']} 被高优先级挡下={summary['skipped_by_priority']}"
     )
     reclassify = summary.get("reclassify")
     if reclassify is not None:
         moved = reclassify["moved"]
-        print(
+        logger.info(
             f"[sync] 待分类回补：待处理={reclassify['pending']} 移动={len(moved)} "
             f"树未就绪延迟={reclassify['deferred']} 仍未分类={len(reclassify['still_unclassified'])}"
         )
         for item in moved:
-            print(f"  {item['symbol']} {item['name']} → {item['to']} ({item['source']})")
+            logger.info(f"  {item['symbol']} {item['name']} → {item['to']} ({item['source']})")
         if reclassify["still_unclassified"]:
-            print(f"  仍未分类: {reclassify['still_unclassified']}")
-    print("[sync] 完成。")
+            logger.info(f"  仍未分类: {reclassify['still_unclassified']}")
+    logger.info("[sync] 完成。")
     return 0
 
 

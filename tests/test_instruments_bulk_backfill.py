@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-import threading
+import pytest
+
+pytestmark = pytest.mark.integration
+
+
 import tempfile
+import threading
 import time
 import unittest
 from datetime import date
 from pathlib import Path
 
+from data.storage.db import get_db, init_db, reset_db_instance_for_tests
 from services.instrument_jobs import BulkBackfillJobManager, InstrumentAddJobManager
-from data.storage.db import get_db, init_db
 
 
 class FakeBackfillService:
@@ -137,6 +142,7 @@ class BulkBackfillJobManagerTest(unittest.TestCase):
         # Worker threads may still be flushing the final job_runs write
         # (WAL files) right after the terminal status is published.
         time.sleep(0.3)
+        reset_db_instance_for_tests()
         self.tmp.cleanup()
 
     def test_runs_in_background_and_summarizes_results(self) -> None:
@@ -171,15 +177,18 @@ class BulkBackfillJobManagerTest(unittest.TestCase):
         self.assertEqual(done["summary"]["no_data"], 1)
         self.assertEqual(done["summary"]["failed"], 1)
         self.assertEqual(done["summary"]["added_rows"], 2)
-        # close() happens in the worker's finally block, just after the
-        # terminal status is published — poll briefly instead of racing it.
-        deadline = time.time() + 2
-        while not services[0].closed and time.time() < deadline:
+        # P2-11 单例化后任务结束不再 close() service（共享实例语义）——
+        # factory 返回的实例应保持未关闭状态。
+        deadline = time.time() + 0.2
+        while time.time() < deadline:
             time.sleep(0.02)
-        self.assertTrue(services[0].closed)
+        self.assertFalse(services[0].closed)
+        # P2-9：start 落 running 行 + 完成落终态行，共 2 条
         runs = get_db().list_job_runs("instrument_bulk_backfill")
-        self.assertEqual(len(runs), 1)
+        self.assertEqual(len(runs), 2)
         self.assertEqual(runs[0]["payload"]["status"], "completed")
+        self.assertEqual(runs[0]["status"], "completed")
+        self.assertEqual(runs[1]["status"], "running")
 
     def test_rejects_second_job_while_running(self) -> None:
         release = threading.Event()
@@ -271,6 +280,7 @@ class InstrumentAddJobManagerTest(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        reset_db_instance_for_tests()
         self.tmp.cleanup()
 
     def test_add_job_writes_config_metadata_and_backfills(self) -> None:

@@ -6,12 +6,12 @@ all computation delegates to core.indicators / core.trend.
 
 from __future__ import annotations
 
-from math import isfinite
-from typing import Iterable
+from collections.abc import Iterable
 
 import pandas as pd
 
 from core import indicators as core_ind
+from core.numfmt import number6_or_none
 from core.strategy_config import get_strategy_config
 from core.trend import calculate_trend_score_series
 
@@ -24,13 +24,7 @@ DEFAULT_RSI_PERIOD = 14
 
 
 def _num(value: object) -> float | None:
-    try:
-        n = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if pd.isna(n):
-        return None
-    return round(n, 6)
+    return number6_or_none(value)
 
 
 def _series(values: Iterable[object]) -> list[float | None]:

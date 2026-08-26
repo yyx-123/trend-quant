@@ -10,7 +10,6 @@ service so tests stay fast.
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -60,15 +59,9 @@ def _install_fake_service(monkeypatch: pytest.MonkeyPatch, behavior: str) -> Non
 
 
 def _poll_until_terminal(client, run_id: str, timeout_s: float = 5.0) -> dict:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        resp = client.get(f"/rule-backtest/api/progress/{run_id}")
-        assert resp.status_code == 200
-        data = resp.json()
-        if data["status"] != "running":
-            return data
-        time.sleep(0.05)
-    raise AssertionError("backtest job did not reach a terminal state in time")
+    from conftest import poll_until_terminal
+
+    return poll_until_terminal(client, f"/rule-backtest/api/progress/{run_id}", timeout_s)
 
 
 class TestRuleBacktestAsyncApi:

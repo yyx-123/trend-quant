@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-import logging
 
 import pandas as pd
 
+from audit.app_logger import get_logger
 from rule_backtest.condition_engine import ConditionEngine
-from rule_backtest.indicators import latest_field
 from rule_backtest.metrics import (
     compute_annual_returns,
     compute_drawdown,
@@ -25,7 +24,7 @@ from rule_backtest.sizing.base import (
 from rule_backtest.state_values import initialize_stop_state, update_position_state_for_day
 from rule_backtest.value_resolver import ValueResolver
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class SingleSymbolAllInBacktestEngine:
@@ -41,7 +40,9 @@ class SingleSymbolAllInBacktestEngine:
 
         run_id = request.run_id or datetime.now().strftime("%Y%m%d%H%M%S%f")
         strategy = request.strategy
-        execution = request.execution
+        # 零值费用参数统一归一为默认值（全系统不提供零成本回测，与
+        # service 层同口径；显式传 0 与未传参同等处理）。
+        execution = request.execution.normalized()
         debug_enabled = self._debug_enabled(execution=execution, bars=bars)
         total_days = len(bars)
         progress_callback = request.progress_callback
@@ -61,20 +62,23 @@ class SingleSymbolAllInBacktestEngine:
         debug_log: list[dict] = []
         turnover_total = 0.0
 
-        for day_no, (idx, row) in enumerate(bars.iterrows(), 1):
-            day = row["date"]
+        # 热路径用 itertuples（比 iterrows 快约一个数量级，P2-15）；
+        # _prepare_bars 已 reset_index(drop=True)，row.Index 即位置坐标。
+        for day_no, row in enumerate(bars.itertuples(), 1):
+            idx = row.Index
+            day = row.date
             day_str = day.isoformat()
             # Slice view only — nothing downstream mutates it; the previous
             # per-day .copy() was O(n^2) memory churn.
             day_bars = all_bars.iloc[: idx + 1]
-            close_price = float(row["close"])
+            close_price = float(row.close)
             debug_day: dict = {
                 "date": day_str,
-                "raw_bar": self._row_to_dict(row),
+                "raw_bar": self._row_to_dict(all_bars.iloc[idx]),
                 "history_window": {
                     "start": all_bars.iloc[0]["date"].isoformat(),
                     "end": day_str,
-                    "rows": int(len(day_bars)),
+                    "rows": len(day_bars),
                 },
             } if debug_enabled else {}
 
@@ -280,8 +284,11 @@ class SingleSymbolAllInBacktestEngine:
         df = pd.DataFrame(raw_bars).copy()
         if df.empty:
             return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "amount"])
-        if "date" not in df.columns and "time" in df.columns:
-            df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+        if "date" not in df.columns:
+            if "time" in df.columns:
+                df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+            else:
+                raise ValueError("行情数据缺少时间列（需要 date 或 time 列）")
         else:
             df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
         for col in ("open", "high", "low", "close", "volume", "amount"):
@@ -337,7 +344,7 @@ class SingleSymbolAllInBacktestEngine:
             atr_at=self._make_atr_source(resolver=resolver, idx=idx),
             closed_trades=[t for t in trades if t.get("side") == "SELL"],
             execution=execution,
-            history_bars=int(len(day_bars)),
+            history_bars=len(day_bars),
             affordable_qty=int(affordable_qty),
         )
         decision = sizer.decide(ctx)
@@ -591,8 +598,8 @@ class SingleSymbolAllInBacktestEngine:
         qty = int((initial_capital // first_close) // lot_size) * lot_size
         cash = initial_capital - qty * first_close
         series = [
-            {"date": row["date"].isoformat(), "equity": float(cash + qty * float(row["close"]))}
-            for _, row in bars.iterrows()
+            {"date": day.isoformat(), "equity": float(cash + qty * float(close_))}
+            for day, close_ in zip(bars["date"], bars["close"])
         ]
         return {"name": "buy_and_hold", "qty": int(qty), "series": series}
 
@@ -602,15 +609,10 @@ class SingleSymbolAllInBacktestEngine:
             return {"dates": [], "candles": [], "ma": {}, "buy_points": [], "sell_points": [], "skipped_buy_points": []}
 
         data = bars.copy()
-        dates = [row["date"].isoformat() for _, row in data.iterrows()]
+        dates = [day.isoformat() for day in data["date"]]
         candles = [
-            [
-                float(row["open"]),
-                float(row["close"]),
-                float(row["low"]),
-                float(row["high"]),
-            ]
-            for _, row in data.iterrows()
+            [float(o), float(c), float(lo), float(hi)]
+            for o, c, lo, hi in zip(data["open"], data["close"], data["low"], data["high"])
         ]
         close = pd.to_numeric(data["close"], errors="coerce")
         ma: dict[str, list[float | None]] = {}

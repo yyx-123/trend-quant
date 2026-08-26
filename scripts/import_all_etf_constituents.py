@@ -17,14 +17,17 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import _common  # .env 加载 + DB_PATH + TickFlow 构造（P2-13）
 
-from data.service import DataService  # noqa: E402
-from data.storage.db import init_db, record_job_run_safely  # noqa: E402
-from services.indicator_builder import rebuild_after_backfill  # noqa: E402
-from services.instrument_admin import _known_managed_symbols, add_constituent_stock  # noqa: E402
-from services.stock_industry import is_a_share  # noqa: E402
+logger = _common.setup_script_logging(__name__)
 
-DB_PATH = Path("data/trend_quant.db")
+from data.service import DataService
+from data.storage.db import init_db, record_job_run_safely
+from services.indicator_builder import rebuild_after_backfill
+from services.instrument_admin import _known_managed_symbols, add_constituent_stock
+from services.stock_industry import is_a_share
+
+DB_PATH = _common.DB_PATH
 _JOB_TYPE = "etf_constituents_import_all"
 
 
@@ -35,13 +38,13 @@ def main() -> int:
     args = parser.parse_args()
 
     if not Path(args.db).exists():
-        print(f"[import-all] 找不到数据库 {args.db}", file=sys.stderr)
+        logger.info(f"[import-all] 找不到数据库 {args.db}")
         return 1
 
     db = init_db(args.db)
     rows = db.list_all_current_etf_constituents()
     if not rows:
-        print("[import-all] etf_constituents 无快照数据，请先运行 scripts/fetch_etf_holdings.py")
+        logger.info("[import-all] etf_constituents 无快照数据，请先运行 scripts/fetch_etf_holdings.py")
         return 1
 
     # 去重（一只股票是多只 ETF 的重仓），保留首次出现的名称；
@@ -58,20 +61,20 @@ def main() -> int:
         if symbol not in stocks:
             stocks[symbol] = str(row.get("stock_name") or "").strip()
     etf_count = len({str(r.get("etf_symbol") or "") for r in rows})
-    print(f"[import-all] {etf_count} 只 ETF 的快照，去重后 {len(stocks)} 只 A 股"
+    logger.info(f"[import-all] {etf_count} 只 ETF 的快照，去重后 {len(stocks)} 只 A 股"
           f"（另有 {not_manageable} 行非 A 股不纳入管理）")
 
     known = _known_managed_symbols()
     todo = {s: n for s, n in stocks.items() if s not in known}
-    print(f"[import-all] 已在管理 {len(stocks) - len(todo)} 只，待导入 {len(todo)} 只")
+    logger.info(f"[import-all] 已在管理 {len(stocks) - len(todo)} 只，待导入 {len(todo)} 只")
     if args.dry_run:
         from services.stock_industry import resolve_category
 
         hit = sum(1 for s in todo if resolve_category(s, db=db)["hit"])
-        print(f"[import-all] 其中行业命中 {hit} 只，待分类 {len(todo) - hit} 只。dry-run，未写库。")
+        logger.info(f"[import-all] 其中行业命中 {hit} 只，待分类 {len(todo) - hit} 只。dry-run，未写库。")
         return 0
     if not todo:
-        print("[import-all] 无待导入标的，完成。")
+        logger.info("[import-all] 无待导入标的，完成。")
         return 0
 
     added: list[dict] = []
@@ -87,19 +90,21 @@ def main() -> int:
         else:
             failed.append(outcome)
         if idx % 50 == 0 or idx == len(todo):
-            print(f"[import-all] 写入进度 {idx}/{len(todo)}")
+            logger.info(f"[import-all] 写入进度 {idx}/{len(todo)}")
 
-    print(f"[import-all] 新增 {len(added)} 只（待分类 {sum(1 for a in added if not a['hit'])} 只），"
+    logger.info(f"[import-all] 新增 {len(added)} 只（待分类 {sum(1 for a in added if not a['hit'])} 只），"
           f"跳过 {len(skipped)} 只，失败 {len(failed)} 只")
 
     backfill_updated = 0
     backfill_failed: list[str] = []
     if added:
-        print(f"[import-all] 开始批量回补 {len(added)} 只标的历史行情（2020-01-01 起）...")
+        from core.strategy_config import backfill_start_date
+
+        logger.info(f"[import-all] 开始批量回补 {len(added)} 只标的历史行情（{backfill_start_date()} 起）...")
         service = DataService()
         try:
             payloads = service.backfill_daily_histories(
-                items=[{"symbol": a["symbol"], "start_date": date(2020, 1, 1)} for a in added],
+                items=[{"symbol": a["symbol"], "start_date": backfill_start_date()} for a in added],
                 end_date=date.today(),
                 adjust="qfq",
                 max_retries=3,
@@ -123,9 +128,9 @@ def main() -> int:
                 backfill_failed.append(
                     str((payload.get("result") or {}).get("symbol") or payload.get("symbol") or "")
                 )
-        print(f"[import-all] 行情回补成功 {backfill_updated} 只，失败 {len(backfill_failed)} 只 {backfill_failed or ''}")
+        logger.info(f"[import-all] 行情回补成功 {backfill_updated} 只，失败 {len(backfill_failed)} 只 {backfill_failed or ''}")
         if updated_symbols:
-            print("[import-all] 重建指标与趋势缓存...")
+            logger.info("[import-all] 重建指标与趋势缓存...")
             rebuild_after_backfill(updated_symbols)
 
     record_job_run_safely(
@@ -143,7 +148,7 @@ def main() -> int:
         },
         status="success" if not failed else "partial",
     )
-    print("[import-all] 完成。")
+    logger.info("[import-all] 完成。")
     return 0 if not failed else 1
 
 

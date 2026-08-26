@@ -17,13 +17,12 @@ import pandas as pd
 import pytest
 
 from data.intraday_service import (
-    build_synthetic_bar,
-    compute_intraday_trend_score,
     _ma5,
     _number,
     _priority,
+    build_synthetic_bar,
+    compute_intraday_trend_score,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -229,8 +228,7 @@ class TestBuildIntradayDashboard:
             for l2 in l1.get("items", []):
                 items.append(l2)
                 # L3 is under 'children', not 'items'
-                for l3 in l2.get("children", []):
-                    items.append(l3)
+                items.extend(l2.get("children", []))
         return items
 
     def test_trend_history_not_empty(self, fake_deps) -> None:
@@ -256,12 +254,12 @@ class TestBuildIntradayDashboard:
                 f"BUG 1a: trend_history is None for '{item.get('category_l3', item.get('category_l2'))}'"
             )
             assert len(history) > 0, (
-                f"BUG 1b: trend_history is empty — sparklines won't render"
+                "BUG 1b: trend_history is empty — sparklines won't render"
             )
 
             dates = item.get("trend_dates")
             assert dates is not None and len(dates) == len(history), (
-                f"trend_dates length != trend_history length"
+                "trend_dates length != trend_history length"
             )
 
     def test_trend_ma5_differs_from_trend_score(self, fake_deps) -> None:
@@ -294,7 +292,9 @@ class TestBuildIntradayDashboard:
 
             # Only if ALL daily scores are identical can MA5 == trend_score
             all_same = all(v == history[0] for v in history)
-            assert ts != ma5 or all_same, (
+            # 测试数据为递增序列，MA5 必然不等于当日 trend_score（无恒真漏洞）
+            assert not all_same, "fixture data unexpectedly constant"
+            assert ts != ma5, (
                 f"BUG 2: trend_score ({ts}) == trend_ma5 ({ma5}) for "
                 f"'{item.get('category_l3', item.get('category_l2'))}'"
                 f" — MA5 should be a 5-day smoothed average. "
@@ -344,7 +344,8 @@ class TestBuildIntradayDashboard:
         # Per-group keys expected by frontend (L1 groups are dicts with keys)
         if result["groups"]:
             g = result["groups"][0]
-            assert len(g) > 0, "empty group dict"
+            for key in ("category_l1", "count", "items"):
+                assert key in g, f"missing group key: {key}"
 
     def test_cache_first_path_with_indicator_cache(self, fake_deps) -> None:
         """回归：缓存路径下 amount 权重取自 1y tail —— load_market_tail 必须含
@@ -428,12 +429,3 @@ class TestBuildIntradayDashboard:
                     assert l3["kline"] == []
                     assert l3["macd_golden_count"] == sum(1 for i in l3["children"] if i["macd_phase"] == "golden")
                     assert l3["macd_dead_count"] == sum(1 for i in l3["children"] if i["macd_phase"] == "dead")
-
-
-def _all_same_score(group: dict) -> bool:
-    """Return True if trend_history has only one unique value."""
-    history = group.get("trend_history", [])
-    if len(history) <= 1:
-        return True
-    first = history[0]
-    return all(v == first for v in history)

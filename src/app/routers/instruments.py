@@ -1,34 +1,33 @@
 from __future__ import annotations
 
-import logging
-import threading
-from datetime import date, datetime
-from typing import Callable
+from datetime import datetime
 
-import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from core.benchmarks import benchmark_instruments
-from core.strategy_config import get_strategy_config
+from core.calendar import market_now
+from core.display import category_path as _category_path
+from core.strategy_config import backfill_start_date, get_strategy_config
 from core.symbols import normalize_symbol, symbol_suffix, symbol_to_code
-from data.service import DataService
+
+# P1-14：原 instrument_admin 的纯转发包装已删，直接用 core 层实现
+_normalize_symbol = normalize_symbol
+_symbol_suffix = symbol_suffix
+_symbol_to_code = symbol_to_code
+from data.service import get_data_service
 from data.storage.db import get_db, record_job_run_safely
-from data.storage.market_store import MarketStore
+from services.indicator_builder import rebuild_after_backfill
 from services.instrument_admin import (
     _category_path_from_parts,
     _category_priority_map,
     _config_name_map,
     _known_managed_symbols,
     _next_sort_order,
-    _normalize_symbol,
-    _symbol_suffix,
-    _symbol_to_code,
     _to_date,
 )
-from services.indicator_builder import rebuild_after_backfill
 from services.instrument_jobs import (
     add_instrument_manager,
     bulk_backfill_manager,
@@ -37,31 +36,29 @@ from services.instrument_jobs import (
 from services.stock_industry import is_a_share, resolve_category
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
-templates = Jinja2Templates(directory="web/templates")
-market_store = MarketStore()
-logger = logging.getLogger(__name__)
+from audit.app_logger import get_logger
+from core.paths import web_dir as _web_dir
 
+_templates_dir = _web_dir() / "templates"
+templates = Jinja2Templates(directory=str(_templates_dir))
+logger = get_logger(__name__)
 
 class InstrumentBackfillRequest(BaseModel):
     start_date: str = Field(default="")
     end_date: str = Field(default="")
     adjust: str = Field(default="")
 
-
 class InstrumentBulkBackfillItem(BaseModel):
     symbol: str
     start_date: str = Field(default="")
-
 
 class InstrumentBulkBackfillRequest(BaseModel):
     items: list[InstrumentBulkBackfillItem] = Field(default_factory=list)
     end_date: str = Field(default="")
     adjust: str = Field(default="")
 
-
 class InstrumentNameLookupRequest(BaseModel):
     symbol: str
-
 
 class InstrumentAddRequest(BaseModel):
     symbol: str
@@ -73,77 +70,25 @@ class InstrumentAddRequest(BaseModel):
     end_date: str = Field(default="")
     adjust: str = Field(default="")
 
-
 class InstrumentUpdateRequest(BaseModel):
     category_l1: str
     category_l2: str
     category_l3: str
-
 
 class EtfConstituentImportRequest(BaseModel):
     etf_symbol: str
     end_date: str = Field(default="")
     adjust: str = Field(default="")
 
-
-
-
-
-
-
-
 def _category_options() -> list[dict]:
-    db = get_db()
-    rows = db.list_instrument_categories()
-    if rows:
-        return rows
+    """类目树唯一来源：instrument_categories 表。
 
-    categories: dict[str, dict] = {}
-    for item in [*db.list_instrument_metadata(), *_config_items()]:
-        if not isinstance(item, dict):
-            continue
-        l1 = str(item.get("category_l1") or "").strip()
-        l2 = str(item.get("category_l2") or "").strip()
-        l3 = str(item.get("category_l3") or "").strip()
-        if l1:
-            categories.setdefault(
-                l1,
-                {"path": l1, "level": 1, "name": l1, "parent_path": "", "priority": item.get("priority_l1")},
-            )
-        if l1 and l2:
-            path = _category_path_from_parts(l1, l2)
-            categories.setdefault(
-                path,
-                {"path": path, "level": 2, "name": l2, "parent_path": l1, "priority": item.get("priority_l2")},
-            )
-        if l1 and l2 and l3:
-            parent = _category_path_from_parts(l1, l2)
-            path = _category_path_from_parts(l1, l2, l3)
-            categories.setdefault(
-                path,
-                {"path": path, "level": 3, "name": l3, "parent_path": parent, "priority": item.get("priority_l3")},
-            )
-    return sorted(
-        categories.values(),
-        key=lambda item: (
-            int(item.get("level") or 0),
-            str(item.get("parent_path") or ""),
-            int(item.get("priority") or 9999),
-            str(item.get("name") or ""),
-        ),
-    )
-
-
-def _category_path(meta: dict | None) -> str:
-    if not meta:
-        return ""
-    parts = [
-        str(meta.get("category_l1") or "").strip(),
-        str(meta.get("category_l2") or "").strip(),
-        str(meta.get("category_l3") or "").strip(),
-    ]
-    return "-".join(part for part in parts if part)
-
+    空表时返回空列表（不再从 metadata 反推）；此时 /api/add 与
+    /api/{symbol}/update 的 valid_paths 校验为空集，任何新增/更新都会
+    400「类目组合不存在」——全新部署需先跑类目种子（迁移脚本或导出/导入），
+    见 README 部署章节。
+    """
+    return get_db().list_instrument_categories()
 
 def _metadata_priority(meta: dict | None) -> tuple:
     if not meta:
@@ -156,16 +101,13 @@ def _metadata_priority(meta: dict | None) -> tuple:
         int(meta.get("sort_order") or 999999),
     )
 
-
 def _provider_priority_from_request(request: Request) -> list[str] | None:
     if hasattr(request.app.state, "settings"):
         return list(getattr(request.app.state.settings.app, "data_provider_priority", []) or [])
     return None
 
-
 def _default_adjust() -> str:
     return str(get_strategy_config().get("adjust", "qfq"))
-
 
 @router.get("", response_class=HTMLResponse)
 async def instruments_page(request: Request) -> HTMLResponse:
@@ -175,12 +117,10 @@ async def instruments_page(request: Request) -> HTMLResponse:
         context={"title": "标的管理"},
     )
 
-
 @router.get("/api/categories")
 async def list_categories() -> dict:
     items = _category_options()
     return {"ok": True, "items": items, "count": len(items)}
-
 
 @router.post("/api/lookup")
 async def lookup_instrument_name(payload: InstrumentNameLookupRequest, request: Request) -> dict:
@@ -192,13 +132,11 @@ async def lookup_instrument_name(payload: InstrumentNameLookupRequest, request: 
     if normalized_symbol in _known_managed_symbols():
         raise HTTPException(status_code=409, detail=f"{normalized_symbol} 已被管理")
 
-    data_service = DataService(provider_priority=_provider_priority_from_request(request))
+    data_service = get_data_service()
     try:
         result = data_service.fetch_instrument_name(normalized_symbol)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"名称查询失败：{exc}") from exc
-    finally:
-        data_service.close()
 
     return {
         "ok": True,
@@ -209,7 +147,6 @@ async def lookup_instrument_name(payload: InstrumentNameLookupRequest, request: 
         "provider": result.get("provider", ""),
         "ts": result.get("ts"),
     }
-
 
 @router.post("/api/add")
 async def start_add_instrument(payload: InstrumentAddRequest, request: Request) -> dict:
@@ -254,7 +191,7 @@ async def start_add_instrument(payload: InstrumentAddRequest, request: Request) 
         raise HTTPException(status_code=400, detail="类目组合不存在，请重新选择")
 
     try:
-        end_date = _to_date(payload.end_date, date.today())
+        end_date = _to_date(payload.end_date, market_now().date())
     except ValueError:
         raise HTTPException(status_code=400, detail="日期格式必须是 YYYY-MM-DD")
 
@@ -274,11 +211,9 @@ async def start_add_instrument(payload: InstrumentAddRequest, request: Request) 
     )
     return {"ok": True, "started": started, "job": status}
 
-
 @router.get("/api/add/status")
 async def get_add_instrument_status() -> dict:
     return {"ok": True, "job": add_instrument_manager.snapshot()}
-
 
 @router.get("/api/suggest-category/{symbol}")
 async def suggest_category(symbol: str) -> dict:
@@ -289,11 +224,9 @@ async def suggest_category(symbol: str) -> dict:
     resolved = resolve_category(normalized_symbol)
     return {"ok": True, "symbol": normalized_symbol, **resolved}
 
-
 @router.get("/api/etf-constituents/import/status")
 async def get_etf_import_status() -> dict:
     return {"ok": True, "job": etf_constituent_import_manager.snapshot()}
-
 
 @router.post("/api/etf-constituents/import")
 async def import_etf_constituents(payload: EtfConstituentImportRequest, request: Request) -> dict:
@@ -306,7 +239,7 @@ async def import_etf_constituents(payload: EtfConstituentImportRequest, request:
         raise HTTPException(status_code=400, detail=f"{etf_symbol} 暂无重仓股快照，请先运行季度快照脚本")
 
     try:
-        end_date = _to_date(payload.end_date, date.today())
+        end_date = _to_date(payload.end_date, market_now().date())
     except ValueError:
         raise HTTPException(status_code=400, detail="日期格式必须是 YYYY-MM-DD")
     adjust = str(payload.adjust or _default_adjust()).strip().lower() or "qfq"
@@ -319,7 +252,6 @@ async def import_etf_constituents(payload: EtfConstituentImportRequest, request:
     )
     return {"ok": True, "started": started, "job": status}
 
-
 def _market_label(symbol: str) -> str:
     """非 A 股标的的市场展示名；A 股返回空串。"""
     text = str(symbol or "").strip().upper()
@@ -330,7 +262,6 @@ def _market_label(symbol: str) -> str:
     if text.endswith((".US", ".O", ".N", ".A")):
         return "美股"
     return "" if is_a_share(text) else "境外"
-
 
 @router.get("/api/etf-constituents/{etf_symbol}")
 async def preview_etf_constituents(etf_symbol: str) -> dict:
@@ -360,7 +291,7 @@ async def preview_etf_constituents(etf_symbol: str) -> dict:
     months_since = None
     try:
         period_date = datetime.strptime(period, "%Y%m%d").date()
-        months_since = round((date.today() - period_date).days / 30.44, 1)
+        months_since = round((market_now().date() - period_date).days / 30.44, 1)
     except ValueError:
         pass
 
@@ -398,7 +329,6 @@ async def preview_etf_constituents(etf_symbol: str) -> dict:
         "items": items,
     }
 
-
 @router.get("/api/list")
 async def list_instruments() -> dict:
     db = get_db()
@@ -425,10 +355,13 @@ async def list_instruments() -> dict:
     for symbol in db.list_market_symbols():
         known_symbols.add(symbol.upper())
 
+    # 单条 GROUP BY 聚合（P2-18）：替代逐只 get_market_data_summary 的 N+1
+    summaries_by_symbol = db.list_market_data_summaries()
+
     items: list[dict] = []
     for symbol in sorted(known_symbols):
         meta = metadata_by_symbol.get(symbol)
-        summary = db.get_market_data_summary(symbol)
+        summary = summaries_by_symbol.get(symbol) or {"rows": 0, "start": None, "end": None}
         rows = summary.get("rows", 0)
         local_start = summary.get("start")
         local_end = summary.get("end")
@@ -475,8 +408,7 @@ async def list_instruments() -> dict:
             str(x.get("symbol", "")),
         )
     )
-    return {"items": items, "count": len(items), "as_of": datetime.now().isoformat()}
-
+    return {"items": items, "count": len(items), "as_of": market_now().replace(tzinfo=None).isoformat()}
 
 @router.post("/api/{symbol}/update")
 async def update_instrument(symbol: str, payload: InstrumentUpdateRequest) -> dict:
@@ -538,7 +470,6 @@ async def update_instrument(symbol: str, payload: InstrumentUpdateRequest) -> di
         "metadata_saved": saved,
     }
 
-
 @router.post("/api/{symbol}/backfill")
 async def backfill_instrument(symbol: str, payload: InstrumentBackfillRequest, request: Request) -> dict:
     normalized_symbol = _normalize_symbol(symbol)
@@ -549,23 +480,20 @@ async def backfill_instrument(symbol: str, payload: InstrumentBackfillRequest, r
         raise HTTPException(status_code=400, detail="开始日期必填")
 
     try:
-        start_date = _to_date(payload.start_date, date(2020, 1, 1))
-        end_date = _to_date(payload.end_date, date.today())
+        start_date = _to_date(payload.start_date, backfill_start_date())
+        end_date = _to_date(payload.end_date, market_now().date())
     except ValueError:
         raise HTTPException(status_code=400, detail="日期格式必须是 YYYY-MM-DD")
 
     adjust = str(payload.adjust or _default_adjust()).strip().lower() or "qfq"
 
-    data_service = DataService(provider_priority=_provider_priority_from_request(request))
-    try:
-        result = data_service.backfill_daily_history(
-            symbol=normalized_symbol,
-            start_date=start_date,
-            end_date=end_date,
-            adjust=adjust,
-        )
-    finally:
-        data_service.close()
+    data_service = get_data_service()
+    result = data_service.backfill_daily_history(
+        symbol=normalized_symbol,
+        start_date=start_date,
+        end_date=end_date,
+        adjust=adjust,
+    )
     result["adjust"] = adjust
     result["requested_symbol"] = symbol
     result["symbol"] = normalized_symbol
@@ -582,11 +510,10 @@ async def backfill_instrument(symbol: str, payload: InstrumentBackfillRequest, r
     record_job_run_safely("instrument_backfill", result, status=str(result.get("status") or ""))
     return {"ok": True, "result": result}
 
-
 @router.post("/api/backfill-all")
 async def start_bulk_backfill(payload: InstrumentBulkBackfillRequest, request: Request) -> dict:
     try:
-        end_date = _to_date(payload.end_date, date.today())
+        end_date = _to_date(payload.end_date, market_now().date())
     except ValueError:
         raise HTTPException(status_code=400, detail="日期格式必须是 YYYY-MM-DD")
 
@@ -599,7 +526,7 @@ async def start_bulk_backfill(payload: InstrumentBulkBackfillRequest, request: R
             continue
         seen_symbols.add(symbol)
         try:
-            start_date = _to_date(raw_item.start_date, date(2020, 1, 1))
+            start_date = _to_date(raw_item.start_date, backfill_start_date())
         except ValueError:
             raise HTTPException(status_code=400, detail=f"{symbol} 的开始日期格式必须是 YYYY-MM-DD")
         items.append({"symbol": symbol, "start_date": start_date})
@@ -612,18 +539,28 @@ async def start_bulk_backfill(payload: InstrumentBulkBackfillRequest, request: R
     )
     return {"ok": True, "started": started, "job": status}
 
-
 @router.get("/api/backfill-all/status")
 async def get_bulk_backfill_status() -> dict:
     return {"ok": True, "job": bulk_backfill_manager.snapshot()}
 
-
 @router.get("/api/daily-update/status")
 async def daily_update_status() -> dict:
     """Latest 16:30 daily data update status for the global notification bar."""
+    from core.calendar import calendar_data_status
+    from core.settings import load_settings
+
+    calendar_status = calendar_data_status()
+    update_time = load_settings().app.update_time_after_close
     run = get_db().get_latest_job_run("daily_update")
     if not run:
-        return {"ts": None, "completed": False, "ok": False, "message": "暂无更新记录"}
+        return {
+            "ts": None,
+            "completed": False,
+            "ok": False,
+            "message": "暂无更新记录",
+            "calendar": calendar_status,
+            "update_time": update_time,
+        }
     payload = run.get("payload") or {}
     status = str(run.get("status") or "")
     if status == "failed":
@@ -639,6 +576,8 @@ async def daily_update_status() -> dict:
             "ok": False,
             "status": status,
             "message": f"盘后数据更新失败：{payload.get('error', '未知错误')}",
+            "calendar": calendar_status,
+            "update_time": update_time,
         }
     return {
         "ts": payload.get("ts") or run.get("created_at"),
@@ -650,4 +589,6 @@ async def daily_update_status() -> dict:
         "completed": True,
         "ok": status in ("completed", "partial", ""),
         "status": status or "completed",
+        "calendar": calendar_status,
+        "update_time": update_time,
     }

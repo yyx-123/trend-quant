@@ -3,17 +3,22 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import logging
 import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 
-_logger = logging.getLogger(__name__)
+from audit.app_logger import get_logger
+from core.calendar import market_now
+from core.display import category_path
+from core.env import password_iterations
+from core.paths import default_db_path
+
+_logger = get_logger(__name__)
 
 _db_instance: Database | None = None
 
@@ -23,26 +28,39 @@ _PASSWORD_ALGO = "pbkdf2_sha256"
 _PASSWORD_ITERATIONS = 200_000
 
 
+def _password_iterations() -> int:
+    """新哈希的迭代数：生产固定 20 万；测试环境可经 env 调低提速
+    （TREND_QUANT_PASSWORD_ITERATIONS，附录 B N4）。已存哈希的迭代数
+    记录在哈希串内，校验不受影响。"""
+    return password_iterations(_PASSWORD_ITERATIONS)
+
+
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
+    iterations = _password_iterations()
     digest = hashlib.pbkdf2_hmac(
-        "sha256", str(password).encode("utf-8"), bytes.fromhex(salt), _PASSWORD_ITERATIONS
+        "sha256", str(password).encode("utf-8"), bytes.fromhex(salt), iterations
     ).hex()
-    return f"{_PASSWORD_ALGO}${_PASSWORD_ITERATIONS}${salt}${digest}"
+    return f"{_PASSWORD_ALGO}${iterations}${salt}${digest}"
 
 
 def verify_password(stored: str, candidate: str) -> bool:
-    """校验候选密码。兼容两种存储：pbkdf2 哈希 / 历史明文（迁移遗漏兜底）。"""
+    """校验候选密码（仅接受 pbkdf2 哈希存储）。
+
+    2026-08 迁移期的明文比对兜底已随生产库 100% 哈希化（2026-08-26 实测
+    3/3 用户均为 pbkdf2 格式）清零——非哈希格式一律判失败，不再存在
+    绕过 pbkdf2 的明文比对路径。
+    """
     stored = str(stored)
     candidate = str(candidate)
     parts = stored.split("$")
-    if len(parts) == 4 and parts[0] == _PASSWORD_ALGO:
-        _, iterations, salt, digest = parts
-        actual = hashlib.pbkdf2_hmac(
-            "sha256", candidate.encode("utf-8"), bytes.fromhex(salt), int(iterations)
-        ).hex()
-        return hmac.compare_digest(actual, digest)
-    return hmac.compare_digest(stored, candidate)
+    if len(parts) != 4 or parts[0] != _PASSWORD_ALGO:
+        return False
+    _, iterations, salt, digest = parts
+    actual = hashlib.pbkdf2_hmac(
+        "sha256", candidate.encode("utf-8"), bytes.fromhex(salt), int(iterations)
+    ).hex()
+    return hmac.compare_digest(actual, digest)
 
 
 def _dt_str(dt: datetime) -> str:
@@ -51,7 +69,8 @@ def _dt_str(dt: datetime) -> str:
 
 
 class Database:
-    def __init__(self, db_path: str | Path = "data/trend_quant.db") -> None:
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        db_path = db_path if db_path is not None else default_db_path()
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # In-process cache for list_market_symbols(): the DISTINCT query scans
@@ -65,10 +84,15 @@ class Database:
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(self.db_path)
+        # timeout=30 即 busy_timeout：批量回测长事务 + 调度器三类任务并发
+        # 命中同一 WAL 库时，默认 5s 可能不够（P2-16/P2-23）。
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         # WAL: readers are not blocked during indicator cache rebuilds.
         conn.execute("PRAGMA journal_mode=WAL")
+        # 外键实际生效（manual_trades.user_id / sessions.user_id），删用户
+        # 不再留孤儿行；生产库已实测零孤儿（P2-23）。
+        conn.execute("PRAGMA foreign_keys=ON")
         try:
             yield conn
             conn.commit()
@@ -86,8 +110,13 @@ class Database:
         target_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         dest = target_dir / f"trend_quant-{stamp}.db"
-        conn = sqlite3.connect(self.db_path)
+        # VACUUM INTO 目标路径以单引号拼接进 SQL，含单引号的路径必须显式拒绝。
+        if "'" in str(dest):
+            raise ValueError(f"backup destination path must not contain a single quote: {dest}")
+        conn = sqlite3.connect(self.db_path, timeout=30)
         try:
+            # 显式 WAL checkpoint：确保最近写入都在主库文件内，备份不缺口。
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute(f"VACUUM INTO '{dest}'")
         finally:
             conn.close()
@@ -140,9 +169,6 @@ class Database:
                     updated_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (symbol, time)
                 );
-                CREATE INDEX IF NOT EXISTS idx_market_data_raw_symbol_time
-                    ON market_data_raw(symbol, time);
-
                 CREATE TABLE IF NOT EXISTS market_data_qfq (
                     symbol TEXT NOT NULL,
                     time TEXT NOT NULL,
@@ -156,9 +182,6 @@ class Database:
                     updated_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (symbol, time)
                 );
-                CREATE INDEX IF NOT EXISTS idx_market_data_qfq_symbol_time
-                    ON market_data_qfq(symbol, time);
-
                 CREATE TABLE IF NOT EXISTS ex_factors (
                     symbol TEXT NOT NULL,
                     time TEXT NOT NULL,
@@ -167,9 +190,6 @@ class Database:
                     updated_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (symbol, time)
                 );
-                CREATE INDEX IF NOT EXISTS idx_ex_factors_symbol_time
-                    ON ex_factors(symbol, time);
-
                 CREATE TABLE IF NOT EXISTS instrument_metadata (
                     symbol TEXT PRIMARY KEY,
                     name TEXT,
@@ -487,6 +507,15 @@ class Database:
             "batch_backtest_cells": batch_cell_columns,
         }
         with self._connect() as conn:
+            # N1（2026-08-25）：删除与 PRIMARY KEY (symbol,time) 完全同列的
+            # 冗余索引——rowid 表上 PK 已自动建同列索引，这三个白白放大
+            # 百万行表的每次写入。
+            for redundant_index in (
+                "idx_market_data_raw_symbol_time",
+                "idx_market_data_qfq_symbol_time",
+                "idx_ex_factors_symbol_time",
+            ):
+                conn.execute(f"DROP INDEX IF EXISTS {redundant_index}")
             for table, new_columns in targets.items():
                 existing = {
                     row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
@@ -703,12 +732,7 @@ class Database:
 
     @staticmethod
     def _category_path(row: dict[str, Any]) -> str:
-        parts = [
-            str(row.get("category_l1") or "").strip(),
-            str(row.get("category_l2") or "").strip(),
-            str(row.get("category_l3") or "").strip(),
-        ]
-        return "-".join(part for part in parts if part)
+        return category_path(row)
 
     @staticmethod
     def _metadata_row_to_dict(row: sqlite3.Row) -> dict:
@@ -812,7 +836,7 @@ class Database:
         在缓存路径下只有 tail 可用，缺列会 KeyError。
         """
         table = self._market_table(price_mode)
-        cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
+        cutoff = (market_now().date() - timedelta(days=days)).isoformat()
         with self._connect() as conn:
             rows = conn.execute(
                 f"""SELECT symbol, time, open, high, low, close, volume, amount
@@ -845,15 +869,18 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_market_dashboard_revision(self) -> tuple[str, int, str, int]:
+    def get_market_dashboard_revision(self) -> tuple[str, str, int]:
         """Small revision token used to invalidate the in-process subject-board cache.
 
-        第 4 个元素是 qfq 表的内容版本（data_versions）：除权重物化会原位
-        改写价格而不改变行数/最大日期，必须把版本纳入 token 才能让缓存感知。
+        三元素 token（P2-18：去掉对百万行表的 COUNT(*)）：
+        - MAX(time)：走 (symbol,time) 主键索引近零成本，感知 append；
+        - metadata 最大更新时间：感知标的池/分类变更；
+        - qfq 表内容版本（data_versions）：除权重物化等原位改写不改行数/
+          最大日期，由写入侧 bump 的版本感知（行数提供的信息已被三者覆盖）。
         """
         with self._connect() as conn:
             market = conn.execute(
-                "SELECT MAX(time) AS latest_time, COUNT(*) AS row_count FROM market_data_qfq"
+                "SELECT MAX(time) AS latest_time FROM market_data_qfq"
             ).fetchone()
             metadata = conn.execute(
                 "SELECT MAX(updated_at) AS latest_metadata FROM instrument_metadata"
@@ -861,7 +888,6 @@ class Database:
             version = self._bump_free_version(conn, "market_data_qfq")
         return (
             str(market["latest_time"] or "") if market else "",
-            int(market["row_count"] or 0) if market else 0,
             str(metadata["latest_metadata"] or "") if metadata else "",
             version,
         )
@@ -877,7 +903,7 @@ class Database:
         返回写入的 computed_at（本地时间 ISO 字符串）。payload  JSON 序列化
         存入独立快照表，与日K库无任何交集。
         """
-        computed_at = datetime.now().isoformat(timespec="seconds")
+        computed_at = market_now().replace(tzinfo=None).isoformat(timespec="seconds")
         blob = json.dumps(payload, ensure_ascii=False)
         with self._connect() as conn:
             conn.execute(
@@ -966,7 +992,7 @@ class Database:
     # stock_industry（申万行业分类 fact 表）
     # ------------------------------------------------------------------
     # 来源优先级：数值大者可覆盖数值小者；manual 任何同步都不动。
-    _INDUSTRY_SOURCE_RANK = {"tickflow_universe": 1, "tushare_sw2021": 2, "manual": 3}
+    _INDUSTRY_SOURCE_RANK: ClassVar[dict[str, int]] = {"tickflow_universe": 1, "tushare_sw2021": 2, "manual": 3}
 
     def upsert_stock_industry(self, rows: list[dict[str, Any]], source: str) -> int:
         """按来源优先级合并写入，只增/改、从不删行。
@@ -1322,7 +1348,6 @@ class Database:
         return len(records)
 
     def load_market_data(self, symbol: str, price_mode: str = "qfq"):
-        import pandas as pd
 
         table = self._market_table(price_mode)
         with self._connect() as conn:
@@ -1364,6 +1389,21 @@ class Database:
         if row is None or row["rows"] == 0:
             return {"rows": 0, "start": None, "end": None}
         return {"rows": row["rows"], "start": row["start"], "end": row["end"]}
+
+    def list_market_data_summaries(self, price_mode: str = "qfq") -> dict[str, dict]:
+        """全标的 {symbol: {rows, start, end}}——单条 GROUP BY（P2-18：
+        标的管理列表接口原对 600+ 标的逐只 get_market_data_summary，
+        每次新建连接；改单条聚合查询一次出结果）。"""
+        table = self._market_table(price_mode)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT symbol, COUNT(*) AS rows, MIN(time) AS start, MAX(time) AS end
+                   FROM {table} GROUP BY symbol"""
+            ).fetchall()
+        return {
+            str(row["symbol"]): {"rows": row["rows"], "start": row["start"], "end": row["end"]}
+            for row in rows
+        }
 
     def clear_market_data(self, price_mode: str = "qfq") -> int:
         table = self._market_table(price_mode)
@@ -1454,6 +1494,14 @@ class Database:
                 "SELECT * FROM users WHERE username = ?", (str(username).strip(),)
             ).fetchone()
         return self._user_row(row) if row else None
+
+    def set_user_admin(self, username: str, is_admin: bool) -> None:
+        """按用户名设置 admin 标记（内置管理员 ensure 用）。"""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET is_admin = ? WHERE username = ?",
+                (1 if is_admin else 0, str(username).strip()),
+            )
 
     @staticmethod
     def _user_row(row: sqlite3.Row) -> dict:
@@ -1584,6 +1632,38 @@ class Database:
                 ),
             )
             return int(cursor.lastrowid or 0)
+
+    def mark_interrupted_job_runs(self, job_types: list[str]) -> int:
+        """启动清扫（P2-9）：把状态停在 running 且无配对终态行的 job_runs
+        标记为 interrupted。
+
+        配对规则：同 job_type 且 payload 含相同 job_id 的非 running 行存在
+        即视为已善终（进程内完成了终态落库）；否则该行是进程重启的孤儿。
+        """
+        if not job_types:
+            return 0
+        placeholders = ",".join("?" for _ in job_types)
+        interrupted = 0
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT id, job_type, payload FROM job_runs WHERE status = 'running' AND job_type IN ({placeholders})",
+                tuple(job_types),
+            ).fetchall()
+            for row in rows:
+                payload = json.loads(row["payload"] or "{}")
+                job_id = str(payload.get("job_id") or "")
+                if job_id:
+                    terminal = conn.execute(
+                        f"""SELECT COUNT(*) AS c FROM job_runs
+                           WHERE job_type IN ({placeholders}) AND status != 'running'
+                           AND payload LIKE ?""",
+                        (*job_types, f'%"{job_id}"%'),
+                    ).fetchone()
+                    if terminal["c"]:
+                        continue
+                conn.execute("UPDATE job_runs SET status = 'interrupted' WHERE id = ?", (row["id"],))
+                interrupted += 1
+        return interrupted
 
     def get_latest_job_run(self, job_type: str) -> dict | None:
         with self._connect() as conn:
@@ -1720,7 +1800,6 @@ class Database:
         return len(records)
 
     def load_indicator_daily(self, symbol: str):
-        import pandas as pd
 
         with self._connect() as conn:
             rows = conn.execute(
@@ -1790,7 +1869,6 @@ class Database:
         return [dict(r) for r in rows]
 
     def load_trend_daily(self, symbol: str, param_set: str = "default", since: str | None = None):
-        import pandas as pd
 
         query = "SELECT * FROM trend_daily WHERE symbol = ? AND param_set = ?"
         params: list = [symbol, param_set]
@@ -2098,6 +2176,13 @@ def init_db(db_path: str | Path = "data/trend_quant.db") -> Database:
     return _db_instance
 
 
+def reset_db_instance_for_tests() -> None:
+    """还原进程级单例（P2-25 测试卫生）：直接 init_db() 的测试在 tearDown
+    调用，避免临时库句柄泄漏到后续测试。"""
+    global _db_instance
+    _db_instance = None
+
+
 def get_db() -> Database:
     if _db_instance is None:
         raise RuntimeError("Database not initialized. Call init_db() first.")
@@ -2114,6 +2199,5 @@ def record_job_run_safely(
     try:
         get_db().record_job_run(job_type, payload, run_date=run_date, status=status)
     except Exception:
-        import logging
 
-        logging.getLogger(__name__).warning("Failed to record job run: %s", job_type, exc_info=True)
+        get_logger(__name__).warning("Failed to record job run: %s", job_type, exc_info=True)

@@ -11,7 +11,6 @@ import pytest
 import services.dashboard_snapshot as snapshot_module
 from services.dashboard_snapshot import IntradaySnapshotRunner
 
-
 # ---------------------------------------------------------------------------
 # DB 层：快照表读写
 # ---------------------------------------------------------------------------
@@ -95,7 +94,7 @@ def test_ensure_running_skips_when_eod_current(runner_env, test_db, monkeypatch)
     monkeypatch.setattr(
         type(test_db),
         "get_market_dashboard_revision",
-        lambda self: ("2026-08-17 00:00:00", 100, "", 1),
+        lambda self: ("2026-08-17 00:00:00", "", 1),
     )
     result = runner.ensure_running(trigger="test")
     assert result["status"] == "skipped"
@@ -112,8 +111,8 @@ def _stub_compute(monkeypatch, test_db, payload, hold: threading.Event | None = 
         def close(self):
             pass
 
-    monkeypatch.setattr(snapshot_module, "DataService", _FakeDataService)
-    monkeypatch.setattr(snapshot_module, "trend_config", lambda: {})
+    monkeypatch.setattr(snapshot_module, "get_data_service", lambda: _FakeDataService())
+    monkeypatch.setattr(snapshot_module, "trend_config", dict)
 
     def fake_build(symbols, db, data_service, trend_config, *, progress_callback=None):
         if hold is not None:

@@ -298,3 +298,42 @@ class TestEdgeCases:
         min_bars = max(CFG["n_long"], CFG["atr_period"]) + 2
         assert out["trend_score"].iloc[: min_bars - 1].isna().all()
         assert pd.notna(out["trend_score"].iloc[min_bars - 1])
+
+class TestSnapshotDirection:
+    """自 test_smoke.py 合并（P2-25）：方向性冒烟断言。"""
+
+    def test_bullish_scores_positive(self) -> None:
+        import numpy as np
+        import pandas as pd
+
+        rows = 40
+        closes = np.linspace(10.0, 20.0, rows)
+        bars = pd.DataFrame({
+            "time": pd.date_range("2026-01-01", periods=rows, freq="D"),
+            "open": closes,
+            "high": closes + 0.1,
+            "low": closes - 0.1,
+            "close": closes,
+            "volume": np.full(rows, 100000.0),
+        })
+        result = calculate_trend_score_snapshot(bars, CFG)
+        assert result["ok"] is True
+        assert result["trend_score"] > 0
+
+    def test_bearish_scores_negative(self) -> None:
+        import numpy as np
+        import pandas as pd
+
+        rows = 40
+        closes = np.linspace(20.0, 10.0, rows)
+        bars = pd.DataFrame({
+            "time": pd.date_range("2026-01-01", periods=rows, freq="D"),
+            "open": closes,
+            "high": closes + 0.1,
+            "low": closes - 0.1,
+            "close": closes,
+            "volume": np.full(rows, 100000.0),
+        })
+        result = calculate_trend_score_snapshot(bars, CFG)
+        assert result["ok"] is True
+        assert result["trend_score"] < 0

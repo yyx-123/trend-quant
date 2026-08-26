@@ -29,9 +29,6 @@ from data.storage.db import get_db
 
 logger = get_logger(__name__)
 
-DIVIDEND_CHECK_BARS = 10
-
-
 # ---------------------------------------------------------------------------
 # Param-set registry (D3)
 # ---------------------------------------------------------------------------
@@ -134,14 +131,14 @@ def rebuild_if_needed(db=None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def detect_adjustment_breaks(symbols: list[str], data_service, end_date: date = None, lookback: int = DIVIDEND_CHECK_BARS) -> list[str]:
+def detect_adjustment_breaks(symbols: list[str], data_service, end_date: date | None = None) -> list[str]:
     """除权变更检测（因子 diff 法）：vendor 除权因子 vs 本地因子表。
 
     raw 真源架构下，除权不再意味着行情被回溯改写 —— 因子表变化即触发
     本地 qfq 重物化，无需重拉任何 K 线。新因子在此直接落库。
     返回因子发生变化的标的列表。
     """
-    del end_date, lookback  # 旧比价法的参数，因子法不需要
+    del end_date  # 旧比价法的参数，因子法不需要（lookback 常量已随死参数一并删除）
     try:
         _factors, changed = data_service.sync_ex_factors(symbols)
     except Exception:
@@ -152,7 +149,7 @@ def detect_adjustment_breaks(symbols: list[str], data_service, end_date: date = 
     return changed
 
 
-def repair_broken_symbols(symbols: list[str], data_service, start_date: date = None, end_date: date = None) -> list[dict]:
+def repair_broken_symbols(symbols: list[str], data_service, start_date: date | None = None, end_date: date | None = None) -> list[dict]:
     """除权变更修复：本地重物化 qfq（纯本地，秒级）。
 
     过渡期半迁移状态（raw 覆盖不如存量 qfq）下重物化会被拒绝，

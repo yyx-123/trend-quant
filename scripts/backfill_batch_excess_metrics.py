@@ -25,21 +25,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import _common  # .env 加载 + DB_PATH + TickFlow 构造（P2-13）
+import pandas as pd
 
-import pandas as pd  # noqa: E402
+from data.storage.db import init_db
+from data.storage.market_store import MarketStore
+from rule_backtest.engine import SingleSymbolAllInBacktestEngine
+from rule_backtest.metrics import compute_summary, flat_run_days
 
-from data.storage.db import init_db  # noqa: E402
-from data.storage.market_store import MarketStore  # noqa: E402
-from rule_backtest.engine import SingleSymbolAllInBacktestEngine  # noqa: E402
-from rule_backtest.metrics import compute_summary, flat_run_days  # noqa: E402
-
-DB_PATH = Path("data/trend_quant.db")
+DB_PATH = _common.DB_PATH
 BACKUP_DIR = Path("data/backups")
 
 
@@ -174,9 +172,10 @@ def main() -> None:
 
     if not args.dry_run and not args.no_backup and DB_PATH.exists():
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        target = BACKUP_DIR / f"trend_quant_before_excess_metrics_{stamp}.db"
-        shutil.copy2(DB_PATH, target)
+        # VACUUM INTO 在线备份（WAL 安全；shutil.copy2 活库可能缺最近写入，P2-24）
+        from data.storage.db import Database
+
+        target = Database(DB_PATH).backup_to(backup_dir=BACKUP_DIR, keep=10)
         print(f"已备份数据库 → {target}")
 
     backfill(args.batch_id, args.dry_run)

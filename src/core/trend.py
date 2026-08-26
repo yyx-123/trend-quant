@@ -41,11 +41,22 @@ _SERIES_COLUMNS = [
 ]
 
 
-def safe_float(value: object, default: float = 0.0) -> float:
+def safe_float(value: object, default: float | None = None) -> float | None:
+    """float 化兜底（P1-14 统一签名：原 core.trend / provider_utils /
+    rule_backtest.indicators 三份签名各异的 safe_float 的单一来源）。
+
+    - None / NaN / 不可解析 → ``default``（缺省 None，调用方按需显式传 0.0）；
+    - 字符串先清洗：去千分位逗号，""/"none"/"nan"/"-" 视为缺失。
+    """
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return default
     try:
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            return default
-        return float(value)
+        if isinstance(value, str):
+            text = value.strip().replace(",", "")
+            if text == "" or text.lower() in {"none", "nan", "-"}:
+                return default
+            return float(text)
+        return float(value)  # type: ignore[arg-type]
     except Exception:
         return default
 
@@ -212,7 +223,7 @@ def calculate_trend_score_snapshot(
             "atr": 0.0,
             "price": 0.0,
             "ma_mid": 0.0,
-            "calc_details": {"rows": int(len(bars)), "required": int(min_bars)},
+            "calc_details": {"rows": len(bars), "required": int(min_bars)},
         }
 
     close_numeric = pd.to_numeric(bars["close"], errors="coerce")
@@ -253,38 +264,38 @@ def calculate_trend_score_snapshot(
 
     calc_details = {
         "price": last_price,
-        "ma_mid": safe_float(last["ma_mid"]),
-        "atr": safe_float(last["atr"]),
-        "bias_short": safe_float(last["bias_short"]),
-        "bias_mid": safe_float(last["bias_mid"]),
-        "bias_long": safe_float(last["bias_long"]),
-        "slope_short": safe_float(last["slope_short"]),
-        "slope_mid": safe_float(last["slope_mid"]),
-        "slope_long": safe_float(last["slope_long"]),
-        "bias_mix": safe_float(last["bias_mix"]),
-        "slope_mix": safe_float(last["slope_mix"]),
-        "norm_bias": safe_float(last["norm_bias"]),
-        "norm_slope": safe_float(last["norm_slope"]),
-        "vol_ma": safe_float(last["vol_ma"]),
+        "ma_mid": safe_float(last["ma_mid"], 0.0),
+        "atr": safe_float(last["atr"], 0.0),
+        "bias_short": safe_float(last["bias_short"], 0.0),
+        "bias_mid": safe_float(last["bias_mid"], 0.0),
+        "bias_long": safe_float(last["bias_long"], 0.0),
+        "slope_short": safe_float(last["slope_short"], 0.0),
+        "slope_mid": safe_float(last["slope_mid"], 0.0),
+        "slope_long": safe_float(last["slope_long"], 0.0),
+        "bias_mix": safe_float(last["bias_mix"], 0.0),
+        "slope_mix": safe_float(last["slope_mix"], 0.0),
+        "norm_bias": safe_float(last["norm_bias"], 0.0),
+        "norm_slope": safe_float(last["norm_slope"], 0.0),
+        "vol_ma": safe_float(last["vol_ma"], 0.0),
         "current_volume": safe_float(
             float(fixed_volume)
             if fixed_volume is not None and fixed_volume >= 0
             else pd.to_numeric(bars["volume"], errors="coerce").fillna(0.0).iloc[-1]
         ),
-        "vol_ratio": safe_float(last["vol_ratio"]),
-        "volume_factor": safe_float(last["volume_factor"]),
-        "er": safe_float(last["er"]),
+        "vol_ratio": safe_float(last["vol_ratio"], 0.0),
+        "volume_factor": safe_float(last["volume_factor"], 0.0),
+        "er": safe_float(last["er"], 0.0),
     }
 
     return {
         "ok": True,
         "reason": "ok",
-        "trend_score": safe_float(last["trend_score"]),
-        "price_direction": safe_float(last["price_direction"]),
-        "confidence": safe_float(last["confidence"]),
-        "atr": safe_float(last["atr"]),
+        "trend_score": safe_float(last["trend_score"], 0.0),
+        "price_direction": safe_float(last["price_direction"], 0.0),
+        "confidence": safe_float(last["confidence"], 0.0),
+        "atr": safe_float(last["atr"], 0.0),
         "price": last_price,
-        "ma_mid": safe_float(last["ma_mid"]),
+        "ma_mid": safe_float(last["ma_mid"], 0.0),
         "calc_details": calc_details,
     }
 

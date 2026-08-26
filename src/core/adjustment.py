@@ -19,14 +19,15 @@ forward_additive 导致早期高分红标的出现负价格）。改为「raw �
 from __future__ import annotations
 
 import bisect
-import logging
 import math
+from collections.abc import Iterable
 from datetime import date, datetime
-from typing import Iterable
 
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+from audit.app_logger import get_logger
+
+logger = get_logger(__name__)
 
 FactorEntry = tuple[date, float]
 

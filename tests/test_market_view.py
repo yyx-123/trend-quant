@@ -1,39 +1,29 @@
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 import unittest
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
+from conftest import FAKE_INTRADAY_TREND_RESULT, make_daily_bars_ending, make_fresh_quote
 
-import data.intraday_service as intraday_service
 from app.routers import market_view
 from app.routers.market_view import build_market_payload, compute_market_indicators
 from core.trend import calculate_trend_score_snapshot
+from data import intraday_service
 
 
 def sample_daily_bars(rows: int = 80) -> pd.DataFrame:
-    start = date(2026, 1, 1)
-    items = []
-    price = 1.0
-    for idx in range(rows):
-        day = start + timedelta(days=idx)
-        price += 0.01
-        open_price = price
-        close_price = price + (0.01 if idx % 2 == 0 else -0.004)
-        items.append(
-            {
-                "time": day.isoformat(),
-                "open": open_price,
-                "high": max(open_price, close_price) + 0.02,
-                "low": min(open_price, close_price) - 0.02,
-                "close": close_price,
-                "volume": 100000 + idx * 1000,
-                "amount": 200000 + idx * 1200,
-            }
-        )
-    return pd.DataFrame(items)
+    """与 conftest.make_daily_bars_ending 同一序列（起始 2026-01-01 的版本）。
 
+    conftest 工厂以 end_day 收尾：end_day = 2026-01-01 + (rows-1) 天即得同一数据。
+    """
+    end = date(2026, 1, 1) + timedelta(days=rows - 1)
+    return make_daily_bars_ending(end, rows=rows)
 
 class MarketViewIndicatorTest(unittest.TestCase):
     def test_indicator_series_align_with_daily_bars(self) -> None:
@@ -153,7 +143,6 @@ class MarketViewIndicatorTest(unittest.TestCase):
         self.assertEqual(payload["meta"]["category_path"], "Broad-Large Cap-CSI300")
         self.assertIn("Broad-Large Cap-CSI300", payload["display_label"])
 
-
 class FakeMarketViewDb:
     def __init__(
         self,
@@ -176,7 +165,6 @@ class FakeMarketViewDb:
 
     def list_market_symbols(self) -> list[str]:
         return self.symbols
-
 
 class MarketViewApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_daily_api_defaults_to_full_local_history(self) -> None:
@@ -228,57 +216,6 @@ class MarketViewApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["indicators"]["rsi"]["period"], 7)
         self.assertEqual(len(payload["indicators"]["rsi"]["series"]), len(df))
 
-
-def _daily_bars_ending(end_day: date, rows: int = 80) -> pd.DataFrame:
-    """Sample bars whose last row falls on *end_day*."""
-    start = end_day - timedelta(days=rows - 1)
-    items = []
-    price = 1.0
-    for idx in range(rows):
-        day = start + timedelta(days=idx)
-        price += 0.01
-        open_price = price
-        close_price = price + (0.01 if idx % 2 == 0 else -0.004)
-        items.append(
-            {
-                "time": day.isoformat(),
-                "open": open_price,
-                "high": max(open_price, close_price) + 0.02,
-                "low": min(open_price, close_price) - 0.02,
-                "close": close_price,
-                "volume": 100000 + idx * 1000,
-                "amount": 200000 + idx * 1200,
-            }
-        )
-    return pd.DataFrame(items)
-
-
-FAKE_QUOTE = {
-    "symbol": "518850.SS",
-    "name": "Gold",
-    "price": 2.0,
-    "open": 1.9,
-    "high": 2.1,
-    "low": 1.8,
-    "volume": 500000,
-    "amount": 1000000,
-    # ts 必须是“今天”——陈旧报价（如停牌股的上一交易日快照）会被
-    # is_quote_fresh 拒绝，不合成当日K线。
-    "ts": date.today().isoformat() + "T15:00:00",
-}
-
-FAKE_INTRADAY_RESULT = {
-    "ok": True,
-    "trend_score": 1.23,
-    "price_direction": 1,
-    "confidence": 0.5,
-    "atr": 0.1,
-    "price": 2.0,
-    "ma_mid": 1.9,
-    "calc_details": {},
-}
-
-
 class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
     """Overlay gating for GET /market-view/api/daily?intraday=true.
 
@@ -291,14 +228,16 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
          DB data as-is; no quote fetch at all.
     """
 
-    async def _call_daily(self, df: pd.DataFrame, *, past_open: bool, quote=FAKE_QUOTE):
+    async def _call_daily(self, df: pd.DataFrame, *, past_open: bool, quote=None):
+        # quote 默认在体内生成：避免函数定义期（导入期）固化 ts 造成跨午夜 flake
+        quote = quote if quote is not None else make_fresh_quote()
         fake_db = FakeMarketViewDb(df)
         with (
             patch.object(market_view, "get_db", return_value=fake_db),
             patch.object(intraday_service, "is_past_market_open", return_value=past_open),
-            patch.object(intraday_service, "DataService") as mock_ds_cls,
+            patch.object(intraday_service, "get_data_service") as mock_ds_cls,
             patch.object(
-                intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT
+                intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_TREND_RESULT
             ),
         ):
             if isinstance(quote, Exception):
@@ -321,7 +260,7 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_before_open_no_overlay(self) -> None:
         """Rule 1: not past market open -> plain EOD data, no quote fetch."""
-        df = _daily_bars_ending(date.today() - timedelta(days=1))
+        df = make_daily_bars_ending(date.today() - timedelta(days=1))
 
         payload, mock_ds_cls = await self._call_daily(df, past_open=False)
 
@@ -332,7 +271,7 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
     async def test_past_open_missing_today_appends_synthetic_bar(self) -> None:
         """Rule 2 (intraday or post-close pre-write): DB lacks today's bar
         -> append a synthetic one from the live quote."""
-        df = _daily_bars_ending(date.today() - timedelta(days=1))
+        df = make_daily_bars_ending(date.today() - timedelta(days=1))
 
         payload, mock_ds_cls = await self._call_daily(df, past_open=True)
 
@@ -341,14 +280,14 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["dates"][-1], date.today().isoformat())
         self.assertEqual(len(payload["candles"]), len(df) + 1)
         # The quote's own volume is preferred over the prev-day approximation.
-        self.assertEqual(payload["volumes"][-1], FAKE_QUOTE["volume"])
+        self.assertEqual(payload["volumes"][-1], make_fresh_quote()["volume"])
         self.assertIn("trend_intraday", payload["indicators"])
         mock_ds_cls.return_value.fetch_latest_quote.assert_called_once()
 
     async def test_intraday_recomputes_all_indicators_with_synth_bar(self) -> None:
         """同花顺-style: every indicator series gains a live value for today
         (history + synthetic bar), computed in memory only."""
-        df = _daily_bars_ending(date.today() - timedelta(days=1))
+        df = make_daily_bars_ending(date.today() - timedelta(days=1))
 
         payload, _ = await self._call_daily(df, past_open=True)
 
@@ -368,16 +307,16 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(indicators["volume_ma"]["5"][-1])
         self.assertIsNotNone(indicators["volume_ma"]["10"][-1])
         # MA5 of today = mean of the last 4 historical closes + live price.
-        hist_closes = list(df["close"].tail(4)) + [FAKE_QUOTE["price"]]
+        hist_closes = list(df["close"].tail(4)) + [make_fresh_quote()["price"]]
         self.assertAlmostEqual(indicators["ma"]["5"][-1], sum(hist_closes) / 5, places=5)
         # The fixed-semantics intraday trend snapshot is still injected.
         self.assertEqual(
-            indicators["trend_intraday"]["score"], FAKE_INTRADAY_RESULT["trend_score"]
+            indicators["trend_intraday"]["score"], FAKE_INTRADAY_TREND_RESULT["trend_score"]
         )
 
     async def test_no_intraday_indicators_match_eod_lengths(self) -> None:
         """Without the overlay (before open), indicators stay EOD-only."""
-        df = _daily_bars_ending(date.today() - timedelta(days=1))
+        df = make_daily_bars_ending(date.today() - timedelta(days=1))
 
         payload, _ = await self._call_daily(df, past_open=False)
 
@@ -388,7 +327,7 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
     async def test_past_open_db_already_has_today_no_overlay(self) -> None:
         """Rule 3: DB already contains today's bar (write job done) -> no
         overlay, no quote fetch."""
-        df = _daily_bars_ending(date.today())
+        df = make_daily_bars_ending(date.today())
 
         payload, mock_ds_cls = await self._call_daily(df, past_open=True)
 
@@ -399,13 +338,12 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_quote_failure_falls_back_to_eod(self) -> None:
         """Quote fetch error -> silent fallback to plain EOD data."""
-        df = _daily_bars_ending(date.today() - timedelta(days=1))
+        df = make_daily_bars_ending(date.today() - timedelta(days=1))
 
-        payload, mock_ds_cls = await self._call_daily(df, past_open=True, quote=RuntimeError("boom"))
+        payload, _mock_ds_cls = await self._call_daily(df, past_open=True, quote=RuntimeError("boom"))
 
         self.assertFalse(payload["meta"]["is_intraday"])
         self.assertEqual(len(payload["dates"]), len(df))
-
 
 if __name__ == "__main__":
     unittest.main()

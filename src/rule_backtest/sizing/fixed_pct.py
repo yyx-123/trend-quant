@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from rule_backtest.registry import ParamSpec
-from rule_backtest.sizing.base import FALLBACK_PCT_PARAM, PositionSizer, SizingContext, SizingDecision
+from rule_backtest.sizing.base import (
+    FALLBACK_PCT_PARAM,
+    PositionSizer,
+    SizingContext,
+    SizingDecision,
+)
 
 
 class FixedPctSizer(PositionSizer):

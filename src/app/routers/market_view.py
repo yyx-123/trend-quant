@@ -1,58 +1,52 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Iterable
+from collections.abc import Iterable
 
-import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from app.instrument_display import format_symbol_display, load_instrument_name_map, strip_etf_suffix
+from app.instrument_display import format_symbol_display, load_instrument_name_map
 from core.calendar import market_now
+from core.display import category_path as _category_path
+from core.numfmt import number6_or_none
 from core.symbols import normalize_symbol
 from data.intraday_service import build_intraday_overlay
 from data.storage.db import get_db
-
 from services import auth
 from services import trade_records as tr
-
 from services.market_indicators import (
     ATR_PERIODS,
     BIAS_PERIODS,
     DEFAULT_RSI_PERIOD,
     MA_PERIODS,
-    TREND_MA_PERIODS,
     VOL_MA_PERIODS,
     compute_market_indicators,
+)
+from services.market_indicators import (
     trend_config as _trend_config,
 )
+from services.stop_loss import stop_mode_toggle_title
 
 router = APIRouter(prefix="/market-view", tags=["market-view"])
-templates = Jinja2Templates(directory="web/templates")
+from audit.app_logger import get_logger
+from core.paths import web_dir as _web_dir
+
+logger = get_logger(__name__)
+
+_templates_dir = _web_dir() / "templates"
+templates = Jinja2Templates(directory=str(_templates_dir))
 
 DEFAULT_LIMIT = 20000
 MAX_LIMIT = 50000
-
-
-def _normalize_symbol(raw_symbol: str) -> str:
-    return normalize_symbol(raw_symbol)
 
 
 def _config_name_map() -> dict[str, str]:
     return load_instrument_name_map()
 
 
-def _category_path(meta: dict | None) -> str:
-    if not meta:
-        return ""
-    parts = [
-        str(meta.get("category_l1") or "").strip(),
-        str(meta.get("category_l2") or "").strip(),
-        str(meta.get("category_l3") or "").strip(),
-    ]
-    return "-".join(part for part in parts if part)
+
 
 
 def _display_with_category(display_name: str, meta: dict | None) -> str:
@@ -94,13 +88,7 @@ def _market_symbol_item(symbol: str, name_map: dict[str, str], metadata: dict | 
 
 
 def _num(value: object) -> float | None:
-    try:
-        n = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if pd.isna(n):
-        return None
-    return round(n, 6)
+    return number6_or_none(value)
 
 
 def _optional_int(value: object) -> int | None:
@@ -114,6 +102,34 @@ def _optional_int(value: object) -> int | None:
 
 def _series(values: Iterable[object]) -> list[float | None]:
     return [_num(v) for v in values]
+
+
+_TAIL_TOP_KEYS = frozenset({"dates", "candles", "volumes", "amounts"})
+
+
+def _tail_payload_arrays(payload: dict, old_len: int, new_len: int) -> None:
+    """就地截尾 payload 的展示数组到最近 ``new_len`` 条。
+
+    指标全历史计算后，展示窗口按 limit 截尾用。白名单制：只截顶层
+    dates/candles/volumes/amounts 与 indicators 子树内的等长序列——
+    不碰 meta（ma_periods/bias_periods 等短配置列表在标的总历史恰好
+    等长时不会被误伤）。
+    """
+    for key in _TAIL_TOP_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list) and len(value) == old_len:
+            del value[: len(value) - new_len]
+    indicators = payload.get("indicators")
+    if isinstance(indicators, dict):
+        _tail_indicator_node(indicators, old_len, new_len)
+
+
+def _tail_indicator_node(node: object, old_len: int, new_len: int) -> None:
+    if isinstance(node, dict):
+        for value in node.values():
+            _tail_indicator_node(value, old_len, new_len)
+    elif isinstance(node, list) and len(node) == old_len:
+        del node[: len(node) - new_len]
 
 
 def _date_only(value: object) -> str:
@@ -193,7 +209,7 @@ def build_market_payload(
         "amounts": amounts,
         "indicators": indicators,
         "meta": {
-            "rows": int(len(data)),
+            "rows": len(data),
             "start": dates[0] if dates else None,
             "end": dates[-1] if dates else None,
             "ma_periods": list(MA_PERIODS),
@@ -212,7 +228,7 @@ async def market_view_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         name="market_view.html",
         request=request,
-        context={"title": "标的查看"},
+        context={"title": "标的查看", "stop_mode_title": stop_mode_toggle_title()},
     )
 
 
@@ -236,7 +252,7 @@ async def my_trade_annotations(
     user: dict = Depends(auth.get_current_user),
 ) -> dict:
     """当前用户在该标的上的买卖点 + 未平仓止损（紧/松双档），供日K标注。"""
-    normalized_symbol = _normalize_symbol(symbol)
+    normalized_symbol = normalize_symbol(symbol)
     if not normalized_symbol:
         raise HTTPException(status_code=400, detail="标的无效")
     return tr.symbol_annotations(user, normalized_symbol)
@@ -255,7 +271,7 @@ async def get_market_daily(
     rsi_period: int = Query(default=DEFAULT_RSI_PERIOD, ge=2, le=300),
     intraday: bool = Query(default=False),
 ) -> dict:
-    normalized_symbol = _normalize_symbol(symbol)
+    normalized_symbol = normalize_symbol(symbol)
     if not normalized_symbol:
         raise HTTPException(status_code=400, detail="标的无效")
 
@@ -286,8 +302,6 @@ async def get_market_daily(
         raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
 
     data = data[(data["time"] >= start_ts) & (data["time"] <= end_ts)]
-    if len(data) > limit:
-        data = data.tail(limit)
 
     metadata = db.get_instrument_metadata(normalized_symbol) if hasattr(db, "get_instrument_metadata") else None
     name = str((metadata or {}).get("name") or _config_name_map().get(normalized_symbol, ""))
@@ -304,59 +318,62 @@ async def get_market_daily(
     trend_cfg = _trend_config(trend_overrides)
     _validate_trend_config(trend_cfg)
     rsi_period_value = _optional_int(rsi_period) or DEFAULT_RSI_PERIOD
-    payload = build_market_payload(normalized_symbol, data, name, metadata, trend_cfg, rsi_period_value)
-    payload["meta"]["requested_start"] = _date_only(start_ts)
-    payload["meta"]["requested_end"] = _date_only(end_ts)
-    payload["meta"]["limit"] = int(limit)
-    payload["meta"]["is_intraday"] = False
+    # 指标在日期区间的全量历史上计算（EMA 族指标无限记忆，先 tail 再算会让
+    # 数值随请求窗口漂移——与 MCP symbol_detail 同一口径），输出数组再按
+    # limit 截尾。
+    full_len = len(data)
 
-    # --- Intraday overlay -------------------------------------------------
+    # --- Intraday overlay（先合成，指标只对 combined 算一遍，P2-18）---------
     # Shared implementation (data.intraday_service.build_intraday_overlay)
     # keeps this endpoint and the MCP symbol_detail tool on the exact same
     # code path: at/past the 9:30 open today's bar comes from the DB once
     # persisted, otherwise a synthetic bar is built from live quotes.
+    overlay = None
     if intraday and (not end_date.strip() or end_ts.date() >= market_now().date()):
         overlay = build_intraday_overlay(normalized_symbol, df, trend_cfg)
-        if overlay:
-            bar = overlay["bar"]
-            payload["dates"].append(overlay["date"])
-            payload["candles"].append([
-                _num(bar["open"]),
-                _num(bar["close"]),
-                _num(bar["low"]),
-                _num(bar["high"]),
-            ])
-            payload["volumes"].append(_num(bar["volume"]))
-            payload["amounts"].append(_num(bar["amount"]))
-            # --- In-memory intraday indicator recompute -------------------
-            # 同花顺-style: treat the synthetic bar as today's (still
-            # forming) bar and recompute the FULL indicator suite on
-            # history + synth bar, so MACD/MA/BOLL/BIAS/RSI/ATR/volume_ma/
-            # trend all have a live value for today.
-            # Everything below is strictly in-memory — the recomputed
-            # intraday values are NEVER written to the DB; persisted EOD
-            # indicators remain owned by the 16:30 daily job.
-            synth_row = pd.DataFrame([{
-                "time": pd.to_datetime(bar["time"], errors="coerce"),
-                "open": bar["open"],
-                "high": bar["high"],
-                "low": bar["low"],
-                "close": bar["close"],
-                "volume": bar["volume"],
-                "amount": bar["amount"],
-            }])
-            combined = pd.concat([data, synth_row], ignore_index=True)
-            for col in ("open", "high", "low", "close", "volume", "amount"):
-                if col in combined.columns:
-                    combined[col] = pd.to_numeric(combined[col], errors="coerce")
-            indicators = compute_market_indicators(combined, trend_cfg, rsi_period_value)
-            # Keep the fixed-semantics intraday trend snapshot alongside the
-            # recomputed suite (fixed ATR/volume — used by API consumers
-            # that need the uncontaminated signal value).
-            indicators["trend_intraday"] = overlay["trend"]
-            payload["indicators"] = indicators
-            payload["meta"]["is_intraday"] = True
-            payload["meta"]["intraday_ts"] = overlay["ts"]
-            payload["meta"]["post_close"] = bool(overlay.get("post_close"))
+
+    if overlay:
+        bar = overlay["bar"]
+        # 同花顺-style: treat the synthetic bar as today's (still forming)
+        # bar and compute the FULL indicator suite on history + synth bar —
+        # strictly in-memory, never written to the DB.
+        synth_row = pd.DataFrame([{
+            "time": pd.to_datetime(bar["time"], errors="coerce"),
+            "open": bar["open"],
+            "high": bar["high"],
+            "low": bar["low"],
+            "close": bar["close"],
+            "volume": bar["volume"],
+            "amount": bar["amount"],
+        }])
+        combined = pd.concat([data, synth_row], ignore_index=True)
+        for col in ("open", "high", "low", "close", "volume", "amount"):
+            if col in combined.columns:
+                combined[col] = pd.to_numeric(combined[col], errors="coerce")
+        payload = build_market_payload(normalized_symbol, combined, name, metadata, trend_cfg, rsi_period_value)
+        # Keep the fixed-semantics intraday trend snapshot alongside the
+        # recomputed suite (fixed ATR/volume — used by API consumers
+        # that need the uncontaminated signal value).
+        payload["indicators"]["trend_intraday"] = overlay["trend"]
+        if full_len > limit:
+            _tail_payload_arrays(payload, full_len + 1, limit + 1)
+        payload["meta"]["is_intraday"] = True
+        payload["meta"]["intraday_ts"] = overlay["ts"]
+        payload["meta"]["post_close"] = bool(overlay.get("post_close"))
+    else:
+        payload = build_market_payload(normalized_symbol, data, name, metadata, trend_cfg, rsi_period_value)
+        if full_len > limit:
+            _tail_payload_arrays(payload, full_len, limit)
+        payload["meta"]["is_intraday"] = False
+
+    # meta rows/start/end 以（截尾后的）EOD 数据窗口为准：合成行是未落库
+    # 的盘中估算，不进入 meta.end（防止消费方误判数据新鲜度/回测窗口）。
+    eod_dates = payload["dates"][:-1] if overlay else payload["dates"]
+    payload["meta"]["rows"] = len(eod_dates)
+    payload["meta"]["start"] = eod_dates[0] if eod_dates else None
+    payload["meta"]["end"] = eod_dates[-1] if eod_dates else None
+    payload["meta"]["requested_start"] = _date_only(start_ts)
+    payload["meta"]["requested_end"] = _date_only(end_ts)
+    payload["meta"]["limit"] = int(limit)
 
     return payload

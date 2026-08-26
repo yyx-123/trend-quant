@@ -536,3 +536,121 @@
 ---
 
 *本报告为 v2.2 终版。三方意见与修订依据：review-1-factcheck.md（事实核查）、review-2-arch.md（架构评审）、blind-audit-comparison.md（盲审比对）、blind-audit-round2.md（盲审 round-2 确认）、review-1-factcheck-round2.md / review-2-arch-round2.md（评审 round-2 确认）、CHANGELOG.md（修订记录）。三方均已确认达成一致。*
+
+---
+
+## 十二、修复决策与实施方案（2026-08-25 与作者对齐，v3 新增）
+
+> 作者约束（决策前提）：
+> - 个人 + 家人朋友使用，隐私要求低；账号密码仅做用户间数据隔离，不涉及资金安全。
+> - MCP 鉴权可以做，但必须轻量，不能大幅影响调用方使用方式。
+> - 时区全局统一东八区（Asia/Shanghai），交易时段只看 A 股，不考虑其他市场。
+> - 测试覆盖率要求高，不介意多搞测试。
+>
+> 本节所有「你看着改」条目的修改路径已经过独立子代理对照实际源码逐条评审并修正（评审要点以「实施注记」形式并入对应条目）。**本节仅为方案定稿，尚未进入开发。**
+
+### 作者明确决策的条目（按作者指示执行）
+
+| 条目 | 作者决策 |
+|---|---|
+| P0-3 | 删除 instruments.py 从 metadata 反推分类树的 fallback（与 instrument_categories 表职责重叠） |
+| P0-4 | 按建议修复（两个 MCP 测试文件加 `pytest.importorskip("mcp")`） |
+| P1-2 | 新增定时任务：每天凌晨 3:00 备份一次，只保留最新一份；不做异机/云盘/恢复演练 |
+| P1-3 | 不做用户创建功能；内置管理员 yyx（永远存在），密码 20160702 |
+| P1-4 | 按建议修复（Web 日 K 指标全历史计算、输出再 tail，与 MCP 对齐） |
+| P1-5 | 时区全局统一东八区北京时间，所有交易时段只参考 A 股交易时段 |
+| P1-9 | 不修复，条目关闭 |
+| P2-4 | 不改。作者确认看板本来就是按强弱排序，priority 仅作打平决胜的现状即有意设计；priority_l2 不参与看板排序为既定行为 |
+| P2-8 | 不改，条目冻结 |
+| P2-14 | 不管（本就是记录性条目，无需行动） |
+| P2-17 | 不改（qfq/raw 增量物化不做） |
+| 附录 B（N1-N5） | 全做：N1 删 3 个冗余索引（一次小迁移）；N2 仅记录备查；N3 并入 P2-18 N+1 治理顺手修；N4 并入 P2-25 测试提速；N5 变量改名 intraday_score |
+
+### P0-1 / P0-2（作者要求给最终建议）→ 最终建议：/mcp 前置静态 Bearer token + 身份来自 token 映射
+
+**方案**：不选「仅监听 127.0.0.1」（MCP 客户端在作者其他机器上，需经 frp 远程访问），选轻量鉴权：
+
+1. **Bearer token 中间件**：纯 ASGI 中间件包住被挂载的 MCP 子 app（`app.mount("/mcp", McpBearerMiddleware(_mcp_app.sse_app()))`，main.py:406-412），校验 `Authorization: Bearer <token>`，失败返回 401 且 body 带明确 `{"detail": "missing or invalid MCP token"}`（SSE 静默失败排错困难，错误文案必须可读）。token 配置在 `.env`：`TREND_MCP_TOKENS=tokenA=yyx,tokenB=friend1`，token→用户名映射。
+2. **工具去密码化**：`add_trade`/`open_positions` 删除 `username`/`password` 参数，身份完全来自 token 映射。实施通路（子代理已验证 mcp 1.28.1 支持）：SSE transport 会把 Starlette Request 塞进 `ServerMessageMetadata.request_context`（mcp/server/sse.py:269），工具声明 `ctx: Context` 参数后经 `ctx.request_context.request.scope["state"]["user"]` 取到中间件写入的用户名；FastMCP 自动把 ctx 从工具 schema 剔除。需补边界：token 映射的用户名在 users 表不存在时的明确报错；`open_positions` 返回的 user 字段改由映射用户 dict 提供（验证 list_trades 返回结构不变）。
+3. **DNS rebinding 保护恢复开启**：显式构造 `TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=[...])`，allowed_hosts 从 env 读；注意 frp 透传 Host 头、非标准端口需写 `domain:port` 或 `domain:*`（配错会导致所有 MCP 请求 421）。**上线顺序：先上 Bearer 中间件验证通过，再开 DNS 保护。**
+4. **调用方影响**：每个 MCP 客户端配置一次性加一行 token header/env，之后工具调用少传两个参数、方式不变；`daily-trade-report` skill 同步更新（不再向用户索要密码）。main.py:304-305 错误注释同步修正。
+5. 测试：附录 A 的「/mcp 豁免断言」改为「无 token 请求 /mcp/sse → 401；带 token → 放行」。
+
+### 其余条目的修改路径（作者授权「看着改」，已与子代理评审达成一致）
+
+**安全专项**
+- **P1-1 登录限流（放宽口径）+ 审计**：进程内滑动窗口，每 IP 登录接口 20 次/分钟；同 IP+用户名连续失败 10 次锁定 10 分钟（正常用户远低于阈值）；登录成败写审计日志（时间/IP/用户名/结果）；401/403 计数采样记录。
+- **P1-3 实施修正**（子代理纠正事实前提）：users 表 DDL **已含** `is_admin` 列（db.py:335），无需迁移；生产库 yyx 已存在（is_admin=0）。落地方式：main.py lifespan 的 `init_db()` 之后 ensure——不存在则以密码创建（密码读 env `TREND_QUANT_BOOTSTRAP_ADMIN_PASSWORD`，缺省回落 20160702，README 写明首次登录后改密），存在则跳过并 `UPDATE is_admin=1`。**不放进 init_db**（避免往每个测试临时库塞用户）；先查存在再哈希，避免给 API 测试套件每用例加 0.1s pbkdf2 耗时。
+- **P1-7 deploy.sh**：以 server-rollout.md 为准按线上真实现状重写——/srv/trend-quant、frp 直连无 nginx、systemd 专用非 root 用户、.env 引导、代码分发方式与 README 统一。
+- **P1-8**：三处 XSS 补 esc()/textContent + 修双重转义 +「tooltip formatter 一律 esc」写入前端约定。
+- **P1-10（不影响线上已有登录）**：AuthWall 在豁免检查（main.py:338）之后插入校验——POST/PUT/DELETE 且路径含 /api/ 要求自定义头 `X-Requested-With`（/mcp 在豁免分支提前放行，绝不波及；/api/auth/login 在豁免名单内无需改 login.html）。logout 改 POST 并移出豁免，base.html:29 的 `<a href>` 退出链接同步改 fetch POST。session/cookie 机制不动 → 线上登录态不受影响。顺手修 /api 无尾斜杠按 API 处理、_EXEMPT_PREFIXES 改精确段匹配。全站 48 处 fetch 接入统一封装与 P1-12/P1-15 绑定执行（显式依赖关系）。
+
+**真实 Bug**
+- **P1-11**：prepare 时把 resolve_batch_symbols 结果冻结进批次行 config_json，run 读快照。
+- **P1-12**：app-common.js 统一 fetch 封装（401→跳登录），全页面接入。
+- **P1-13**：build_intraday_overlay 自建 DataService 分支 try/finally close（P2-11 单例化后自然消解）。
+- **P2-1**：缺 date/time 双列抛业务错误「行情数据缺少时间列」+ 边界测试。
+- **P2-2**：报价入口统一先归一化 symbol 再查/写缓存。
+- **P2-3**：缺时间列显式 ValueError，不伪造。
+- **P2-5**：盘中聚合改成交额加权（与 EOD 对齐）；mean 前 dropna、全 None 置 None；latest_snapshot 失败不置 loaded 标志；record_industry_sync_job 按实际记 success/partial/failed；TICKFLOW_API_KEY 改 .get + 明确报错。
+
+**冗余/死代码（第四节全部）**
+- **P1-14 两阶段**：阶段一抽公共件（_category_path、_number、safe_float 统一签名、symbol_to_code 去重、_date_span、SH↔SS 收口 core/symbols；看板共用件 _ma5/_strength/_priority/_key_tuple/_macd_counts/_assign_strength/_DISPLAY_DAYS 抽 services/dashboard_common.py）；阶段二聚合骨架合并以 test_intraday_trend_consistency.py 为守门员，ROI 不足允许停在阶段一。
+- **P1-15**：前置① asset_version 扩展为跟踪全部静态资源（子代理建议简化实现：启动时内容 sha1 + 每请求 1s TTL 的 max(mtime) 复查；web/static 目前仅 2 个文件，成本极低）；前置②口径裁决——postJson 以 manual_trade 版为准（带 401 跳登录），止损卡以 manual_trade 版文案口径为准、实现取两版并集统一。产出 web/static/app-common.js，7 页接入。
+- **P2-6/P2-7**：死代码清单逐项全删（含 __pycache__ 残留、benchmarks 死 API、分钟 K 死链路、plan:starter 及其校验、_load_instrument_metadata 换主键查询、build_sw_tree 死循环体、死 CSS/JS）；「模板引用 vs 类定义」对照检查脚本化纳入 CI。
+
+**架构（P2-9～P2-13）**
+- **P2-9**：三个 JobManager 比照批量回测加启动清理（interrupted 标记 + job_runs 落库）；前端轮询 404 提示「服务已重启，任务丢失」；回填起点硬编码 date(2020,1,1) 改用 start_date/backtest_start_primary 配置口径。
+- **P2-10**：RevisionCache 下沉 services/dashboard 模块级单例（两边已 import 同模块，零循环 import 风险），顺手修 server.py:88 误导注释。
+- **P2-11（顺序约束：必须先 P2-12 后 P2-11）**：DataService 单例化前先把 MarketStore._get_db 固化问题解决（P2-12），否则固化被放大成进程级永久；TickFlow 限流状态提升模块级时**锁一并提升**；`_get_client` 懒初始化加锁；**删除现存三个 close() 调用点**（main.py:170、instruments.py:201、server.py:183——否则共享单例会被随手关闭）。
+- **P2-12**：rule_backtest 路由 service、MarketStore 改每次 `db or get_db()` 现取。
+- **P2-13**：env 收口 settings；scripts 公共 _common.py 统一 load_dotenv/DB_PATH/TickFlow 构造；新增 .env.example + gitignore 加 `!.env.example`；以 `__file__` 锚定项目根（TREND_QUANT_HOME 可覆盖），.env/DB/日志路径全部锚定。
+
+**性能（P2-15/P2-16/P2-18～P2-20）**
+- **P2-15**：引擎热循环 itertuples/numpy 列缓存，golden 测试锁数值。
+- **P2-16**：`_connect` 显式 timeout=30（与 P2-23 合并为一次改动一次测试）；脚本直写库后重启 web 服务写入运维约定。
+- **P2-18**：revision 免 COUNT(*)（写入侧维护 row_count 或 MAX(time)+version token）；/api/daily SQL 下推 + 盘中只算一遍；compute_stop_loss 支持传入预加载 df（持仓 2N→N）；instruments 列表改单条 GROUP BY；get_strategy_config 进程内 TTL 缓存 + 写时失效；批量 counts 每 N 格 flush；asset mtime 1s TTL（随前置①）。
+- **P2-19 裁定**：`_rule_jobs` 只存 slim，删 result_full 与「future endpoints」注释。
+- **P2-20**：轮询统一 visibilitychange 暂停 + 失败退避；batch 轮询失败显式错误条；resize 150ms 防抖；market_view 合并 setOption；subject_market mousemove 节流（低成本项优先）。
+
+**运维体系（第七节全部）**
+- **P2-21**：统一 get_logger；auth/indicator_store/dashboard/manual_trade/market_view 补日志；运维脚本 print→日志；查明 logs/service.log 与 calc.jsonl 来源后清理防再生。
+- **P2-22**：ASGI 慢请求中间件（>2s warning）；失败哨兵文件 + 导航栏盘后更新条复用；APScheduler 注册 error listener。
+- **P2-23**：`_connect`（db.py:66-76）一处加 timeout=30 + `PRAGMA foreign_keys=ON`（子代理实测生产库 manual_trades/sessions 零孤儿行，开启前仍先跑检查脚本确认）；backup_to 路径引号校验；备份前显式 WAL checkpoint。
+- **P2-24**：两个迁移脚本 shutil.copy2 改 db.backup_to()；migrate_category_sw2021 加服务运行检测。
+- **P1-2 实施注记**：scheduler 加 backup_job cron（hour=3，时区即 settings.app.timezone=Asia/Shanghai）；backup_to(keep=1) 签名与修剪 glob 兼容；**存量手工备份 pre-auth-wall-20260824.db 不匹配修剪 glob 会永久留存——每日备份跑通验证后删除**；磁盘峰值约 9GB（库 2.94GB + 新备份 + 旧备份删除前）可接受。
+
+**测试体系（第八节全部，覆盖率要求高）**
+- **P1-16**：附录 A 全量补测（jobs/scheduler/lifespan/MCP 7 工具错误契约/service/provider/db 关键路径 + /mcp 无 token 401 断言 + 双实现一致性参数化 + engine 边界契约 + RevisionCache single-flight）。
+- **P2-25**：弱断言改实断言；全局状态泄漏 fixture 还原；导入期固化 TODAY 改时间注入；重复测试合并；根目录 9 文件补 marker + slow 标记体系；2 个 pre-existing 失败打 xfail(strict=False)；test_subject_market 脆弱导入改从 services.dashboard 导入；API 测试 pbkdf2 提速（附录 N4）。
+- **P2-26**：GitHub Actions 单矩阵（ubuntu × 单 Python 版本：pytest + ruff + 死 CSS 检查）；覆盖率以「尽可能做高」为目标（咽喉模块优先，见 P1-16/附录 A），CI 持续输出覆盖率报告；**暂不设 fail_under 硬门槛**——待补测达成后由作者根据实际达成数字指定门槛；git 移除 .coverage 跟踪。
+
+**前端专项（第九节全部）**
+- **P2-27**：asset_version 扩展（同前置①，一并清理 base/login 硬编码 `-20260824-auth` 缓存串、batch_backtest 补守卫）；内联 style 并入 style.css；BOM 统一去除；阶段二把四大页 JS 抽至 web/static/js/<page>.js（subject_market 顺带补作用域隔离）。
+- **P2-28**：统一行内消息/自定义弹窗替换 10 处原生 alert/confirm；弹窗 a11y 以 rule_backtest 为模板补齐；market_view 首屏骨架；移动端不可用页面加标注；「16:30」写死改读后端配置；止损倍数文案后端下发统一。
+- **P2-29（子代理全仓核实）**：`/subject-market/api/trading-status` 零调用方 → 删除；`/api/auth/me` 当前同为死端点（仅测试探针使用）→ 一并删除，test_auth_wall 探针改换其他端点（与 P1-16 的测试修改同步执行）。
+
+**文档与仓库卫生（第十节全部）**
+- **P2-30**：README/CLAUDE 改 MCP 7 工具；architecture-review-2026-08-01 加归档头注；fetch_etf_holdings docstring 更新；docs 两目录多轮 plan/review 整理归档；TODO.md 审查后更新或删除；chinese_calendar 每年 12 月升级写入部署文档 + 导航栏「日历数据过期」提示。
+- **P2-31**：git rm + gitignore（trend-quant.zip、.agents/skills/*.zip、.coverage）；README 删除 git bundle 备份约定（备份线统一为每日 DB 备份）；孤儿日志清理；is_trading_time 改名 is_continuous_auction_hours 并同步唯一调用方；tushare 镜像风险写入文档；scripts/ 分 oneoff/ops + _common.py。
+
+**P0-3 实施注记（子代理评审补充的行为契约）**：删 fallback 后空表时 /api/categories 返回空 items（不炸），但 /api/add 与 /api/{symbol}/update 的 valid_paths 校验为空集 → 任何新增/更新 400「类目组合不存在」；且 instrument_categories 表在 src/ 内无任何种子来源（仅一次性迁移脚本直写）。因此方案补两条：① 行为契约写明「全新部署需先跑类目种子（迁移脚本或导出/导入）」并入 README；② 空表 API 测试断言对齐该契约（400 而非正常返回）。原 NameError 随路径删除自然消失。
+
+### 行动清单变更（相对第十一节）
+
+- #5：keep=3 改 keep=1；异机周备与恢复演练移除。
+- #14：P1-9 部分（Secure/token 哈希/绝对过期/明文兜底）移除，仅保留 P1-10 部分。
+- #19（P2-17 qfq 增量物化）：移除。
+- #32：DDL 分段与 users/sessions 域迁出（P2-8 替代方案）移除，仅保留 scripts 整理/文档更新/功能分支纪律。
+- 新增顺序约束：P2-12 → P2-11；P0-1 Bearer 中间件 → DNS rebinding 保护；P1-15 前置①② → P1-12/P1-10 前端接入 → P2-27 阶段二。
+- #1/#2 合并为本节 P0-1/P0-2 最终建议（token 中间件 + 工具去密码化）。
+
+### 决策闭环确认（2026-08-25 作者最终回复）
+
+1. **P2-4**：维持现状，不改（作者确认看板按强弱排序即有意设计）。已移入作者明确决策表。
+2. **附录 B（N1-N5）**：按默认建议全做。已移入作者明确决策表。
+3. **P1-3 密码语义**：采用默认方案——yyx 已存在时不强制重置密码（允许后续改密），仅在不存在时以 20160702 创建。
+4. **覆盖率门槛**：现阶段不指定硬门槛；以尽可能提高覆盖率为目标，达成后由作者根据实际数字指定 fail_under。
+5. **P0-2 调用方式变化**：作者知悉并接受（MCP 客户端一次性配置 token，add_trade/open_positions 不再传密码，daily-trade-report skill 同步更新）。
+
+**至此全部条目决策闭环，本节为实施方案定稿。尚未进入开发。**

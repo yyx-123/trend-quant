@@ -6,15 +6,15 @@ migrated from the retired signal engine's ``run_daily_update``.
 
 from __future__ import annotations
 
-from datetime import date, datetime
-
+from datetime import datetime
 
 from audit.app_logger import get_logger
 from core.benchmarks import benchmark_market_symbols
-from core.calendar import is_trading_day
+from core.calendar import is_trading_day, market_now
+from core.ops_sentinel import clear_sentinel, write_sentinel
 from core.settings import Settings
 from core.strategy_config import get_strategy_config
-from data.service import DataService
+from data.service import DataService, get_data_service
 from data.storage.db import record_job_run_safely
 
 logger = get_logger(__name__)
@@ -22,9 +22,9 @@ logger = get_logger(__name__)
 
 def _pool_symbols() -> list[str]:
     """Enabled instruments from the metadata table plus benchmark symbols, deduped."""
-    from data.storage.db import get_db
-
     import sqlite3
+
+    from data.storage.db import get_db
 
     try:
         instruments = [
@@ -60,11 +60,11 @@ def daily_market_update_job(
     ``force=True``（启动补偿调用）在非交易日也执行——定时任务本身只在
     工作日触发，但补跑可能发生在周末/节假日，用于补齐错过的交易日数据。
     """
-    today = date.today()
+    today = market_now().date()
     if not force and not is_trading_day(today):
         logger.info("Daily market update skipped: %s is not a trading day", today.isoformat())
         payload = {
-            "ts": datetime.now().isoformat(),
+            "ts": market_now().replace(tzinfo=None).isoformat(),
             "status": "skipped_non_trading_day",
             "results": [],
         }
@@ -84,34 +84,31 @@ def daily_market_update_job(
         start_text = str(strategy_cfg.get("backtest_start_primary", "2015-01-01"))
         start_date = datetime.strptime(start_text, "%Y-%m-%d").date()
 
-        owns_service = data_service is None
-        service = data_service or DataService(provider_priority=app_cfg.data_provider_priority)
-        try:
-            payload = service.update_pool_daily(
-                symbols=symbols,
-                start_date=start_date,
-                end_date=today,
-                adjust=str(strategy_cfg.get("adjust", "qfq")),
-                max_retries=max(int(app_cfg.daily_update_max_retries), 1),
-                retry_interval_seconds=max(float(app_cfg.daily_update_retry_interval_seconds), 1.0),
-            )
-            # Post-update orchestration (dividend detection + indicator
-            # rebuild) lives in app.main's update_job — core must not
-            # depend on the services layer.
-            payload["symbols"] = symbols
-        finally:
-            if owns_service:
-                service.close()
+        service = data_service or get_data_service()
+        payload = service.update_pool_daily(
+            symbols=symbols,
+            start_date=start_date,
+            end_date=today,
+            adjust=str(strategy_cfg.get("adjust", "qfq")),
+            max_retries=max(int(app_cfg.daily_update_max_retries), 1),
+            retry_interval_seconds=max(float(app_cfg.daily_update_retry_interval_seconds), 1.0),
+        )
+        # Post-update orchestration (dividend detection + indicator
+        # rebuild) lives in app.main's update_job — core must not
+        # depend on the services layer.
+        payload["symbols"] = symbols
     except Exception as exc:
         # Surface the failure in job_runs instead of vanishing into the
         # scheduler log — the status bar must not keep showing a stale success.
         logger.exception("Daily market update job failed")
         record_job_run_safely(
             "daily_update",
-            {"ts": datetime.now().isoformat(), "error": str(exc)},
+            {"ts": market_now().replace(tzinfo=None).isoformat(), "error": str(exc)},
             run_date=today.isoformat(),
             status="failed",
         )
+        # 失败哨兵（P2-22）：外部巡检（systemd/人工）无需打开页面即可发现失败
+        write_sentinel("daily_update", str(exc))
         raise
 
     logger.info(
@@ -120,4 +117,8 @@ def daily_market_update_job(
         payload.get("failed", 0),
         payload.get("total", 0),
     )
+    if int(payload.get("failed", 0) or 0) > 0:
+        write_sentinel("daily_update", f"{payload.get('failed')} 只标的更新失败: {payload.get('failed_symbols')}")
+    else:
+        clear_sentinel("daily_update")
     return payload

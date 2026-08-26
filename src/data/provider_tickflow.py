@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import os
 import threading
 import time as time_module
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import pandas as pd
 
 from audit.app_logger import get_logger
+from core import env
+from core.calendar import market_now
 from core.settings import TickFlowSettings
+from core.symbols import from_vendor_symbol, to_vendor_symbol
 from data.provider_base import IDataProvider
 from data.provider_utils import safe_float, standardize_ohlcv
 
@@ -21,13 +23,19 @@ except Exception:  # pragma: no cover
     TickFlow = None
 
 
+# 限流状态模块级（P2-11）：DataService 随处 new 时实例级限流器会被分身
+# 稀释——同一进程的 vendor 预算只有一份，锁随状态一并模块级化。
+_RATE_LIMIT_LOCK = threading.Lock()
+_NEXT_REQUEST_AT: dict[str, float] = {}
+_CLIENT_INIT_LOCK = threading.Lock()
+
+
 class TickFlowProvider(IDataProvider):
     name = "tickflow"
     paid_base_url = "https://api.tickflow.org"
 
     def __init__(self, settings: TickFlowSettings | None = None) -> None:
         self.settings = settings or TickFlowSettings(
-            plan="starter",
             api_base_url=self.paid_base_url,
             daily_kline_batch_size=100,
             daily_kline_batch_requests_per_minute=30,
@@ -36,31 +44,21 @@ class TickFlowProvider(IDataProvider):
             quote_max_symbols_per_request=50,
             quote_requests_per_minute=60,
         )
-        if self.settings.plan != "starter":
-            raise ValueError(f"TickFlowProvider only supports the configured starter plan, got {self.settings.plan!r}")
-        self.api_key = str(os.getenv("TICKFLOW_API_KEY", "") or "").strip()
+        self.api_key = env.tickflow_api_key()
         self._client = None
-        self._rate_limit_lock = threading.Lock()
-        self._next_request_at: dict[str, float] = {}
 
     @staticmethod
     def _to_tickflow_symbol(symbol: str) -> str:
-        value = str(symbol or "").strip().upper()
-        if value.endswith(".SS"):
-            return f"{value[:-3]}.SH"
-        return value
+        return to_vendor_symbol(symbol)
 
     @staticmethod
     def _from_tickflow_symbol(symbol: str) -> str:
-        value = str(symbol or "").strip().upper()
-        if value.endswith(".SH"):
-            return f"{value[:-3]}.SS"
-        return value
+        return from_vendor_symbol(symbol)
 
     @staticmethod
     def _to_milliseconds(day: date, *, end_of_day: bool = False) -> int:
         value = time.max if end_of_day else time.min
-        dt = datetime.combine(day, value, tzinfo=timezone.utc)
+        dt = datetime.combine(day, value, tzinfo=UTC)
         return int(dt.timestamp() * 1000)
 
     @staticmethod
@@ -77,10 +75,14 @@ class TickFlowProvider(IDataProvider):
         if TickFlow is None or not self.api_key:
             return None
         if self._client is None:
-            self._client = TickFlow(
-                api_key=self.api_key,
-                base_url=os.getenv("TICKFLOW_BASE_URL", self.settings.api_base_url),
-            )
+            # 懒初始化加锁（P2-11）：多线程入口（Web 请求池/调度任务）并发
+            # 首次取 client 时不重复构造。
+            with _CLIENT_INIT_LOCK:
+                if self._client is None:
+                    self._client = TickFlow(
+                        api_key=self.api_key,
+                        base_url=env.tickflow_base_url(self.settings.api_base_url),
+                    )
         return self._client
 
     def _throttle(self, operation: str, minimum_interval_seconds: float) -> None:
@@ -88,11 +90,11 @@ class TickFlowProvider(IDataProvider):
         interval = max(0.0, float(minimum_interval_seconds))
         if interval <= 0:
             return
-        with self._rate_limit_lock:
+        with _RATE_LIMIT_LOCK:
             now = time_module.monotonic()
-            next_allowed = self._next_request_at.get(operation, now)
+            next_allowed = _NEXT_REQUEST_AT.get(operation, now)
             wait_seconds = max(0.0, next_allowed - now)
-            self._next_request_at[operation] = max(now, next_allowed) + interval
+            _NEXT_REQUEST_AT[operation] = max(now, next_allowed) + interval
         if wait_seconds > 0:
             time_module.sleep(wait_seconds)
 
@@ -291,7 +293,7 @@ class TickFlowProvider(IDataProvider):
                         if ts is None or value is None:
                             continue
                         # 与 vendor trade_date 口径一致：UTC 毫秒时间戳的 UTC 日期
-                        day = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).date()
+                        day = datetime.fromtimestamp(int(ts) / 1000, tz=UTC).date()
                         factors.append((day, float(value)))
                     factors.sort(key=lambda item: item[0])
                     factors_by_symbol[local_symbol] = factors
@@ -302,15 +304,6 @@ class TickFlowProvider(IDataProvider):
                     errors[symbol] = error_text
         return factors_by_symbol, errors
 
-    def fetch_minute_history(
-        self,
-        symbol: str,
-        period: str,
-        count: int,
-        adjust: str,
-    ) -> pd.DataFrame:
-        del symbol, period, count, adjust
-        raise RuntimeError("TickFlow Starter plan does not include minute K-line access")
 
     def fetch_latest_quote(self, symbol: str) -> dict:
         client = self._get_client()
@@ -327,23 +320,29 @@ class TickFlowProvider(IDataProvider):
                 item = raw
             else:
                 item = {}
-            ext = item.get("ext", {}) if isinstance(item.get("ext"), dict) else {}
-            return {
-                "symbol": symbol,
-                "name": str(item.get("name", ext.get("name", "")) or "").strip() or None,
-                "price": safe_float(item.get("last_price", item.get("price")), None),
-                "open": safe_float(item.get("open"), None),
-                "high": safe_float(item.get("high"), None),
-                "low": safe_float(item.get("low"), None),
-                "volume": safe_float(item.get("volume"), None),
-                "amount": safe_float(item.get("amount"), None),
-                "ts": str(
-                    item.get("trade_time", item.get("timestamp", datetime.now().isoformat()))
-                ),
-            }
+            return self._quote_item_to_dict(symbol, item)
         except Exception as exc:
             logger.exception("tickflow latest quote failed for %s", symbol)
             raise RuntimeError(f"tickflow latest quote failed for {symbol}: {exc}") from exc
+
+
+    @staticmethod
+    def _quote_item_to_dict(symbol: str, item: dict) -> dict:
+        """tickflow 报价 item → 项目 quote dict（单只/批量两条路径共用，P1-14）。"""
+        ext = item.get("ext", {}) if isinstance(item.get("ext"), dict) else {}
+        return {
+            "symbol": symbol,
+            "name": str(item.get("name", ext.get("name", "")) or "").strip() or None,
+            "price": safe_float(item.get("last_price", item.get("price")), None),
+            "open": safe_float(item.get("open"), None),
+            "high": safe_float(item.get("high"), None),
+            "low": safe_float(item.get("low"), None),
+            "volume": safe_float(item.get("volume"), None),
+            "amount": safe_float(item.get("amount"), None),
+            "ts": str(
+                item.get("trade_time", item.get("timestamp", market_now().replace(tzinfo=None).isoformat()))
+            ),
+        }
 
     def fetch_latest_quotes(self, symbols: list[str]) -> dict[str, dict]:
         """Batch-fetch real-time quotes for multiple symbols.
@@ -395,20 +394,7 @@ class TickFlowProvider(IDataProvider):
                 if not local_sym or local_sym in seen:
                     continue
                 seen.add(local_sym)
-                ext = item.get("ext", {}) if isinstance(item.get("ext"), dict) else {}
-                result[local_sym] = {
-                    "symbol": local_sym,
-                    "name": str(item.get("name", ext.get("name", "")) or "").strip() or None,
-                    "price": safe_float(item.get("last_price", item.get("price")), None),
-                    "open": safe_float(item.get("open"), None),
-                    "high": safe_float(item.get("high"), None),
-                    "low": safe_float(item.get("low"), None),
-                    "volume": safe_float(item.get("volume"), None),
-                    "amount": safe_float(item.get("amount"), None),
-                    "ts": str(
-                        item.get("trade_time", item.get("timestamp", datetime.now().isoformat()))
-                    ),
-                }
+                result[local_sym] = self._quote_item_to_dict(local_sym, item)
 
             # Any chunk symbol not returned by the API gets an error entry.
             for s in chunk:
@@ -429,9 +415,6 @@ class TickFlowProvider(IDataProvider):
         except Exception as exc:
             logger.exception("tickflow instrument fetch failed for %s", symbol)
             raise RuntimeError(f"tickflow instrument fetch failed for {symbol}: {exc}") from exc
-
-    def fetch_trading_calendar(self, start: date, end: date) -> list[date]:
-        return []
 
     def close(self) -> None:
         if self._client is not None:

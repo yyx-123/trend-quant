@@ -16,7 +16,6 @@ app:
 # 请求撞 429 重试、接口耗时 115 秒；充值续费后原限额（批量 50、60/min）恢复。
 # 若行情接口突发大量 400「标的数量超限」/ 429「请求频率超限」，先查会员状态。
 tickflow:
-  plan: starter
   api_base_url: "https://api.tickflow.org"
   daily_kline_batch_size: 100
   daily_kline_batch_requests_per_minute: 30

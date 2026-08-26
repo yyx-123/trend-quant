@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import logging
-from pathlib import Path
 import re
+from pathlib import Path
 
 import yaml
 
+from audit.app_logger import get_logger
 from rule_backtest.validators import StrategyConfigValidator, ValidationResult
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -201,5 +201,5 @@ class StrategyLoader:
         with path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
-            raise ValueError(f"strategy yaml must be an object: {path}")
+            raise TypeError(f"strategy yaml must be an object: {path}")
         return data
