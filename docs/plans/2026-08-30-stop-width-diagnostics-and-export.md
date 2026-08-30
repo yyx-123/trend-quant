@@ -1,6 +1,6 @@
 # 批量回测止损宽度诊断 + 分析数据导出 设计方案
 
-> 状态：方案待评审（未开发）
+> 状态：**已落地**（2026-08-30 开发完成；开放问题按 §10 倾向拍板执行）
 > 日期：2026-08-30
 > 触发问题：小规模实盘使用紧止损（tight：硬止损 1.0×ATR / 吊灯 2.0×ATR），部分标的止损出局后迅速反弹（踏空），另一部分标的紧止损明显更优。需要一个能用数据回答「什么情况下该用多宽的止损」的回测诊断体系，并把结果导出给 AI 做二次分析。
 
@@ -296,3 +296,22 @@ exports/batch_<id>[_vs_<id>]/
 1. **旧批次回填 vs 重跑**：回填脚本（任务 8）能救历史批次，但 trades_json 推导的 MAE/MFE 是重放近似；追求口径纯净就全部重跑。倾向：回填，标注 `round_trips_source`。
 2. **sweep 的 chandelier 联动比例**：tight 1.0/2.0、loose 1.5/2.5 的比值不同（2.0 vs 1.67），sweep 时 chandelier 按哪个比例缩放？倾向：固定 chandelier = hard × 2（贴近 tight 比例），在 manifest 记录。
 3. **导出目录位置**：`exports/` 需加入 .gitignore。
+
+## 11. 落地记录（2026-08-30）
+
+开放问题全部按上述倾向执行：回填+标注（已对本地批次 20260824175219654659 回填 6097 格）、
+sweep chandelier=hard×2、exports/ 已入 .gitignore。
+
+实现要点与方案原文的差异：
+- 回填重放的入场 ATR 保留**旧口径**（含入场日当根），与新批次 prev_close 口径区分，
+  manifest 的 `batch.atr_basis` 字段标明（旧批次为 `entry_bar(旧批次)`）。
+- 日度 NAV 维度指标（cvar_5/ulcer_index/max_dd_duration_days）旧批次无法回填
+  （daily_nav 未落库），保持 NULL；round-trip 维度指标全部回填。
+- live_trades.csv 实盘价为未复权实际成交价，post-exit 漂移优先用 raw 行情
+  （raw 缺失回退 qfq，漂移为近似）；已复算 §0 六笔已实现盈亏，数字一致。
+- loose 档标的级 stop_atr_mul 覆盖在 run_batch 逐格子应用（快照里是配置默认值），
+  钻取重跑该标的时为配置默认口径 —— 差异极小，记录在案。
+- 引擎既有测试的止损用例适配了 T-1 ATR 口径（前置预热 bar + start_date 推迟入场），
+  P1.3 memoized/legacy golden 一致性保持。
+- 验证：tests/unit/test_round_trips.py、test_stop_diagnostics.py、test_backtest_export.py
+  新增 30+ 用例；存量批量/引擎/API 测试全绿。

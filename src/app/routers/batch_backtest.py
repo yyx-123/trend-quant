@@ -231,6 +231,7 @@ def _parse_cell_blobs(row: dict) -> dict:
         "trades_json",
         "skipped_buys_json",
         "monthly_nav_json",
+        "round_trips_json",
     ):
         text = row.pop(key, None)
         out_key = key[: -len("_json")]
@@ -349,4 +350,24 @@ async def delete_batch_run(batch_id: str) -> dict:
     if not db_module.get_db().delete_batch_run(batch_id):
         raise HTTPException(status_code=409, detail="批次不存在或正在运行（请先取消）")
     return {"batch_id": batch_id, "deleted": True}
+
+
+@router.get("/api/runs/{batch_id}/export")
+async def export_batch(batch_id: str, compare: str = "", live: bool = True) -> dict:
+    """导出批次分析数据（方案 §8.2.6）：与 scripts/export_backtest_analysis.py
+    同一实现，返回导出目录路径。页面不加入口，供远程/自动化调用。"""
+    from services.backtest_export import export_batch_analysis
+
+    db = db_module.get_db()
+    if db.get_batch_run(batch_id) is None:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    try:
+        return export_batch_analysis(
+            db,
+            batch_id,
+            alt_batch_id=compare.strip() or None,
+            include_live=live,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 

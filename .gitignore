@@ -50,3 +50,6 @@ scripts/temp/
 .coverage
 *.zip
 !web/static/*.zip
+
+# 回测分析导出产物（方案 2026-08-30 §10，AI 离线分析用，不入库）
+exports/

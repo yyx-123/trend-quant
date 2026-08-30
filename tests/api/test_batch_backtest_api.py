@@ -293,3 +293,112 @@ class TestAnnualAggregates:
 
     def test_unknown_batch_404(self, client) -> None:
         assert client.get("/batch-backtest/api/runs/nope/annual-aggregates").status_code == 404
+
+
+class TestStopProfileAndDiagnostics:
+    """止损档位跑批 + 诊断/对比/导出端点（方案 2026-08-30 §5/§6/§8）。"""
+
+    def _run(self, client, **extra) -> str:
+        resp = client.post(
+            "/batch-backtest/api/run",
+            json={"categories": ["测试"], "strategy_ids": ["sma_ok"], **extra},
+        )
+        assert resp.status_code == 200, resp.text
+        batch_id = resp.json()["batch_id"]
+        assert _wait_finish(client, batch_id)["status"] == "completed"
+        return batch_id
+
+    def test_run_with_tight_profile(self, client, seeded_db) -> None:
+        batch_id = self._run(client, stop_profile="tight")
+        batch = client.get(f"/batch-backtest/api/runs/{batch_id}/cells").json()["batch"]
+        assert batch["stop_profile"] == "tight"
+        assert batch["atr_basis"] == "prev_close"
+        assert batch["name"].endswith("[tight]")
+        # 快照 atr_mul 已被覆写为实盘紧档 1.0
+        snap = client.get(
+            f"/batch-backtest/api/runs/{batch_id}/snapshot",
+            params={"strategy_id": "sma_ok"},
+        ).json()
+        spec = snap["strategy_config"]["exit"]["children"][0]["right"]
+        assert spec["params"]["atr_mul"] == 1.0
+
+    def test_run_rejects_unknown_profile(self, client, seeded_db) -> None:
+        resp = client.post(
+            "/batch-backtest/api/run",
+            json={"categories": ["测试"], "strategy_ids": ["sma_ok"], "stop_profile": "ultra"},
+        )
+        assert resp.status_code == 422  # pydantic Literal 校验
+
+    def test_stop_diagnostics_endpoint(self, client, seeded_db) -> None:
+        batch_id = self._run(client)
+        resp = client.get(f"/batch-backtest/api/runs/{batch_id}/stop-diagnostics")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["stop_profile"] == "default"
+        assert isinstance(body["diagnostics"], list)
+        assert client.get("/batch-backtest/api/runs/nope/stop-diagnostics").status_code == 404
+
+    def test_compare_endpoint(self, client, seeded_db) -> None:
+        base_id = self._run(client, stop_profile="tight")
+        alt_id = self._run(client, stop_profile="loose")
+        resp = client.get(
+            "/batch-backtest/api/compare",
+            params={"base_batch_id": base_id, "alt_batch_id": alt_id},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["common_cells"] == 1
+        assert body["cell_diffs"][0]["symbol"] == "BT1.SS"
+        assert "delta_annual_return" in body["cell_diffs"][0]
+        # 404 / 409 分支
+        assert client.get(
+            "/batch-backtest/api/compare",
+            params={"base_batch_id": "nope", "alt_batch_id": alt_id},
+        ).status_code == 404
+
+    def test_compare_no_common_cells_409(self, client, seeded_db) -> None:
+        from data.storage.market_store import MarketStore
+
+        seeded_db.save_instrument_metadata(
+            [{"symbol": "BT2.SS", "name": "另一类目", "category_l1": "其他", "asset_type": "etf"}]
+        )
+        base = pd.Timestamp("2024-01-02")
+        MarketStore(db=seeded_db).save_history(
+            "BT2.SS",
+            pd.DataFrame(
+                {
+                    "time": [(base + pd.Timedelta(days=i)).date().isoformat() for i in range(120)],
+                    "open": [10.0] * 120, "high": [10.1] * 120, "low": [9.9] * 120,
+                    "close": [10.0] * 120, "volume": [1_000_000] * 120,
+                    "amount": [10_000_000.0] * 120,
+                }
+            ),
+        )
+        base_id = self._run(client)
+        resp = client.post(
+            "/batch-backtest/api/run",
+            json={"categories": ["其他"], "strategy_ids": ["sma_ok"]},
+        )
+        assert resp.status_code == 200
+        other_id = resp.json()["batch_id"]
+        assert _wait_finish(client, other_id)["status"] == "completed"
+        resp = client.get(
+            "/batch-backtest/api/compare",
+            params={"base_batch_id": base_id, "alt_batch_id": other_id},
+        )
+        assert resp.status_code == 409
+
+    def test_export_endpoint(self, client, seeded_db) -> None:
+        batch_id = self._run(client)
+        resp = client.get(f"/batch-backtest/api/runs/{batch_id}/export", params={"live": False})
+        assert resp.status_code == 200
+        body = resp.json()
+        export_dir = body["export_dir"]
+        assert f"batch_{batch_id}" in export_dir
+        import os
+        import shutil
+
+        for name in ("manifest.json", "cells.csv", "round_trips.csv"):
+            assert os.path.exists(os.path.join(export_dir, name)), name
+        shutil.rmtree(export_dir, ignore_errors=True)  # 清理导出产物
+        assert client.get("/batch-backtest/api/runs/nope/export").status_code == 404
