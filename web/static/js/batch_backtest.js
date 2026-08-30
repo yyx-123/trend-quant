@@ -277,7 +277,8 @@
         strategy_ids: Array.from(state.strategies),
         name: el('bbName').value.trim(),
         start_date: el('bbStartDate').value || '',
-        end_date: el('bbEndDate').value || ''
+        end_date: el('bbEndDate').value || '',
+        stop_profile: el('bbStopProfile').value || 'default'
       })
     }).then(async function (r) {
       if (r.status === 409) {

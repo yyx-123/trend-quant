@@ -6,10 +6,15 @@
 
 钻取一致性：格子记录实际回测起止日期 + 批次快照策略 JSON，
 前端钻取用快照 + 区间重跑即可复现（漂移仅剩历史数据被改写的情形）。
+
+止损宽度诊断（2026-08-30 方案 §5）：stop_profile ∈ {default, tight, loose, sweep}
+在 prepare_batch 冻结快照时覆写 exit spec 的 atr_mul（档位数字与实盘
+stop_loss.py 同一把尺），批次行记 stop_profile + atr_basis=prev_close。
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import threading
@@ -20,11 +25,13 @@ import pandas as pd
 
 from audit.app_logger import get_logger
 from core.calendar import market_now
+from core.strategy_config import get_strategy_config
 from data.storage import db as db_module
 from data.storage.db import Database
 from data.storage.market_store import MarketStore
 from rule_backtest.engine import SingleSymbolAllInBacktestEngine
 from rule_backtest.loader import StrategyLoader
+from rule_backtest.metrics import compute_roundtrip_stats
 from rule_backtest.models import DEFAULT_FEE_RATE, BacktestExecutionConfig, RuleBacktestRequest
 
 logger = get_logger(__name__)
@@ -41,6 +48,106 @@ RANDOM_INDICATORS = frozenset({"random_uniform"})
 # 耗时预估（2026-07-26 分层实测，秒/格，按标的 bar 数分档）。
 _ETA_TIERS: tuple[tuple[int, float], ...] = ((500, 0.1), (2000, 0.4), (5000, 0.9))
 _ETA_DEFAULT = 1.8
+
+# 止损档位定义（方案 §5.1）：tight/loose 直接复用实盘口径（stop_loss.py:185-199）。
+STOP_PROFILE_TIGHT = {"hard": 1.0, "chandelier": 2.0}
+# sweep 时吊灯倍数固定 = hard × 2（贴近实盘 tight 比例；方案 §10 开放问题 2 的拍板值，
+# 导出 manifest 记录该约定）。
+SWEEP_CHANDELIER_RATIO = 2.0
+DEFAULT_SWEEP_ATR_MULS = [0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
+STOP_PROFILES = ("default", "tight", "loose", "sweep")
+
+# 2026-08-30 起引擎入场 ATR 为 T-1 收盘口径（方案 §7.3）。
+ATR_BASIS = "prev_close"
+
+
+def _exit_state_value_specs(strategy: dict):
+    """遍历 exit 条件树中的 state_value spec（原地修改用）。"""
+    exit_group = strategy.get("exit", {}) if isinstance(strategy.get("exit", {}), dict) else {}
+    for condition in exit_group.get("children", []) or []:
+        if not isinstance(condition, dict):
+            continue
+        for side in ("left", "right"):
+            spec = condition.get(side, {})
+            if isinstance(spec, dict) and spec.get("type") == "state_value":
+                yield spec
+
+
+def override_stop_atr_muls(
+    strategy: dict,
+    *,
+    hard_mul: float | None = None,
+    chandelier_mul: float | None = None,
+) -> dict:
+    """深拷贝策略并覆写 exit spec 中止损状态值的 atr_mul（不改动原对象）。"""
+    out = copy.deepcopy(strategy)
+    for spec in _exit_state_value_specs(out):
+        name = str(spec.get("name", ""))
+        params = spec.setdefault("params", {})
+        if not isinstance(params, dict):
+            continue
+        if name == "hard_stop" and hard_mul is not None:
+            params["atr_mul"] = float(hard_mul)
+        elif name in ("chandelier_stop", "chandelier_stop_ratchet") and chandelier_mul is not None:
+            params["atr_mul"] = float(chandelier_mul)
+    return out
+
+
+def apply_stop_profile(snapshot: list[dict], profile: str, sweep_atr_muls: list[float] | None) -> list[dict]:
+    """按止损档位变换策略快照（方案 §5.1）。
+
+    - default：原样返回；
+    - tight：hard=1.0 / chandelier=2.0（忽略标的级覆盖，与实盘 tight 一致）；
+    - loose：hard=配置默认（1.5，标的级 stop_atr_mul 覆盖在 run_batch 逐格子应用）、
+      chandelier=配置默认（2.5）；
+    - sweep：每个策略 × sweep_atr_muls 每值一份快照，chandelier = hard × 2，
+      id 加 @hs<mul> 后缀（格子数 ×N）。
+    """
+    if profile == "default":
+        return snapshot
+    if profile == "tight":
+        return [
+            {
+                **entry,
+                "strategy_config": override_stop_atr_muls(
+                    entry["strategy_config"],
+                    hard_mul=STOP_PROFILE_TIGHT["hard"],
+                    chandelier_mul=STOP_PROFILE_TIGHT["chandelier"],
+                ),
+            }
+            for entry in snapshot
+        ]
+    if profile == "loose":
+        cfg = get_strategy_config()
+        return [
+            {
+                **entry,
+                "strategy_config": override_stop_atr_muls(
+                    entry["strategy_config"],
+                    hard_mul=float(cfg.get("hard_stop_atr_mul_default", 1.5)),
+                    chandelier_mul=float(cfg.get("chandelier_stop_atr_mul", 2.5)),
+                ),
+            }
+            for entry in snapshot
+        ]
+    if profile == "sweep":
+        muls = [float(m) for m in (sweep_atr_muls or DEFAULT_SWEEP_ATR_MULS)]
+        out: list[dict] = []
+        for entry in snapshot:
+            for mul in muls:
+                out.append(
+                    {
+                        "id": f"{entry['id']}@hs{mul:g}",
+                        "name": f"{entry.get('name', entry['id'])} [hs{mul:g}]",
+                        "strategy_config": override_stop_atr_muls(
+                            entry["strategy_config"],
+                            hard_mul=mul,
+                            chandelier_mul=mul * SWEEP_CHANDELIER_RATIO,
+                        ),
+                    }
+                )
+        return out
+    raise ValueError(f"未知的止损档位: {profile}")
 
 
 def estimate_cell_seconds(bar_count: int) -> float:
@@ -117,6 +224,8 @@ def resolve_batch_symbols(db: Database, categories: list[str]) -> list[dict]:
                 "category_l2": str(item.get("category_l2") or ""),
                 "category_l3": str(item.get("category_l3") or ""),
                 "asset_type": str(item.get("asset_type") or "etf"),
+                # 标的级硬止损倍数覆盖（loose 档逐格子应用，与实盘口径一致）。
+                "stop_atr_mul": item.get("stop_atr_mul"),
                 "bar_count": bar_counts.get(symbol, 0),
             }
         )
@@ -231,6 +340,7 @@ def extract_cell(result: dict, monthly_nav: list[dict]) -> dict:
         if calmar is not None and bench_calmar is not None
         else None
     )
+    rt_stats = compute_roundtrip_stats(result.get("round_trips") or [], result.get("daily_nav") or [])
     return {
         "status": "ok",
         "start_date": result.get("start_date"),
@@ -254,11 +364,14 @@ def extract_cell(result: dict, monthly_nav: list[dict]) -> dict:
         "excess_annual_return": excess,
         "excess_sharpe": excess_sharpe,
         "excess_calmar": excess_calmar,
+        **rt_stats,
         "annual_returns_json": json.dumps(result.get("annual_returns") or [], ensure_ascii=False),
         "monthly_heatmap_json": json.dumps(result.get("monthly_heatmap") or {}, ensure_ascii=False),
         "trades_json": json.dumps(result.get("trades") or [], ensure_ascii=False),
         "skipped_buys_json": json.dumps(result.get("skipped_buys") or [], ensure_ascii=False),
         "monthly_nav_json": json.dumps(monthly_nav, ensure_ascii=False),
+        "round_trips_json": json.dumps(result.get("round_trips") or [], ensure_ascii=False),
+        "round_trips_source": "engine",
     }
 
 
@@ -351,6 +464,286 @@ def aggregate_annual_returns(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _mean(values: list[float]) -> float | None:
+    vals = [float(v) for v in values if isinstance(v, (int, float)) and math.isfinite(v)]
+    return float(sum(vals) / len(vals)) if vals else None
+
+
+# ----------------------------------------------------------------------
+# 止损专项诊断聚合（方案 §4/§6.1）：全部从 round-trip 字段直接聚合
+# ----------------------------------------------------------------------
+LOW_CONFIDENCE_N = 30
+
+# 分桶维度：（维度名, 取值函数）；波动率/趋势的分桶边界在批次内按分位数现算。
+_STOP_DIAG_DIMS = ("vol_quintile", "asset_type", "trend_regime", "exit_year")
+
+
+def _bucket_edges(values: list[float], parts: int) -> list[float]:
+    """批次内分位数边界（len = parts-1）；样本不足返回空列表（整批一桶）。"""
+    vals = sorted(float(v) for v in values if isinstance(v, (int, float)) and math.isfinite(v))
+    if len(vals) < parts * 2:
+        return []
+    import numpy as np
+
+    return [float(np.percentile(np.asarray(vals), 100.0 * i / parts)) for i in range(1, parts)]
+
+
+def _bucket_of(value: float | None, edges: list[float], prefix: str) -> str:
+    if value is None:
+        return "unknown"
+    for i, edge in enumerate(edges):
+        if value <= edge:
+            return f"{prefix}{i + 1}"
+    return f"{prefix}{len(edges) + 1}"
+
+
+def _aggregate_trip_group(trips: list[dict]) -> dict:
+    """一组 round-trips 的聚合指标（§4 五件诊断 + §3.2 分布量）。"""
+    n = len(trips)
+    r_vals = [float(t["r_multiple"]) for t in trips if isinstance(t.get("r_multiple"), (int, float))]
+    pnls = [float(t.get("pnl") or 0.0) for t in trips]
+    wins = [p for p in pnls if p > 0]
+    gains = sum(wins)
+    losses = abs(sum(p for p in pnls if p < 0))
+    stops = [t for t in trips if t.get("exit_reason") == "hard_stop"]
+
+    out: dict[str, Any] = {
+        "n": n,
+        "r_mean": _mean(r_vals),
+        "r_p25": _percentile25(r_vals),
+        "r_p75": _percentile75(r_vals),
+        "win_rate": float(len(wins) / n) if n else None,
+        "profit_factor": (gains / losses) if losses > 0 else (999.0 if gains > 0 else None),
+        "avg_exit_efficiency": _mean(
+            [
+                max(float(t.get("pnl") or 0.0), 0.0)
+                / (float(t["mfe_pct"]) / 100.0 * float(t.get("entry_price") or 0.0) * int(t.get("qty") or 0))
+                for t in trips
+                if isinstance(t.get("mfe_pct"), (int, float))
+                and float(t.get("mfe_pct") or 0.0) > 0
+                and float(t.get("entry_price") or 0.0) > 0
+                and int(t.get("qty") or 0) > 0
+            ]
+        ),
+        "stop_exit_ratio": float(len(stops) / n) if n else None,
+        "trigger_within_3d_ratio": (
+            float(sum(1 for t in stops if isinstance(t.get("days_to_trigger"), int) and t["days_to_trigger"] <= 3) / len(stops))
+            if stops
+            else None
+        ),
+        # 吊灯回吐（§4）：吊灯出场的 MFE 中位数 vs 实际兑现 R 中位数
+        "chandelier_mfe_atr_median": _median(
+            [
+                t.get("mfe_atr")
+                for t in trips
+                if t.get("exit_reason") in ("chandelier_stop", "chandelier_stop_ratchet")
+            ]
+        ),
+        "chandelier_r_median": _median(
+            [
+                t.get("r_multiple")
+                for t in trips
+                if t.get("exit_reason") in ("chandelier_stop", "chandelier_stop_ratchet")
+            ]
+        ),
+        "low_confidence": n < LOW_CONFIDENCE_N,
+    }
+    for w in (5, 10, 20):
+        rets = [t.get(f"post_exit_ret_{w}d") for t in stops]
+        reentries = [t.get(f"reentry_above_entry_{w}d") for t in stops]
+        known = [r for r in reentries if r is not None]
+        out[f"false_stop_rate_{w}d"] = (
+            float(sum(1 for r in known if r) / len(known)) if known else None
+        )
+        out[f"post_exit_drift_{w}d_mean"] = _mean([r for r in rets if r is not None])
+        out[f"post_exit_drift_{w}d_median"] = _median([r for r in rets if r is not None])
+    return out
+
+
+def _percentile25(values: list[float]) -> float | None:
+    return _percentile_from(sorted(values), 25)
+
+
+def _percentile75(values: list[float]) -> float | None:
+    return _percentile_from(sorted(values), 75)
+
+
+def _percentile_from(vals: list[float], q: float) -> float | None:
+    if not vals:
+        return None
+    import numpy as np
+
+    return float(np.percentile(np.asarray(vals, dtype=float), q))
+
+
+def aggregate_stop_diagnostics(rows: list[dict]) -> list[dict]:
+    """批次级止损诊断聚合（方案 §3.2/§6.1）。
+
+    输入：ok 格子的 round_trips_json + 标的特征行（get_batch_roundtrip_rows）。
+    输出：每（strategy, dim, bucket）一行 long-format 诊断，单元格含
+    r_mean / 假止损率 / post-exit 漂移 / n / low_confidence。
+    """
+    # 展平全部 round-trips，带上格子级语境
+    flat: list[dict] = []
+    for row in rows:
+        try:
+            trips = json.loads(row.get("round_trips_json") or "[]")
+        except (ValueError, TypeError):
+            continue
+        for t in trips or []:
+            if not isinstance(t, dict):
+                continue
+            flat.append(
+                {
+                    **t,
+                    "strategy": str(row.get("strategy_name") or row.get("strategy_id") or ""),
+                    "cell_asset_type": str(row.get("asset_type") or t.get("asset_type") or ""),
+                    "trend_score_avg": row.get("trend_score_avg"),
+                }
+            )
+    if not flat:
+        return []
+
+    vol_edges = _bucket_edges(
+        [t.get("entry_atr_pct") for t in flat if isinstance(t.get("entry_atr_pct"), (int, float))],
+        5,
+    )
+    trend_edges = _bucket_edges(
+        [t.get("trend_score_avg") for t in flat if isinstance(t.get("trend_score_avg"), (int, float))],
+        3,
+    )
+
+    def dim_value(trip: dict, dim: str) -> str:
+        if dim == "vol_quintile":
+            v = trip.get("entry_atr_pct")
+            return _bucket_of(float(v) if isinstance(v, (int, float)) else None, vol_edges, "q")
+        if dim == "asset_type":
+            return trip.get("cell_asset_type") or "unknown"
+        if dim == "trend_regime":
+            v = trip.get("trend_score_avg")
+            return _bucket_of(float(v) if isinstance(v, (int, float)) else None, trend_edges, "t")
+        if dim == "exit_year":
+            text = str(trip.get("exit_date") or "")[:4]
+            return text if text.isdigit() else "unknown"
+        return "unknown"
+
+    groups: dict[tuple[str, str, str], list[dict]] = {}
+    for t in flat:
+        for dim in _STOP_DIAG_DIMS:
+            groups.setdefault((t["strategy"], dim, dim_value(t, dim)), []).append(t)
+
+    out: list[dict] = []
+    for (strategy, dim, bucket), trips in sorted(groups.items()):
+        out.append({"strategy": strategy, "dim": dim, "bucket": bucket, **_aggregate_trip_group(trips)})
+    return out
+
+
+# ----------------------------------------------------------------------
+# 批次对比（方案 §6.3）：逐格差值 + 诊断并排 + 逐标的配对 bootstrap CI
+# ----------------------------------------------------------------------
+_COMPARE_METRICS = (
+    "annual_return",
+    "sharpe",
+    "calmar",
+    "win_rate",
+    "profit_factor",
+    "r_mean",
+    "stop_exit_ratio",
+    "exit_efficiency",
+)
+
+
+def bootstrap_mean_diff_ci(
+    pairs: list[tuple[float, float]],
+    resamples: int = 1000,
+    seed: int = 42,
+) -> dict | None:
+    """逐标的配对的 bootstrap 95% 置信区间（方案 §6.2；固定种子可复现）。
+
+    pairs = [(base, alt), ...]；返回 alt − base 均值的点估计与 CI。
+    """
+    import random
+
+    diffs = [float(a) - float(b) for b, a in pairs]
+    if len(diffs) < 2:
+        return None
+    rng = random.Random(seed)
+    n = len(diffs)
+    means = sorted(
+        sum(diffs[rng.randrange(n)] for _ in range(n)) / n for _ in range(resamples)
+    )
+    return {
+        "n_pairs": n,
+        "mean_diff": float(sum(diffs) / n),
+        "ci95_low": float(means[int(0.025 * resamples)]),
+        "ci95_high": float(means[int(0.975 * resamples)]),
+        "resamples": int(resamples),
+    }
+
+
+def compare_batches(db: Database, base_batch_id: str, alt_batch_id: str) -> dict:
+    """紧/松（或任意两批次）并排对比。两批次须同标的池同策略 —— 取
+    symbol×strategy 交集，交集为空或任一批次仍在运行由路由层转 409。"""
+    base_cells = db.get_batch_cells(base_batch_id)
+    alt_cells = db.get_batch_cells(alt_batch_id)
+    base_map = {
+        (c["symbol"], c["strategy_id"]): c for c in base_cells if c.get("status") == "ok"
+    }
+    alt_map = {
+        (c["symbol"], c["strategy_id"]): c for c in alt_cells if c.get("status") == "ok"
+    }
+    common = sorted(set(base_map) & set(alt_map))
+
+    cell_diffs: list[dict] = []
+    for key in common:
+        b, a = base_map[key], alt_map[key]
+        row: dict[str, Any] = {
+            "symbol": key[0],
+            "strategy_id": key[1],
+            "symbol_name": b.get("symbol_name"),
+            "strategy_name": b.get("strategy_name"),
+        }
+        for metric in _COMPARE_METRICS:
+            bv, av = b.get(metric), a.get(metric)
+            row[f"base_{metric}"] = bv
+            row[f"alt_{metric}"] = av
+            row[f"delta_{metric}"] = (
+                float(av) - float(bv)
+                if isinstance(av, (int, float)) and isinstance(bv, (int, float))
+                else None
+            )
+        cell_diffs.append(row)
+
+    # 逐（策略）配对 bootstrap：r_mean 差（alt − base）的 95% CI
+    ci_rows: list[dict] = []
+    strategy_of = {
+        k: (base_map[k].get("strategy_name") or base_map[k].get("strategy_id")) for k in common
+    }
+    for strategy in sorted(set(strategy_of.values())):
+        pairs = [
+            (base_map[k]["r_mean"], alt_map[k]["r_mean"])
+            for k in common
+            if strategy_of[k] == strategy
+            and isinstance(base_map[k].get("r_mean"), (int, float))
+            and isinstance(alt_map[k].get("r_mean"), (int, float))
+        ]
+        ci = bootstrap_mean_diff_ci(pairs)
+        if ci is not None:
+            ci_rows.append({"strategy": strategy, "metric": "r_mean", **ci})
+
+    return {
+        "base_batch_id": base_batch_id,
+        "alt_batch_id": alt_batch_id,
+        "common_cells": len(common),
+        "base_only_cells": len(set(base_map) - set(alt_map)),
+        "alt_only_cells": len(set(alt_map) - set(base_map)),
+        "cell_diffs": cell_diffs,
+        "bootstrap_ci": ci_rows,
+        "base_diagnostics": aggregate_stop_diagnostics(db.get_batch_roundtrip_rows(base_batch_id)),
+        "alt_diagnostics": aggregate_stop_diagnostics(db.get_batch_roundtrip_rows(alt_batch_id)),
+    }
+
+
 class BatchBacktestService:
     def __init__(
         self,
@@ -376,6 +769,8 @@ class BatchBacktestService:
         start_date: date | None = None,
         end_date: date | None = None,
         strategy_loader: StrategyLoader | None = None,
+        stop_profile: str = "default",
+        sweep_atr_muls: list[float] | None = None,
     ) -> dict:
         """Build the batch row payload: snapshot strategies, resolve symbols,
         anchor the data cutoff. Raises ValueError on invalid input.
@@ -383,8 +778,14 @@ class BatchBacktestService:
         start_date/end_date 限定回测窗口（可选）：缺省为全生命周期（上市 ~ 锚定日）。
         end_date 超过锚定日时被截到锚定日；引擎对窗口内信号用全历史做指标
         warmup（resolver 基于 all_bars），窗口起点无冷启动问题。
+
+        stop_profile（方案 §5.1）：tight/loose 覆写快照中止损 atr_mul（与实盘同口径），
+        sweep 按 sweep_atr_muls 展开快照（格子数 ×N）。
         """
+        if stop_profile not in STOP_PROFILES:
+            raise ValueError(f"未知的止损档位: {stop_profile}（可选：{'/'.join(STOP_PROFILES)}）")
         snapshot = build_strategy_snapshot(strategy_ids, loader=strategy_loader)
+        snapshot = apply_stop_profile(snapshot, stop_profile, sweep_atr_muls)
         symbols = resolve_batch_symbols(self.db, categories)
         if not symbols:
             raise ValueError("所选类目下没有可用标的")
@@ -417,6 +818,9 @@ class BatchBacktestService:
             "lot_size": 100,
             "stock_stamp_tax_rate": 0.001,
             "min_bars": MIN_BARS,
+            # 止损跳空成交修正（方案 §7.1，默认开；执行配置已参数化，成本压力
+            # 测试走 sweep 脚本 --cost-multiplier）。
+            "stop_gap_fill": True,
             "start_date": start_date.isoformat() if start_date else None,
             # 用户请求的原始区间（end 可能为 None = 最新）；run_batch 再解析成
             # 实际 window_end（= end_date or 锚定日）。展示/重跑预填用原始值。
@@ -427,9 +831,17 @@ class BatchBacktestService:
             # 实际执行格子数与 total_cells 始终一致。
             "symbols": symbols,
         }
+        if stop_profile == "sweep":
+            config["sweep_atr_muls"] = [
+                float(m) for m in (sweep_atr_muls or DEFAULT_SWEEP_ATR_MULS)
+            ]
+            config["sweep_chandelier_ratio"] = SWEEP_CHANDELIER_RATIO
+        batch_name = name.strip() or default_batch_name(categories, len(snapshot), start_date, end_date)
+        if stop_profile != "default" and f"[{stop_profile}]" not in batch_name:
+            batch_name = f"{batch_name} [{stop_profile}]"
         return {
             "batch_id": batch_id,
-            "name": name.strip() or default_batch_name(categories, len(snapshot), start_date, end_date),
+            "name": batch_name,
             "categories_json": json.dumps(categories, ensure_ascii=False),
             "strategy_snapshot_json": json.dumps(snapshot, ensure_ascii=False),
             "config_json": json.dumps(config),
@@ -437,6 +849,8 @@ class BatchBacktestService:
             "data_anchor_date": anchor.get("anchor_date"),
             "data_version": anchor.get("data_version"),
             "engine_version": ENGINE_VERSION,
+            "stop_profile": stop_profile,
+            "atr_basis": ATR_BASIS,
         }
 
     # ------------------------------------------------------------------
@@ -451,6 +865,7 @@ class BatchBacktestService:
         categories = json.loads(batch["categories_json"])
         snapshot = json.loads(batch["strategy_snapshot_json"])
         config = json.loads(batch["config_json"])
+        stop_profile = str(batch.get("stop_profile") or "default")
         # time 列存的是 'YYYY-MM-DD 00:00:00'，date.fromisoformat 会报错。
         anchor = pd.Timestamp(str(batch["data_anchor_date"])).date()
         # 回测窗口（旧批次 config 无此字段 → 全生命周期，行为与之前一致）。
@@ -512,13 +927,21 @@ class BatchBacktestService:
                     lot_size=int(config.get("lot_size", 100)),
                     instrument_type="stock" if item["asset_type"] == "stock" else "etf",
                     stock_stamp_tax_rate=float(config.get("stock_stamp_tax_rate", 0.001)),
+                    stop_gap_fill=bool(config.get("stop_gap_fill", True)),
                 )
 
                 for s in snapshot:
+                    # loose 档标的级覆盖（与实盘 stop_loss.py 同口径）：快照里是配置
+                    # 默认值，标的有 stop_atr_mul 时逐格子覆写硬止损倍数。
+                    strategy_config = s["strategy_config"]
+                    if stop_profile == "loose" and item.get("stop_atr_mul") is not None:
+                        strategy_config = override_stop_atr_muls(
+                            strategy_config, hard_mul=float(item["stop_atr_mul"])
+                        )
                     try:
                         result = self.engine.run(
                             RuleBacktestRequest(
-                                strategy=s["strategy_config"],
+                                strategy=strategy_config,
                                 symbol=symbol,
                                 bars=bars,
                                 start_date=window_start,
@@ -528,6 +951,9 @@ class BatchBacktestService:
                                 sizer=None,
                             )
                         )
+                        # 服务层补记（方案 §2.2）：引擎不关心类目归属。
+                        for rt in result.get("round_trips") or []:
+                            rt["category_l1"] = str(item.get("category_l1") or "")
                         cell = extract_cell(result, monthly_sampled_nav(result.get("daily_nav") or []))
                         cell["bar_count"] = bar_count
                         cell["partial_window"] = _partial_window_flag(bars, window_start, window_end)

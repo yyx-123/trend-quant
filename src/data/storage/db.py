@@ -397,6 +397,8 @@ class Database:
                     data_anchor_date TEXT,
                     data_version TEXT,
                     engine_version TEXT NOT NULL DEFAULT '1.0',
+                    stop_profile TEXT NOT NULL DEFAULT 'default',
+                    atr_basis TEXT NOT NULL DEFAULT '',
                     created_at TEXT DEFAULT (datetime('now','localtime')),
                     finished_at TEXT,
                     error TEXT
@@ -444,6 +446,22 @@ class Database:
                     trades_json TEXT,
                     skipped_buys_json TEXT,
                     monthly_nav_json TEXT,
+                    round_trips_json TEXT,
+                    round_trips_source TEXT,
+                    r_mean REAL,
+                    r_p5 REAL,
+                    r_p25 REAL,
+                    r_p75 REAL,
+                    r_p95 REAL,
+                    r_skew REAL,
+                    tail_ratio REAL,
+                    exit_efficiency REAL,
+                    max_losing_streak INTEGER,
+                    cvar_5 REAL,
+                    ulcer_index REAL,
+                    max_dd_duration_days INTEGER,
+                    stop_exit_ratio REAL,
+                    chandelier_exit_ratio REAL,
                     created_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (batch_id, symbol, strategy_id)
                 );
@@ -499,12 +517,34 @@ class Database:
             "benchmark_calmar": "REAL",
             "excess_sharpe": "REAL",
             "excess_calmar": "REAL",
+            # 止损宽度诊断（2026-08-30 方案 §2.3/§3.1）：round_trips_json NULL = 旧批次未回填
+            "round_trips_json": "TEXT",
+            "round_trips_source": "TEXT",
+            "r_mean": "REAL",
+            "r_p5": "REAL",
+            "r_p25": "REAL",
+            "r_p75": "REAL",
+            "r_p95": "REAL",
+            "r_skew": "REAL",
+            "tail_ratio": "REAL",
+            "exit_efficiency": "REAL",
+            "max_losing_streak": "INTEGER",
+            "cvar_5": "REAL",
+            "ulcer_index": "REAL",
+            "max_dd_duration_days": "INTEGER",
+            "stop_exit_ratio": "REAL",
+            "chandelier_exit_ratio": "REAL",
+        }
+        batch_run_columns = {
+            "stop_profile": "TEXT NOT NULL DEFAULT 'default'",
+            "atr_basis": "TEXT NOT NULL DEFAULT ''",
         }
         targets = {
             "instrument_metadata": metadata_columns,
             "indicator_daily": indicator_columns,
             "trend_daily": cache_columns,
             "batch_backtest_cells": batch_cell_columns,
+            "batch_backtest_runs": batch_run_columns,
         }
         with self._connect() as conn:
             # N1（2026-08-25）：删除与 PRIMARY KEY (symbol,time) 完全同列的
@@ -2119,8 +2159,8 @@ class Database:
                 """INSERT INTO batch_backtest_runs
                    (batch_id, name, status, categories_json, strategy_snapshot_json,
                     config_json, total_cells, data_anchor_date, data_version, engine_version,
-                    created_at)
-                   VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
+                    stop_profile, atr_basis, created_at)
+                   VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
                 (
                     batch["batch_id"],
                     batch.get("name", ""),
@@ -2131,6 +2171,8 @@ class Database:
                     batch.get("data_anchor_date"),
                     batch.get("data_version"),
                     batch.get("engine_version", "1.0"),
+                    batch.get("stop_profile", "default"),
+                    batch.get("atr_basis", ""),
                 ),
             )
             return True
@@ -2201,8 +2243,13 @@ class Database:
                     benchmark_sharpe, benchmark_calmar,
                     excess_annual_return, excess_sharpe, excess_calmar,
                     annual_returns_json, monthly_heatmap_json, trades_json,
-                    skipped_buys_json, monthly_nav_json, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+                    skipped_buys_json, monthly_nav_json,
+                    round_trips_json, round_trips_source,
+                    r_mean, r_p5, r_p25, r_p75, r_p95, r_skew, tail_ratio,
+                    exit_efficiency, max_losing_streak, cvar_5, ulcer_index,
+                    max_dd_duration_days, stop_exit_ratio, chandelier_exit_ratio,
+                    created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                 (
                     cell["batch_id"], cell["symbol"], cell["strategy_id"],
                     cell.get("symbol_name"), cell.get("strategy_name"),
@@ -2222,6 +2269,13 @@ class Database:
                     cell.get("annual_returns_json"), cell.get("monthly_heatmap_json"),
                     cell.get("trades_json"), cell.get("skipped_buys_json"),
                     cell.get("monthly_nav_json"),
+                    cell.get("round_trips_json"), cell.get("round_trips_source"),
+                    cell.get("r_mean"), cell.get("r_p5"), cell.get("r_p25"),
+                    cell.get("r_p75"), cell.get("r_p95"), cell.get("r_skew"),
+                    cell.get("tail_ratio"), cell.get("exit_efficiency"),
+                    cell.get("max_losing_streak"), cell.get("cvar_5"),
+                    cell.get("ulcer_index"), cell.get("max_dd_duration_days"),
+                    cell.get("stop_exit_ratio"), cell.get("chandelier_exit_ratio"),
                 ),
             )
 
@@ -2234,7 +2288,11 @@ class Database:
         " c.final_equity,"
         " c.benchmark_total_return, c.benchmark_annual_return,"
         " c.benchmark_sharpe, c.benchmark_calmar,"
-        " c.excess_annual_return, c.excess_sharpe, c.excess_calmar"
+        " c.excess_annual_return, c.excess_sharpe, c.excess_calmar,"
+        " c.r_mean, c.r_p5, c.r_p25, c.r_p75, c.r_p95, c.r_skew, c.tail_ratio,"
+        " c.exit_efficiency, c.max_losing_streak, c.cvar_5, c.ulcer_index,"
+        " c.max_dd_duration_days, c.stop_exit_ratio, c.chandelier_exit_ratio,"
+        " c.round_trips_source"
     )
 
     def get_batch_cells(self, batch_id: str) -> list[dict]:
@@ -2263,6 +2321,22 @@ class Database:
                 (batch_id, symbol, strategy_id),
             ).fetchone()
         return dict(row) if row else None
+
+    def get_batch_roundtrip_rows(self, batch_id: str) -> list[dict]:
+        """ok 格子的 round-trip blob + 聚合所需语境（止损诊断/导出用）。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT c.symbol, c.symbol_name, c.strategy_id, c.strategy_name,
+                          c.category_l1, c.asset_type, c.round_trips_json,
+                          f.trend_score_avg
+                   FROM batch_backtest_cells c
+                   LEFT JOIN batch_backtest_symbol_features f
+                     ON f.batch_id = c.batch_id AND f.symbol = c.symbol
+                   WHERE c.batch_id = ? AND c.status = 'ok' AND c.round_trips_json IS NOT NULL
+                   ORDER BY c.symbol, c.strategy_id""",
+                (batch_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_batch_annual_blobs(self, batch_id: str) -> list[dict]:
         """ok 格子的年度收益 blob（策略×年份聚合用，列表端点不带 blob 故单列）。"""

@@ -92,6 +92,8 @@ class PositionState:
     # 本笔实际使用的硬止损 ATR 倍数（initialize_stop_state 时从 exit spec 捕获），
     # R 倍数 = pnl / (qty × hard_stop_atr_mul × atr_at_entry) 的分母依据。
     hard_stop_atr_mul: float = 0.0
+    # 本笔实际使用的吊灯止损 ATR 倍数（同为 initialize 时捕获，紧/松档溯源用）。
+    chandelier_atr_mul: float = 0.0
 
     @property
     def is_open(self) -> bool:
@@ -110,6 +112,7 @@ class PositionState:
         self.entry_bar_idx = None
         self.mae_price = 0.0
         self.hard_stop_atr_mul = 0.0
+        self.chandelier_atr_mul = 0.0
         # last_exit_bar_idx 不在此清除 —— 见字段注释。
 
 

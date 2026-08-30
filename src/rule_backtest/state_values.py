@@ -130,6 +130,7 @@ def initialize_stop_state(
                 atr_period = int(params.get("atr_period", 20))
                 atr_mul = float(params.get("atr_mul", 2.5))
                 atr_value, atr_trace = _atr_value(bars, atr_period, atr_at, lookback=atr_lookback)
+                position.chandelier_atr_mul = atr_mul
                 if atr_value is not None:
                     # 买入当日无前值可比，棘轮版与原版同为直接赋值。
                     setattr(position, name, position.highest_high_since_entry - atr_mul * atr_value)

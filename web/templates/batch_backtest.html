@@ -32,6 +32,11 @@
       </div>
     </div>
     <div class="batch-form-row batch-form-row--actions">
+      <select id="bbStopProfile" class="batch-window-preset" title="止损档位：紧/松档覆写策略止损 ATR 倍数（与实盘口径一致）">
+        <option value="default" selected>默认止损</option>
+        <option value="tight">紧止损</option>
+        <option value="loose">松止损</option>
+      </select>
       <input id="bbName" type="text" class="batch-name-input" placeholder="批次名称（可选，默认自动生成）">
       <span id="bbEta" class="batch-eta"></span>
       <button id="bbRunBtn" type="button" class="confirm-ok-btn batch-run-btn">运行批量回测</button>

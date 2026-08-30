@@ -354,6 +354,97 @@ def _annual_trade_stats_map(trades: list[dict]) -> dict[int, dict]:
     return out
 
 
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    return float(np.percentile(np.asarray(values, dtype=float), q))
+
+
+def compute_roundtrip_stats(round_trips: list[dict], daily_nav: list[dict]) -> dict:
+    """格子级分布类指标（方案 2026-08-30 §3.1），纯追加、不改动既有 summary 口径。
+
+    round-trip 维度（无交易时全为 None）：
+      r_mean / r_p5 / r_p25 / r_p75 / r_p95 / r_skew / tail_ratio(P95÷|P5|) /
+      exit_efficiency（mean(max(pnl,0) ÷ MFE金额)，仅 MFE>0 的笔）/
+      max_losing_streak / stop_exit_ratio / chandelier_exit_ratio
+    日度 NAV 维度（nav 非空即算）：
+      cvar_5（日收益最差 5% 的均值）/ ulcer_index / max_dd_duration_days（最长水下交易日数）
+    """
+    trips = [rt for rt in round_trips or [] if isinstance(rt, dict)]
+    r_vals = sorted(
+        float(rt["r_multiple"]) for rt in trips
+        if isinstance(rt.get("r_multiple"), (int, float))
+    )
+    r_p5 = _percentile(r_vals, 5)
+    r_p95 = _percentile(r_vals, 95)
+    skew = float(pd.Series(r_vals).skew()) if len(r_vals) >= 3 else None
+    tail_ratio = (
+        float(r_p95 / abs(r_p5))
+        if r_p5 is not None and r_p95 is not None and r_p5 < 0
+        else None
+    )
+
+    eff_rows: list[float] = []
+    for rt in trips:
+        mfe_pct = rt.get("mfe_pct")
+        if not isinstance(mfe_pct, (int, float)) or mfe_pct <= 0:
+            continue
+        mfe_amount = float(mfe_pct) / 100.0 * float(rt.get("entry_price") or 0.0) * int(rt.get("qty") or 0)
+        if mfe_amount > 0:
+            eff_rows.append(max(float(rt.get("pnl") or 0.0), 0.0) / mfe_amount)
+    exit_efficiency = float(np.mean(eff_rows)) if eff_rows else None
+
+    streak = max_streak = 0
+    for rt in sorted(trips, key=lambda r: str(r.get("exit_date") or "")):
+        if float(rt.get("pnl") or 0.0) < 0:
+            streak += 1
+            max_streak = max(max_streak, streak)
+        else:
+            streak = 0
+
+    n = len(trips)
+    n_stop = sum(1 for rt in trips if rt.get("exit_reason") == "hard_stop")
+    n_chandelier = sum(
+        1 for rt in trips
+        if rt.get("exit_reason") in ("chandelier_stop", "chandelier_stop_ratchet")
+    )
+
+    cvar_5 = ulcer_index = None
+    max_dd_duration_days: int | None = None
+    if daily_nav:
+        equity = pd.to_numeric(pd.DataFrame(daily_nav)["equity"], errors="coerce").dropna()
+        if len(equity) > 1:
+            rets = equity.pct_change().dropna().sort_values()
+            if not rets.empty:
+                k = max(1, int(len(rets) * 0.05))
+                cvar_5 = float(rets.iloc[:k].mean())
+            dd_pct = (equity / equity.cummax().replace(0, np.nan) - 1.0).fillna(0.0) * 100.0
+            ulcer_index = float(np.sqrt((dd_pct**2).mean()))
+            underwater = dd_pct < 0
+            run = longest = 0
+            for flag in underwater:
+                run = run + 1 if flag else 0
+                longest = max(longest, run)
+            max_dd_duration_days = int(longest)
+
+    return {
+        "r_mean": float(np.mean(r_vals)) if r_vals else None,
+        "r_p5": r_p5,
+        "r_p25": _percentile(r_vals, 25),
+        "r_p75": _percentile(r_vals, 75),
+        "r_p95": r_p95,
+        "r_skew": skew,
+        "tail_ratio": tail_ratio,
+        "exit_efficiency": exit_efficiency,
+        "max_losing_streak": int(max_streak) if trips else None,
+        "cvar_5": cvar_5,
+        "ulcer_index": ulcer_index,
+        "max_dd_duration_days": max_dd_duration_days,
+        "stop_exit_ratio": float(n_stop / n) if n else None,
+        "chandelier_exit_ratio": float(n_chandelier / n) if n else None,
+    }
+
+
 def compute_annual_returns(
     daily_nav: list[dict],
     trades: list[dict] | None = None,

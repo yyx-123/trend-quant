@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import threading
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
@@ -21,6 +22,8 @@ from data.storage import db as db_module
 from rule_backtest.batch_service import (
     BatchBacktestService,
     aggregate_annual_returns,
+    aggregate_stop_diagnostics,
+    compare_batches,
     estimate_batch_seconds,
     strategy_uses_random_indicator,
 )
@@ -47,6 +50,10 @@ class BatchRunRequest(BaseModel):
     name: str = Field(default="")
     start_date: str = Field(default="")
     end_date: str = Field(default="")
+    # 止损档位（方案 2026-08-30 §5.1）：tight/loose 复用实盘口径；
+    # sweep 为极低频操作，页面不提供入口（走 scripts/run_stop_sweep.py）。
+    stop_profile: Literal["default", "tight", "loose", "sweep"] = "default"
+    sweep_atr_muls: list[float] | None = None
 
 
 def _parse_window_date(value: str, field_label: str) -> date | None:
@@ -140,6 +147,8 @@ async def run_batch_backtest(payload: BatchRunRequest) -> dict:
             name=payload.name,
             start_date=_parse_window_date(payload.start_date, "开始日期"),
             end_date=_parse_window_date(payload.end_date, "结束日期"),
+            stop_profile=payload.stop_profile,
+            sweep_atr_muls=payload.sweep_atr_muls,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -267,6 +276,39 @@ async def get_batch_annual_aggregates(batch_id: str) -> dict:
         raise HTTPException(status_code=404, detail="批次不存在")
     rows = db_module.get_db().get_batch_annual_blobs(batch_id)
     return {"batch_id": batch_id, "aggregates": aggregate_annual_returns(rows)}
+
+
+@router.get("/api/runs/{batch_id}/stop-diagnostics")
+async def get_batch_stop_diagnostics(batch_id: str) -> dict:
+    """止损专项诊断（方案 §3.2/§4）：分桶 × 策略 的 long-format 聚合。"""
+    batch = db_module.get_db().get_batch_run(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    rows = db_module.get_db().get_batch_roundtrip_rows(batch_id)
+    return {
+        "batch_id": batch_id,
+        "stop_profile": batch.get("stop_profile", "default"),
+        "diagnostics": aggregate_stop_diagnostics(rows),
+    }
+
+
+@router.get("/api/compare")
+async def compare_batch_runs(base_batch_id: str, alt_batch_id: str) -> dict:
+    """紧/松（或任意两批次）并排对比（方案 §6.3）：逐格差值 + 诊断 + bootstrap CI。
+
+    要求两批次同标的池同策略：取 symbol×strategy 交集，交集为空报 409。
+    """
+    db = db_module.get_db()
+    base = db.get_batch_run(base_batch_id)
+    alt = db.get_batch_run(alt_batch_id)
+    if base is None or alt is None:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    if base["status"] == "running" or alt["status"] == "running":
+        raise HTTPException(status_code=409, detail="批次仍在运行，完成后再对比")
+    result = compare_batches(db, base_batch_id, alt_batch_id)
+    if result["common_cells"] == 0:
+        raise HTTPException(status_code=409, detail="两批次没有共同的 标的×策略 格子，无法对比")
+    return result
 
 
 @router.get("/api/runs/{batch_id}/snapshot")

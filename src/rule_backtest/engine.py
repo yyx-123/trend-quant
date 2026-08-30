@@ -613,6 +613,7 @@ class SingleSymbolAllInBacktestEngine:
             asset_type=instrument_type,
             days_to_trigger=holding_days,
             hard_stop_atr_mul=hard_mul,
+            chandelier_atr_mul=float(position.chandelier_atr_mul),
         )
 
         future_closes = all_bars["close"].iloc[exit_idx + 1 :].tolist()
