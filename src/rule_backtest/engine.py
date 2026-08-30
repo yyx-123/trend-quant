@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date, datetime
 
 import pandas as pd
@@ -13,7 +14,7 @@ from rule_backtest.metrics import (
     compute_summary,
     monthly_returns,
 )
-from rule_backtest.models import BacktestExecutionConfig, PositionState, RuleBacktestRequest
+from rule_backtest.models import BacktestExecutionConfig, PositionState, RoundTrip, RuleBacktestRequest
 from rule_backtest.sizing.base import (
     DEGRADED_FLAGS,
     SKIP_INSUFFICIENT_CASH,
@@ -25,6 +26,12 @@ from rule_backtest.state_values import initialize_stop_state, update_position_st
 from rule_backtest.value_resolver import ValueResolver
 
 logger = get_logger(__name__)
+
+# 止损类出场原因（跳空成交修正与 round-trip 统计共用）。
+STOP_EXIT_REASONS = frozenset({"hard_stop", "chandelier_stop", "chandelier_stop_ratchet"})
+
+# 出场后漂移观察窗（交易日）。
+POST_EXIT_WINDOWS = (5, 10, 20)
 
 
 class SingleSymbolAllInBacktestEngine:
@@ -56,6 +63,7 @@ class SingleSymbolAllInBacktestEngine:
         cash = float(execution.initial_capital)
         position = PositionState()
         trades: list[dict] = []
+        round_trips: list[dict] = []
         skipped_buys: list[dict] = []
         daily_nav: list[dict] = []
         condition_trace: list[dict] = []
@@ -110,6 +118,8 @@ class SingleSymbolAllInBacktestEngine:
                     exit_traces=exit_traces,
                     close_price=close_price,
                     position=position,
+                    open_price=float(row.open),
+                    stop_gap_fill=bool(execution.stop_gap_fill),
                 )
                 trade, cash_delta = self._execute_sell(
                     symbol=request.symbol,
@@ -124,6 +134,15 @@ class SingleSymbolAllInBacktestEngine:
                 cash += cash_delta
                 turnover_total += float(trade["gross_amount"])
                 trades.append(trade)
+                round_trips.append(
+                    self._build_round_trip(
+                        position=position,
+                        trade=trade,
+                        all_bars=all_bars,
+                        exit_idx=idx,
+                        instrument_type=str(execution.instrument_type),
+                    )
+                )
                 if debug_enabled:
                     debug_day["decision"] = {"side": "SELL", "reason": reason}
                     debug_day["execution_trace"] = trade
@@ -190,6 +209,7 @@ class SingleSymbolAllInBacktestEngine:
                     trades.append(trade)
                     position.qty = qty
                     position.avg_cost = float(trade["total_cost"]) / qty
+                    position.entry_bar_idx = idx
                     initialize_trace = initialize_stop_state(
                         position=position,
                         bars=day_bars,
@@ -246,6 +266,7 @@ class SingleSymbolAllInBacktestEngine:
             "final_equity": float(daily_nav[-1]["equity"]) if daily_nav else float(execution.initial_capital),
             "summary": summary,
             "trades": trades,
+            "round_trips": round_trips,
             "skipped_buys": skipped_buys,
             "daily_nav": daily_nav,
             "condition_trace": condition_trace,
@@ -503,7 +524,12 @@ class SingleSymbolAllInBacktestEngine:
         exit_traces: list[dict],
         close_price: float,
         position: PositionState,
+        open_price: float | None = None,
+        stop_gap_fill: bool = False,
     ) -> tuple[str, float]:
+        reason = "exit_conditions_passed"
+        reference_price = close_price
+        resolved_stop = False
         for trace in exit_traces:
             if not bool(trace.get("passed", False)):
                 continue
@@ -511,18 +537,91 @@ class SingleSymbolAllInBacktestEngine:
                 value_trace = trace.get(key, {})
                 if not isinstance(value_trace, dict):
                     continue
-                if value_trace.get("type") == "state_value" and value_trace.get("name") in {"hard_stop", "chandelier_stop", "chandelier_stop_ratchet"}:
+                if value_trace.get("type") == "state_value" and value_trace.get("name") in STOP_EXIT_REASONS:
                     name = str(value_trace.get("name"))
                     value = value_trace.get("value")
                     if value is not None and float(value) > 0:
-                        return name, float(value)
-        if position.hard_stop > 0 and close_price <= position.hard_stop:
-            return "hard_stop", position.hard_stop
-        if position.chandelier_stop > 0 and close_price <= position.chandelier_stop:
-            return "chandelier_stop", position.chandelier_stop
-        if position.chandelier_stop_ratchet > 0 and close_price <= position.chandelier_stop_ratchet:
-            return "chandelier_stop_ratchet", position.chandelier_stop_ratchet
-        return "exit_conditions_passed", close_price
+                        reason, reference_price, resolved_stop = name, float(value), True
+                        break
+            if resolved_stop:
+                break
+        if not resolved_stop:
+            if position.hard_stop > 0 and close_price <= position.hard_stop:
+                reason, reference_price = "hard_stop", position.hard_stop
+            elif position.chandelier_stop > 0 and close_price <= position.chandelier_stop:
+                reason, reference_price = "chandelier_stop", position.chandelier_stop
+            elif position.chandelier_stop_ratchet > 0 and close_price <= position.chandelier_stop_ratchet:
+                reason, reference_price = "chandelier_stop_ratchet", position.chandelier_stop_ratchet
+        # 跳空修正（方案 §7.1）：止损触发日开盘已穿价时按开盘价成交（更差价格），
+        # 不再假设永远能在止损价成交。
+        if (
+            stop_gap_fill
+            and reason in STOP_EXIT_REASONS
+            and open_price is not None
+            and 0 < open_price < reference_price
+        ):
+            reference_price = float(open_price)
+        return reason, reference_price
+
+    @staticmethod
+    def _build_round_trip(
+        *,
+        position: PositionState,
+        trade: dict,
+        all_bars: pd.DataFrame,
+        exit_idx: int,
+        instrument_type: str,
+    ) -> dict:
+        """卖出成交时合成一条 round-trip 记录（方案 §2.2）。
+
+        post-exit 漂移用 all_bars 继续向后扫 20 根 K 线；区间末尾出场的交易
+        未来数据不足，对应字段为 None（聚合跳过，导出 manifest 注明）。
+        """
+        entry_price = float(position.entry_price)
+        exit_price = float(trade["exec_price"])
+        qty = int(position.qty)
+        pnl = float(trade.get("pnl", 0.0) or 0.0)
+        atr_at_entry = float(position.atr_at_entry)
+        hard_mul = float(position.hard_stop_atr_mul)
+        risk = qty * hard_mul * atr_at_entry
+        mae_price = float(position.mae_price) if position.mae_price > 0 else entry_price
+        mfe_price = (
+            float(position.highest_high_since_entry)
+            if position.highest_high_since_entry > 0
+            else entry_price
+        )
+        entry_idx = position.entry_bar_idx if position.entry_bar_idx is not None else exit_idx
+        holding_days = max(int(exit_idx - entry_idx), 0)
+
+        rt = RoundTrip(
+            symbol=str(trade.get("symbol", "")),
+            entry_date=str(position.entry_date or ""),
+            entry_price=entry_price,
+            exit_date=str(trade.get("date", "")),
+            exit_price=exit_price,
+            exit_reason=str(trade.get("reason", "")),
+            qty=qty,
+            pnl=pnl,
+            r_multiple=(pnl / risk) if risk > 0 else None,
+            mae_pct=(mae_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0,
+            mfe_pct=(mfe_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0,
+            mae_atr=((mae_price - entry_price) / atr_at_entry) if atr_at_entry > 0 else None,
+            mfe_atr=((mfe_price - entry_price) / atr_at_entry) if atr_at_entry > 0 else None,
+            holding_days=holding_days,
+            entry_atr=atr_at_entry,
+            entry_atr_pct=(atr_at_entry / entry_price) if entry_price > 0 else 0.0,
+            asset_type=instrument_type,
+            days_to_trigger=holding_days,
+            hard_stop_atr_mul=hard_mul,
+        )
+
+        future_closes = all_bars["close"].iloc[exit_idx + 1 :].tolist()
+        for n in POST_EXIT_WINDOWS:
+            if len(future_closes) >= n and exit_price > 0:
+                window = [float(c) for c in future_closes[:n]]
+                setattr(rt, f"post_exit_ret_{n}d", window[-1] / exit_price - 1.0)
+                setattr(rt, f"reentry_above_entry_{n}d", any(c > entry_price for c in window))
+        return asdict(rt)
 
     @staticmethod
     def _format_condition_trace(day: str, side: str, traces: list[dict]) -> list[dict]:

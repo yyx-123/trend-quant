@@ -60,16 +60,22 @@ SAMPLE_STRATEGY = {
 }
 
 
-def make_bars(closes: list[float], highs: list[float] | None = None, lows: list[float] | None = None) -> pd.DataFrame:
+def make_bars(
+    closes: list[float],
+    highs: list[float] | None = None,
+    lows: list[float] | None = None,
+    opens: list[float] | None = None,
+) -> pd.DataFrame:
     start = date(2026, 1, 1)
     rows = []
     for idx, close in enumerate(closes):
         high = highs[idx] if highs is not None else close + 1
         low = lows[idx] if lows is not None else close - 1
+        open_ = opens[idx] if opens is not None else close
         rows.append(
             {
                 "date": start + timedelta(days=idx),
-                "open": close,
+                "open": open_,
                 "high": high,
                 "low": low,
                 "close": close,
@@ -283,7 +289,15 @@ class RuleBacktestEngineTest(unittest.TestCase):
         self.assertEqual(3, len(result["charts"]["kline"]["dates"]))
 
     def test_hard_stop_sells_at_stop_price_with_cost_fields(self) -> None:
-        bars = make_bars([100.0, 90.0], highs=[101.0, 91.0], lows=[99.0, 89.0])
+        # 2026-08-30 起入场 ATR 为 T-1 收盘口径（§7.3）：首根为 ATR 预热 bar，
+        # start_date 把入场推到第二根，使 atr_period=1 的 T-1 ATR 存在。
+        # 卖出日 open=98.5 > 止损价 98.2，排除跳空成交修正（默认开）的干扰。
+        bars = make_bars(
+            [100.0, 100.0, 90.0],
+            highs=[101.0, 101.0, 91.0],
+            lows=[99.0, 99.0, 89.0],
+            opens=[100.0, 100.0, 98.5],
+        )
         strategy = literal_entry_strategy(
             {
                 "left": {"type": "price", "field": "close"},
@@ -301,6 +315,7 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
+                start_date=date(2026, 1, 2),
                 execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
@@ -317,10 +332,13 @@ class RuleBacktestEngineTest(unittest.TestCase):
         self.assertAlmostEqual(sell["gross_amount"] * 0.0000854, sell["commission"], places=6)
 
     def test_chandelier_stop_sells_at_stop_price(self) -> None:
+        # T-1 ATR 口径适配：首根预热（close 100/high 101/low 99，TR=2），
+        # start_date 把入场推到第二根；卖出日 open=101.5 > 止损价 101，排除跳空修正。
         bars = make_bars(
-            [100.0, 109.0, 99.0],
-            highs=[101.0, 110.0, 101.0],
-            lows=[99.0, 109.0, 100.0],
+            [100.0, 100.0, 109.0, 99.0],
+            highs=[101.0, 101.0, 110.0, 102.0],
+            lows=[99.0, 99.0, 109.0, 100.0],
+            opens=[100.0, 100.0, 109.0, 101.5],
         )
         strategy = literal_entry_strategy(
             {
@@ -339,6 +357,7 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
+                start_date=date(2026, 1, 2),
                 execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
@@ -350,14 +369,17 @@ class RuleBacktestEngineTest(unittest.TestCase):
         self.assertAlmostEqual(101.0 * 0.998, sell["exec_price"], places=3)
 
     # 棘轮版吊灯止损的判别性场景（atr_period=1, atr_mul=1.0）：
-    #   Day0 买入 close=100，止损初始化为 101−TR(2)=99
-    #   Day1 新高 110、TR=10 → 候选 100，棘轮 max(99,100)=100（原版同为 100）
-    #   Day2 振幅剧增 TR=21 → 候选 111−21=90；原版下移到 90（不触发卖出），
+    #   Day0 为 ATR 预热 bar（TR=2，T-1 口径），不入场的代价是 start_date 推迟一天；
+    #   Day1 买入 close=100，止损初始化为 101−TR(2)=99
+    #   Day2 新高 110、TR=10 → 候选 100，棘轮 max(99,100)=100（原版同为 100）
+    #   Day3 振幅剧增 TR=21 → 候选 111−21=90；原版下移到 90（不触发卖出），
     #        棘轮保持 100，close=95 ≤ 100 → 以 100 卖出。
+    #   卖出日 open=101 > 100，排除跳空成交修正。
     _RATCHET_BARS: ClassVar[dict] = {
-        "closes": [100.0, 109.0, 95.0],
-        "highs": [101.0, 110.0, 111.0],
-        "lows": [99.0, 108.0, 90.0],
+        "closes": [100.0, 100.0, 109.0, 95.0],
+        "highs": [101.0, 101.0, 110.0, 111.0],
+        "lows": [99.0, 99.0, 108.0, 90.0],
+        "opens": [100.0, 100.0, 109.0, 101.0],
     }
 
     def _run_chandelier_variant(self, state_value_name: str) -> dict:
@@ -378,6 +400,7 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="TEST",
                 bars=bars,
+                start_date=date(2026, 1, 2),
                 execution=BacktestExecutionConfig()  # 默认费率（系统不提供零成本场景）,
             )
         )
@@ -404,7 +427,14 @@ class RuleBacktestEngineTest(unittest.TestCase):
         self.assertEqual("BUY", result["trades"][0]["side"])
 
     def test_stock_sell_charges_stamp_tax_and_slippage(self) -> None:
-        bars = make_bars([100.0, 90.0], highs=[101.0, 91.0], lows=[99.0, 89.0])
+        # T-1 ATR 口径适配：首根预热（TR=2），start_date 推迟入场到第二根；
+        # 卖出日 open=99.5 > 止损价 99，排除跳空成交修正。
+        bars = make_bars(
+            [100.0, 100.0, 90.0],
+            highs=[101.0, 101.0, 91.0],
+            lows=[99.0, 99.0, 89.0],
+            opens=[100.0, 100.0, 99.5],
+        )
         strategy = literal_entry_strategy(
             {
                 "left": {"type": "price", "field": "close"},
@@ -422,6 +452,7 @@ class RuleBacktestEngineTest(unittest.TestCase):
                 strategy=strategy,
                 symbol="STOCK",
                 bars=bars,
+                start_date=date(2026, 1, 2),
                 execution=BacktestExecutionConfig(
                     initial_capital=100000.0,
                     slippage=0.01,
