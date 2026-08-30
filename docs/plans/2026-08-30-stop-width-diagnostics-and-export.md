@@ -315,3 +315,7 @@ sweep chandelier=hard×2、exports/ 已入 .gitignore。
   P1.3 memoized/legacy golden 一致性保持。
 - 验证：tests/unit/test_round_trips.py、test_stop_diagnostics.py、test_backtest_export.py
   新增 30+ 用例；存量批量/引擎/API 测试全绿。
+- 2026-08-30 追加（用户反馈）：止损档从单选下拉改为**复选框**（默认/紧/松），
+  `POST /api/run` 接受 `stop_profiles` 数组，多档时按顺序自动排队跑 N 个批次
+  （一个 cancel event 贯穿整链，取消当前批即终止后续）；批次行 stop_profile 列
+  与名称后缀不变，compare/导出配对逻辑不受影响。单档 `stop_profile` 字段保留兼容。

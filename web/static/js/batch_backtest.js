@@ -268,6 +268,11 @@
   function runBatch() {
     if (!state.categories.size) { showRunMsg('请选择至少一个一级类目', true); return; }
     if (!state.strategies.size) { showRunMsg('请选择至少一个策略', true); return; }
+    var profiles = [];
+    if (el('bbProfDefault').checked) profiles.push('default');
+    if (el('bbProfTight').checked) profiles.push('tight');
+    if (el('bbProfLoose').checked) profiles.push('loose');
+    if (!profiles.length) { showRunMsg('请至少勾选一个止损档', true); return; }
     el('bbRunBtn').disabled = true;
     fetch('/batch-backtest/api/run', {
       method: 'POST',
@@ -278,7 +283,7 @@
         name: el('bbName').value.trim(),
         start_date: el('bbStartDate').value || '',
         end_date: el('bbEndDate').value || '',
-        stop_profile: el('bbStopProfile').value || 'default'
+        stop_profiles: profiles
       })
     }).then(async function (r) {
       if (r.status === 409) {
@@ -297,6 +302,9 @@
       state.currentBatchId = data.batch_id;
       el('bbProgressWrap').hidden = false;
       el('bbCancelBtn').hidden = false;
+      if (data.queued_batches > 1) {
+        showRunMsg('已排队 ' + data.queued_batches + ' 个止损档批次（' + data.stop_profiles.join(' / ') + '），将依次自动执行', false);
+      }
       pollProgress(data.batch_id);
       loadRuns();
     }).catch(function () {
@@ -333,6 +341,17 @@
             el('bbCancelBtn').hidden = true;
             loadRuns();
             loadBatch(batchId);
+            // 复选止损档的排队链：本批结束后若还有下一批在跑，进度条接续显示
+            fetch('/batch-backtest/api/meta').then(function (r2) { return r2.ok ? r2.json() : null; })
+              .then(function (m) {
+                if (m && m.running_batch_id) {
+                  el('bbRunBtn').disabled = true;
+                  el('bbCancelBtn').hidden = false;
+                  el('bbProgressWrap').hidden = false;
+                  state.currentBatchId = m.running_batch_id;
+                  pollProgress(m.running_batch_id);
+                }
+              }).catch(function () {});
           }
         })
         .catch(function () {

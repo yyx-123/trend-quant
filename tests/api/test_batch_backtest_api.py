@@ -402,3 +402,34 @@ class TestStopProfileAndDiagnostics:
             assert os.path.exists(os.path.join(export_dir, name)), name
         shutil.rmtree(export_dir, ignore_errors=True)  # 清理导出产物
         assert client.get("/batch-backtest/api/runs/nope/export").status_code == 404
+
+    def test_multi_profile_chain(self, client, seeded_db) -> None:
+        """复选止损档：一次 POST 排队 N 个批次，自动依次执行（名称/档位列可区分）。"""
+        resp = client.post(
+            "/batch-backtest/api/run",
+            json={
+                "categories": ["测试"],
+                "strategy_ids": ["sma_ok"],
+                "stop_profiles": ["tight", "loose"],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["queued_batches"] == 2
+        assert data["stop_profiles"] == ["tight", "loose"]
+        assert _wait_finish(client, data["batch_id"])["status"] == "completed"
+        # 第二档接力：轮询批次列表直到两个批次都 completed
+        deadline = time.time() + 60
+        done = []
+        while time.time() < deadline:
+            done = [
+                r for r in client.get("/batch-backtest/api/runs").json()["runs"]
+                if r["status"] == "completed"
+            ]
+            if len(done) >= 2:
+                break
+            time.sleep(0.2)
+        assert len(done) >= 2, "复选档位的后续批次没有自动执行"
+        assert sorted(r["stop_profile"] for r in done) == ["loose", "tight"]
+        assert any(r["name"].endswith("[tight]") for r in done)
+        assert any(r["name"].endswith("[loose]") for r in done)

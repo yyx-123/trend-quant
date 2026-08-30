@@ -53,6 +53,9 @@ class BatchRunRequest(BaseModel):
     # 止损档位（方案 2026-08-30 §5.1）：tight/loose 复用实盘口径；
     # sweep 为极低频操作，页面不提供入口（走 scripts/run_stop_sweep.py）。
     stop_profile: Literal["default", "tight", "loose", "sweep"] = "default"
+    # 复选档位：勾多个时按顺序自动排队跑 N 个批次（紧/松对比的标准姿势）。
+    # 与 stop_profile 二选一 —— 传了 stop_profiles 就以它为准。
+    stop_profiles: list[Literal["default", "tight", "loose"]] | None = None
     sweep_atr_muls: list[float] | None = None
 
 
@@ -139,52 +142,86 @@ async def run_batch_backtest(payload: BatchRunRequest) -> dict:
     if not payload.strategy_ids:
         raise HTTPException(status_code=400, detail="至少需要选择一个策略")
 
+    # 复选档位（去重保序）；单档走 stop_profile，向后兼容
+    profiles: list[str] = []
+    for p in payload.stop_profiles or [payload.stop_profile]:
+        if p not in profiles:
+            profiles.append(p)
+
     service = BatchBacktestService()
+    start = _parse_window_date(payload.start_date, "开始日期")
+    end = _parse_window_date(payload.end_date, "结束日期")
     try:
-        batch = service.prepare_batch(
-            categories=payload.categories,
-            strategy_ids=payload.strategy_ids,
-            name=payload.name,
-            start_date=_parse_window_date(payload.start_date, "开始日期"),
-            end_date=_parse_window_date(payload.end_date, "结束日期"),
-            stop_profile=payload.stop_profile,
-            sweep_atr_muls=payload.sweep_atr_muls,
-        )
+        # 所有档位同步 prepare（校验失败在排队前暴露，400 而不是后台静默）
+        batches = [
+            service.prepare_batch(
+                categories=payload.categories,
+                strategy_ids=payload.strategy_ids,
+                name=payload.name,
+                start_date=start,
+                end_date=end,
+                stop_profile=profile,
+                sweep_atr_muls=payload.sweep_atr_muls,
+            )
+            for profile in profiles
+        ]
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if not db_module.get_db().create_batch_run_if_idle(batch):
+    if not db_module.get_db().create_batch_run_if_idle(batches[0]):
         running = db_module.get_db().get_running_batch_run()
         raise HTTPException(
             status_code=409,
             detail=f"已有批次正在运行（{(running or {}).get('name', '?')}），请等待完成或先取消",
         )
 
-    batch_id = batch["batch_id"]
+    # 一个 cancel event 贯穿整链：取消当前批次即终止后续排队档位。
     cancel_event = threading.Event()
+    first = batches[0]
     with _batch_cancel_lock:
-        _batch_cancel_events[batch_id] = cancel_event
+        _batch_cancel_events[first["batch_id"]] = cancel_event
 
     logger.info(
-        "Batch backtest queued batch_id=%s name=%s cells=%d",
-        batch_id, batch["name"], batch["total_cells"],
+        "Batch backtest queued batch_id=%s name=%s cells=%d profiles=%s",
+        first["batch_id"], first["name"], first["total_cells"], profiles,
     )
 
     def _run() -> None:
         try:
-            # Per-run service instance to avoid sharing engine state across threads.
-            BatchBacktestService().run_batch(batch_id, cancel_event=cancel_event)
+            for i, batch in enumerate(batches):
+                if cancel_event.is_set():
+                    break
+                if i > 0:
+                    # 前一批次跑完才创建下一批（idle 检查）；恰有别的批次插入时
+                    # 跳过该档而不是卡住整链。
+                    if not db_module.get_db().create_batch_run_if_idle(batch):
+                        logger.warning(
+                            "Queued profile batch skipped (busy) batch_id=%s profile=%s",
+                            batch["batch_id"], batch.get("stop_profile"),
+                        )
+                        continue
+                    with _batch_cancel_lock:
+                        _batch_cancel_events[batch["batch_id"]] = cancel_event
+                try:
+                    # Per-run service instance to avoid sharing engine state across threads.
+                    BatchBacktestService().run_batch(batch["batch_id"], cancel_event=cancel_event)
+                finally:
+                    with _batch_cancel_lock:
+                        _batch_cancel_events.pop(batch["batch_id"], None)
         except Exception:
-            logger.exception("Batch backtest thread crashed batch_id=%s", batch_id)
-        finally:
-            with _batch_cancel_lock:
-                _batch_cancel_events.pop(batch_id, None)
+            logger.exception("Batch backtest thread crashed batch_id=%s", first["batch_id"])
 
-    thread = threading.Thread(target=_run, daemon=True, name=f"batch-backtest-{batch_id}")
+    thread = threading.Thread(target=_run, daemon=True, name=f"batch-backtest-{first['batch_id']}")
     thread.start()
-    return {"batch_id": batch_id, "status": "running", "total_cells": batch["total_cells"]}
+    return {
+        "batch_id": first["batch_id"],
+        "status": "running",
+        "total_cells": first["total_cells"],
+        "stop_profiles": profiles,
+        "queued_batches": len(profiles),
+    }
 
 
 @router.get("/api/progress/{batch_id}")

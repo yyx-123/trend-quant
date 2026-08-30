@@ -32,11 +32,10 @@
       </div>
     </div>
     <div class="batch-form-row batch-form-row--actions">
-      <select id="bbStopProfile" class="batch-window-preset" title="止损档位：紧/松档覆写策略止损 ATR 倍数（与实盘口径一致）">
-        <option value="default" selected>默认止损</option>
-        <option value="tight">紧止损</option>
-        <option value="loose">松止损</option>
-      </select>
+      <span class="batch-muted" title="勾选多档将按顺序自动跑多个批次（紧/松对比的标准姿势）">止损档：</span>
+      <label class="batch-check"><input type="checkbox" id="bbProfDefault" checked> 默认</label>
+      <label class="batch-check"><input type="checkbox" id="bbProfTight"> 紧</label>
+      <label class="batch-check"><input type="checkbox" id="bbProfLoose"> 松</label>
       <input id="bbName" type="text" class="batch-name-input" placeholder="批次名称（可选，默认自动生成）">
       <span id="bbEta" class="batch-eta"></span>
       <button id="bbRunBtn" type="button" class="confirm-ok-btn batch-run-btn">运行批量回测</button>
