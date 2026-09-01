@@ -218,3 +218,99 @@ def get_series(symbol: str, indicator: str, db=None, since: str | None = None) -
     if bars.empty:
         return pd.Series(dtype=float)
     return compute_live_series(bars, indicator)
+
+
+# ---------------------------------------------------------------------------
+# Bulk reader (calc_stop_loss_batch：一次上百只标的的 ATR 序列)
+# ---------------------------------------------------------------------------
+
+
+def _cache_fresh_map(symbols: list[str], indicator: str, db) -> set[str]:
+    """批量新鲜度检查：与 ``_cache_fresh`` 同一判定口径，SQL 次数与标的数解耦。
+
+    三条批量查询（缓存覆盖 / 行情末尾日期 / 行情内容版本）替代逐标的
+    3×N 次小查询。db 替身缺少批量方法时回退逐标的 ``_cache_fresh``。
+    """
+    try:
+        infos = db.indicator_cache_info_many(symbols)
+        summaries = db.get_market_data_summary_many(symbols)
+        versions = db.get_data_versions(
+            [db.market_data_version_name(s) for s in symbols]
+        )
+    except AttributeError:
+        return {s for s in symbols if _cache_fresh(s, indicator, db)}
+
+    blank = {
+        "indicator_rows": 0, "indicator_last": None,
+        "indicator_version": None, "indicator_data_version": 0,
+        "trend_rows": 0, "trend_last": None,
+        "trend_version": None, "trend_data_version": 0,
+    }
+    fresh: set[str] = set()
+    for symbol in symbols:
+        info = infos.get(symbol, blank)
+        market_end = (summaries.get(symbol) or {}).get("end")
+        market_dv = versions.get(db.market_data_version_name(symbol), 0)
+        if indicator in TREND_COLUMNS:
+            if info["trend_rows"] == 0 or info["trend_version"] != TREND_FORMULA_VERSION:
+                continue
+            if market_dv > 0 and info.get("trend_data_version", 0) < market_dv:
+                continue
+            if info["trend_last"] and market_end and str(info["trend_last"]) >= str(market_end):
+                fresh.add(symbol)
+            continue
+        if info["indicator_rows"] == 0 or info["indicator_version"] != INDICATOR_FORMULA_VERSION:
+            continue
+        if market_dv > 0 and info.get("indicator_data_version", 0) < market_dv:
+            continue
+        if info["indicator_last"] and market_end and str(info["indicator_last"]) >= str(market_end):
+            fresh.add(symbol)
+    return fresh
+
+
+def get_series_bulk(
+    symbols,
+    indicator: str,
+    db=None,
+    bars_map: dict[str, pd.DataFrame] | None = None,
+) -> dict[str, pd.Series]:
+    """多标的批量版 ``get_series``：缓存命中部分一次批量查询，过期标的回退 live 重算。
+
+    语义与逐只 ``get_series`` 完全一致（同一新鲜度口径、同一 live 回退），
+    但 SQL 次数从 ~4×N 降为常数条。``bars_map`` 提供调用方已加载的日K，
+    供 live 回退复用，避免重复读库。仅支持 ``INDICATOR_COLUMNS`` 中的指标
+    （trend 列请逐只走 ``get_series``）。
+    """
+    if indicator not in INDICATOR_COLUMNS:
+        raise ValueError(f"get_series_bulk 仅支持指标列，不支持: {indicator}")
+    db = db or get_db()
+    unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
+    if not unique:
+        return {}
+
+    fresh = _cache_fresh_map(unique, indicator, db)
+    out: dict[str, pd.Series] = {}
+    cached_symbols = [s for s in unique if s in fresh]
+    if cached_symbols:
+        frames = db.load_indicator_daily_many(cached_symbols, columns=("time", indicator))
+        for symbol, frame in frames.items():
+            if frame.empty or indicator not in frame.columns:
+                continue
+            series = pd.to_numeric(frame[indicator], errors="coerce")
+            series.index = pd.to_datetime(frame["time"], errors="coerce")
+            out[symbol] = series
+
+    for symbol in unique:
+        if symbol in out:
+            continue
+        logger.info(
+            "indicator cache miss for %s/%s; falling back to live compute", symbol, indicator
+        )
+        bars = (bars_map or {}).get(symbol)
+        if bars is None:
+            bars = db.load_market_data(symbol)
+        if bars is None or bars.empty:
+            out[symbol] = pd.Series(dtype=float)
+        else:
+            out[symbol] = compute_live_series(bars, indicator)
+    return out

@@ -311,3 +311,75 @@ class TestPositionSizing:
         buy_price = round((float(row["low"]) + float(row["close"])) / 2, 4)
         out = mt.compute_manual_trade("510300.SS", str(row["time"])[:10], buy_price, db=db)
         assert "position_sizing" not in out
+
+
+class TestTriggerExcludesBuyDay:
+    """止损触发检测排除买入当天（2026-09 用户反馈：8.27 临收盘买入伊利，
+    当天盘中低点 25.72 ≤ 硬止损 25.7533 被误报「曾跌穿」——买入前的价格
+    行为不可能触发止损）。日K 粒度无法区分当天低点在买入前/后，与回测
+    「入场次日才评估止损」口径一致，买入日一律不参与触发判定。"""
+
+    def test_buy_day_low_below_hard_stop_not_triggered(self, test_db) -> None:
+        from conftest import make_bull_bars
+
+        bars = make_bull_bars(40)
+        buy_idx = len(bars) - 3
+        buy_date = str(bars.iloc[buy_idx]["time"])[:10]
+        buy_price = round(float(bars.iloc[buy_idx]["close"]), 4)
+        # 把买入日最低价砸到远低于硬止损（模拟买入前的盘中下探）；
+        # 买入日之后的 K 线保持平静上涨，最低价始终高于硬止损。
+        bars.loc[buy_idx, "low"] = round(buy_price * 0.90, 4)
+        test_db.save_market_data("510300.SS", bars, price_mode="qfq")
+
+        out = mt.compute_manual_trade("510300.SS", buy_date, buy_price, db=test_db)
+
+        stops = out["stops"]
+        # 前置条件：买入日最低价确实低于硬止损（旧逻辑会误报触发）
+        assert float(bars.iloc[buy_idx]["low"]) <= stops["hard_stop_price"]
+        # 新逻辑：买入日不参与 → 未触发
+        assert stops["hard_stop_triggered"] is False
+        assert stops["hard_stop_trigger_date"] is None
+        # 止损价本身不变（仍含买入日 ATR 口径）
+        assert stops["hard_stop_price"] > 0
+
+    def test_next_day_low_below_hard_stop_still_triggered(self, test_db) -> None:
+        """对照：买入日**之后**击穿仍然正常报触发。"""
+        from conftest import make_bull_bars
+
+        bars = make_bull_bars(40)
+        buy_idx = len(bars) - 3
+        buy_date = str(bars.iloc[buy_idx]["time"])[:10]
+        buy_price = round(float(bars.iloc[buy_idx]["close"]), 4)
+        # 买入次日砸穿，买入日保持平静
+        bars.loc[buy_idx + 1, "low"] = round(buy_price * 0.90, 4)
+        test_db.save_market_data("510300.SS", bars, price_mode="qfq")
+
+        out = mt.compute_manual_trade("510300.SS", buy_date, buy_price, db=test_db)
+
+        stops = out["stops"]
+        assert stops["hard_stop_triggered"] is True
+        assert stops["hard_stop_trigger_date"] == str(bars.iloc[buy_idx + 1]["time"])[:10]
+
+    def test_intraday_bar_on_buy_day_not_triggered(self, bull_db, monkeypatch) -> None:
+        """买入日=今天：实时合成K线的低点（可能发生在买入前）不触发。"""
+        db, bars = bull_db
+        last_close = float(bars.iloc[-1]["close"])
+        buy_price = round(last_close * 1.005, 4)
+        # 合成K线低点远低于硬止损（买入前的盘中下探）
+        synth = {
+            "time": pd.Timestamp("2025-03-03 10:30:00"),
+            "open": last_close,
+            "high": last_close * 1.02,
+            "low": round(last_close * 0.90, 4),
+            "close": last_close * 1.01,
+            "volume": 0.0,
+            "amount": 0.0,
+        }
+        monkeypatch.setattr(sl, "_fetch_intraday_bar", lambda symbol, df: synth)
+
+        out = mt.compute_manual_trade("510300.SS", "2025-03-03", buy_price, db=db)
+
+        stops = out["stops"]
+        assert synth["low"] <= stops["hard_stop_price"]  # 前置：旧逻辑会误报
+        assert stops["hard_stop_triggered"] is False
+        assert stops["hard_stop_trigger_date"] is None

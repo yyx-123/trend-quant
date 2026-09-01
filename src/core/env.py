@@ -2,7 +2,8 @@
 
 散在各模块的 ``os.getenv``/``os.environ`` 直连全部收口到这里，环境变量
 清单即本文件的函数列表：TICKFLOW_API_KEY / TICKFLOW_BASE_URL /
-TICKFLOW_QUOTE_CACHE_TTL_SECONDS / TREND_QUANT_LOG_DIR /
+TICKFLOW_QUOTE_CACHE_TTL_SECONDS / TREND_MCP_INTRADAY_CACHE_TTL_SECONDS /
+TREND_QUANT_LOG_DIR /
 TREND_QUANT_DISABLE_SCHEDULER / TREND_QUANT_BOOTSTRAP_ADMIN_PASSWORD /
 TREND_QUANT_PASSWORD_ITERATIONS / TREND_MCP_TOKENS /
 TREND_MCP_ALLOWED_HOSTS / TREND_QUANT_HOME（core/paths 消费）。
@@ -25,6 +26,21 @@ def tickflow_base_url(default: str) -> str:
 
 def quote_cache_ttl_seconds(default: float = 30.0) -> float:
     raw = str(os.getenv("TICKFLOW_QUOTE_CACHE_TTL_SECONDS", "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+def mcp_intraday_cache_ttl_seconds(default: float = 30.0) -> float:
+    """MCP intraday_dashboard 看板 payload 缓存 TTL（秒）。
+
+    与报价缓存窗口（默认同为 30s）对齐：TTL 内的重复看板请求直接复用
+    上一次全量计算结果（单飞合并），30s 内的报价本来就会被报价层缓存。
+    """
+    raw = str(os.getenv("TREND_MCP_INTRADAY_CACHE_TTL_SECONDS", "") or "").strip()
     if not raw:
         return default
     try:

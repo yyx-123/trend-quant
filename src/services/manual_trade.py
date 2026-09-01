@@ -62,6 +62,8 @@ def compute_manual_trade(
     intraday_bar: dict | None | object = UNSET_INTRADAY_BAR,
     stop_mode: str | None = None,
     risk_budget: float | None = None,
+    df: pd.DataFrame | None = None,
+    name_map: dict | None = None,
 ) -> dict:
     """止损价 + 持仓指标的一站式计算（手工交易页面的后端）。
 
@@ -78,14 +80,19 @@ def compute_manual_trade(
     intraday，所有指标按截止日口径。``stop_mode`` 透传给止损计算
     （"tight" 紧止损 / None|"loose" 松止损）。``risk_budget`` 非空时
     附带按硬止损价推算的最大可买入份数（``position_sizing`` 字段）。
+    ``df`` 预加载的日K / ``name_map`` 预加载的名称表（交易记录列表
+    按 symbol 去重后传入，避免同一标的全量行情读两遍、每笔持仓重建
+    一次全表 name map）。
 
     Raises:
         StopLossError: 标的无效、无数据（来自 ``compute_stop_loss``）。
         ManualTradeError: 买入日期晚于最新数据。
     """
     db = db or get_db()
-    # 同一标的全量行情只读一次（P2-18）：normalize 后加载，复用给止损计算。
-    df = db.load_market_data(normalize_symbol(symbol))
+    # 同一标的全量行情只读一次（P2-18）：normalize 后加载，复用给止损计算；
+    # 调用方已预加载（列表接口按 symbol 去重）时直接复用。
+    if df is None:
+        df = db.load_market_data(normalize_symbol(symbol))
     stops = compute_stop_loss(
         symbol,
         buy_date,
@@ -178,23 +185,34 @@ def compute_manual_trade(
         round((latest_close / prev_close - 1) * 100, 2) if prev_close else None
     )
 
-    # 硬止损击穿检测：买入（含）以来最低价 ≤ 硬止损价。
+    # 硬止损击穿检测：买入日**次日**（不含买入当天）以来最低价 ≤ 硬止损价。
+    # 买入当天的价格行为发生在买入前/后无法从日K区分（临近收盘买入时，当天
+    # 低点几乎必然在买入前），不可能触发自己的止损 —— 与回测「入场次日才
+    # 评估止损」口径一致（2026-09 用户反馈：伊利 8.27 临收盘买入，当天盘中
+    # 低点 25.72 ≤ 硬止损 25.7533，被误报曾跌穿）。
     # 记录首次击穿日的价格明细（最低/收盘），供前端徽章悬停提示展示历史。
     hard_stop_price = stops["hard_stop_price"]
     hard_stop_triggered = False
     hard_stop_trigger_date: str | None = None
     hard_stop_trigger_low: float | None = None
     hard_stop_trigger_close: float | None = None
-    lows = pd.to_numeric(since["low"], errors="coerce")
-    closes_since = pd.to_numeric(since["close"], errors="coerce")
-    for t, low, close in zip(since["time"], lows, closes_since, strict=True):
+    trigger_days = since[since["time"].dt.normalize() > buy_ts]
+    lows = pd.to_numeric(trigger_days["low"], errors="coerce")
+    closes_since = pd.to_numeric(trigger_days["close"], errors="coerce")
+    for t, low, close in zip(trigger_days["time"], lows, closes_since, strict=True):
         if pd.notna(low) and float(low) <= hard_stop_price:
             hard_stop_triggered = True
             hard_stop_trigger_date = str(t.date())
             hard_stop_trigger_low = round(float(low), 4)
             hard_stop_trigger_close = round(float(close), 4) if pd.notna(close) else None
             break
-    if not hard_stop_triggered and intraday_bar and intraday_bar["low"] <= hard_stop_price:
+    # 盘中合成K线同理：就是买入当天时不参与击穿判定（低点可能发生在买入前）。
+    if (
+        not hard_stop_triggered
+        and intraday_bar
+        and intraday_bar["date"] > str(buy_ts.date())
+        and intraday_bar["low"] <= hard_stop_price
+    ):
         hard_stop_triggered = True
         hard_stop_trigger_date = intraday_bar["date"]
         hard_stop_trigger_low = round(float(intraday_bar["low"]), 4)
@@ -222,7 +240,7 @@ def compute_manual_trade(
         else 0.0
     )
 
-    name = load_instrument_name_map().get(symbol, "")
+    name = (name_map if name_map is not None else load_instrument_name_map()).get(symbol, "")
 
     result = {
         "symbol": symbol,

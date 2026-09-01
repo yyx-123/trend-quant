@@ -218,10 +218,12 @@ def list_trades(
     name_map = load_instrument_name_map()  # DB 不可用时返回 {}（单测环境）
 
     # 同 symbol 实时报价请求级去重 + 批量预取：整个列表只发一次批量报价请求，
-    # 避免逐标的单调打满 tickflow 实时行情 10/min 限流导致接口分钟级卡顿
+    # 避免逐标的单调打满 tickflow 实时行情 10/min 限流导致接口分钟级卡顿。
+    # open_dfs 保留给下方 compute_manual_trade 复用（df 参数），同一标的的
+    # 全量行情整个请求只读一次。
     prefetched: dict[str, dict | None] = {}
+    open_dfs: dict = {}
     if intraday:
-        open_dfs = {}
         for row in rows:
             if row["status"] != "open" or row["symbol"] in prefetched or row["symbol"] in open_dfs:
                 continue
@@ -248,6 +250,8 @@ def list_trades(
                         prefetched.get(row["symbol"]) if intraday else sl.UNSET_INTRADAY_BAR
                     ),
                     stop_mode=stop_mode,
+                    df=open_dfs.get(row["symbol"]),
+                    name_map=name_map,
                 )
                 open_items.append(_open_item(row, result, name_map))
             else:
@@ -259,6 +263,7 @@ def list_trades(
                     intraday=False,
                     end_date=row["sell_date"],
                     stop_mode=stop_mode,
+                    name_map=name_map,
                 )
                 closed_items.append(_closed_item(row, result, name_map))
         except Exception as exc:

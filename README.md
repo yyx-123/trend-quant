@@ -8,7 +8,7 @@ FastAPI + SQLite 的单机应用：日 K 行情驱动的趋势看板、单标的
 - **标的查看**（`/market-view`）：单标的 K 线 + 全套指标（MA/ATR/RSI/MACD/BOLL/BIAS/趋势值），支持盘中实时叠加；
 - **策略管理**（`/rule-backtest`）：配置化规则策略（JSON 条件树）的创建与单标的回测，多策略对比；
 - **标的管理**（`/instruments`）：标的增改、分类编辑、历史行情回填；
-- **MCP 服务**（`/mcp/sse`）：7 个工具（trend_dashboard / intraday_dashboard / symbol_detail / calc_stop_loss / list_instruments / add_trade / open_positions）；通道级 Bearer token 鉴权（`TREND_MCP_TOKENS=token=用户名`，写工具身份来自 token 映射，不再传密码）；
+- **MCP 服务**（`/mcp/sse`）：8 个工具（trend_dashboard / intraday_dashboard / symbol_detail / calc_stop_loss / calc_stop_loss_batch / list_instruments / add_trade / open_positions）；通道级 Bearer token 鉴权（`TREND_MCP_TOKENS=token=用户名`，写工具身份来自 token 映射，不再传密码）；看板工具支持 `detail="lite"` 瘦身（响应约 1/10 体积），intraday_dashboard 带 30s TTL 缓存（`TREND_MCP_INTRADAY_CACHE_TTL_SECONDS`），calc_stop_loss_batch 一次批量试算（统一批量行情/日K/ATR）；
 - **每日任务**：16:30 增量补齐日 K（raw append-only）→ 除权因子 diff（变化标的本地重物化 qfq）→ 指标缓存重建。
 
 ## 架构

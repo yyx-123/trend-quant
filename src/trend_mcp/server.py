@@ -1,6 +1,6 @@
 """MCP server for trend-quant.
 
-Exposes 7 tools to external agents via MCP SSE transport:
+Exposes 8 tools to external agents via MCP SSE transport:
 
 1. **trend_dashboard** -- 标的看板: multi-symbol trend dashboard grouped by
    three-level category hierarchy (EOD daily bars).
@@ -11,11 +11,13 @@ Exposes 7 tools to external agents via MCP SSE transport:
    a single symbol, with an optional real-time intraday overlay.
 4. **calc_stop_loss** -- 辅助计算: hard-stop and chandelier-stop prices for
    a given buy entry.
-5. **list_instruments** -- 标的列表: searchable / filterable instrument
+5. **calc_stop_loss_batch** -- 批量止损试算: same computation as
+   calc_stop_loss for a list of entries, with bulk quotes/K-lines/ATR IO.
+6. **list_instruments** -- 标的列表: searchable / filterable instrument
    catalogue.
-6. **add_trade** -- 手工交易录入: record a buy trade for the token-mapped
+7. **add_trade** -- 手工交易录入: record a buy trade for the token-mapped
    user (Bearer token channel auth, same path as the web UI).
-7. **open_positions** -- 持仓概览: realtime overview of the token-mapped
+8. **open_positions** -- 持仓概览: realtime overview of the token-mapped
    user's open (not yet closed) positions.
 
 通道鉴权：/mcp 由 McpBearerMiddleware（app/mcp_auth.py）做 Bearer token
@@ -24,12 +26,16 @@ Exposes 7 tools to external agents via MCP SSE transport:
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pandas as pd
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app.mcp_auth import load_mcp_allowed_hosts
 from audit.app_logger import get_logger
+from core import env
 from core.calendar import is_past_market_open, is_realtime_available, is_trading_day, market_now
 from core.display import category_path as _category_path
 from core.display import filter_fully_classified, format_symbol_display
@@ -42,7 +48,7 @@ from services import trade_records as tr
 from services.dashboard import build_subject_dashboard_payload, dashboard_revision_cache
 from services.market_indicators import compute_market_indicators
 from services.market_indicators import trend_config as _trend_config
-from services.stop_loss import StopLossError, compute_stop_loss
+from services.stop_loss import StopLossError, compute_stop_loss, compute_stop_loss_batch
 
 # ---------------------------------------------------------------------------
 # Server instance
@@ -116,12 +122,72 @@ def _token_user(ctx: Context) -> dict:
 # Dashboard cache：services.dashboard 的模块级 RevisionCache 单例（P2-10），
 # 与 Web 标的看板共用同一份缓存。
 
+
+class _TtlPayloadCache:
+    """短 TTL get-or-compute 缓存 + 单飞合并（intraday_dashboard 专用）。
+
+    全量盘中看板一次计算要秒级~分钟级（全市场批量报价受 vendor 限流），
+    而调用方（如每日报告技能）常在同一分钟内由多个脚本各拉一次。TTL 内
+    重复请求直接复用；并发miss 时持锁计算，后到的请求等待后读同一份，
+    不重复触发全量构建。TTL 默认与报价缓存窗口对齐（30s，见
+    ``env.mcp_intraday_cache_ttl_seconds``）。
+    """
+
+    def __init__(self, ttl_seconds: float) -> None:
+        self._ttl = max(0.0, float(ttl_seconds))
+        self._cached: dict[str, tuple[float, dict]] = {}
+        self._lock = threading.Lock()
+
+    def get_or_compute(self, key: str, compute) -> dict:
+        if self._ttl <= 0:
+            return compute()
+        now = time.monotonic()
+        hit = self._cached.get(key)
+        if hit is not None and now - hit[0] < self._ttl:
+            return hit[1]
+        with self._lock:
+            now = time.monotonic()
+            hit = self._cached.get(key)
+            if hit is not None and now - hit[0] < self._ttl:
+                return hit[1]
+            payload = compute()
+            self._cached[key] = (time.monotonic(), payload)
+            return payload
+
+
+_intraday_payload_cache = _TtlPayloadCache(env.mcp_intraday_cache_ttl_seconds(30.0))
+
+# detail="lite" 瘦身规则：序列字段只留末尾 N 个 / 整键删除 / 浮点 6 位。
+# 扫描类消费方只用各序列的最新值（金叉缺口用最后两个 DIF/DEA），
+# mini K线/MACD 全序列与 61 日 trend_history 是全量响应 10MB 的大头。
+_LITE_TAIL_KEYS = {"kline": 2, "macd_dif": 2, "macd_dea": 2, "macd_dates": 2}
+_LITE_DROP_KEYS = {"kline_ma5", "macd_hist", "trend_history", "trend_dates"}
+
+
+def _dashboard_lite(node):
+    """看板 payload 的 lite 变换：构建新结构，绝不改动共享缓存里的原对象。"""
+    if isinstance(node, dict):
+        out = {}
+        for key, value in node.items():
+            if key in _LITE_DROP_KEYS:
+                continue
+            if key in _LITE_TAIL_KEYS and isinstance(value, list):
+                out[key] = [_dashboard_lite(v) for v in value[-_LITE_TAIL_KEYS[key]:]]
+            else:
+                out[key] = _dashboard_lite(value)
+        return out
+    if isinstance(node, list):
+        return [_dashboard_lite(v) for v in node]
+    if isinstance(node, float):
+        return round(node, 6)
+    return node
+
 # ---------------------------------------------------------------------------
 # Tool 1 -- trend_dashboard
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def trend_dashboard() -> dict:
+def trend_dashboard(detail: str = "full") -> dict:
     """获取标的看板数据（基于日K线，不含当天盘中实时数据）。
 
     Returns all ETF instruments grouped by a three-level category
@@ -135,27 +201,46 @@ def trend_dashboard() -> dict:
 
     数据来自本地日K库，最新一根K线通常是上一个交易日。
     如需当天实时数据请使用 intraday_dashboard。
+
+    Args:
+        detail: "full"（默认，完整序列）/ "lite"（每标的只保留最新
+            K线/MACD 值，删除 trend_history 等长序列，响应体积约 1/10；
+            只需要各指标最新值的扫描类场景请用 lite）。
     """
     db = get_db()
     revision = db.get_market_dashboard_revision()
-    return dashboard_revision_cache.get_or_compute(revision, lambda: build_subject_dashboard_payload(db))
+    payload = dashboard_revision_cache.get_or_compute(
+        revision, lambda: build_subject_dashboard_payload(db)
+    )
+    if detail == "lite":
+        lite = _dashboard_lite(payload)
+        lite["detail"] = "lite"
+        return lite
+    return payload
 
 # ---------------------------------------------------------------------------
 # Tool 2 -- intraday_dashboard (real-time)
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def intraday_dashboard(category: str = "") -> dict:
+def intraday_dashboard(category: str = "", detail: str = "full") -> dict:
     """获取实时标的看板（基于当天实时报价，含盘中趋势值）。
 
     交易日 9:30 开盘后（含午间休盘 11:30-13:00 与收盘后）可用；收盘后
     返回的是基于收盘报价的当日快照（日K补库任务落库前）。非交易日或
     开盘前请使用 trend_dashboard 获取日K看板。
 
+    全量结果带短 TTL 缓存（默认 30s，TREND_MCP_INTRADAY_CACHE_TTL_SECONDS
+    可调，与报价缓存窗口对齐）：TTL 内重复/并发请求复用同一份计算结果，
+    不会重复触发全市场计算。
+
     Args:
         category: 可选，按分类筛选（匹配 L1/L2/L3），如 "ETF"、"宽基"、
-            "跨境"、"股票"。不传则计算全部标的（600+，可能需要 1 分钟以上，
-            建议按需用 category 缩小范围）。
+            "跨境"、"股票"。不传则计算全部标的（600+，首次计算可能需要
+            1 分钟，TTL 内再次请求秒回）。
+        detail: "full"（默认，完整序列）/ "lite"（每标的只保留最新
+            K线/MACD 值，删除 trend_history 等长序列，响应体积约 1/10；
+            只需要各指标最新值的扫描类场景请用 lite）。
 
     Returns:
         与 trend_dashboard 相同的三级分类结构，另含:
@@ -176,34 +261,42 @@ def intraday_dashboard(category: str = "") -> dict:
             "error": "今日尚未开盘（需 9:30 之后）；请使用 trend_dashboard 获取日K看板",
         }
 
-    db = get_db()
-    symbols = db.list_market_symbols(price_mode="qfq")
-    if not symbols:
-        return {"ok": False, "error": "本地无日K数据"}
+    def _compute() -> dict:
+        db = get_db()
+        symbols = db.list_market_symbols(price_mode="qfq")
+        if not symbols:
+            return {"ok": False, "error": "本地无日K数据"}
 
-    # Filter to fully classified instruments (same rule as the web intraday job).
-    metadata_map = db.get_instrument_metadata_map()
-    classified = filter_fully_classified(symbols, metadata_map)
+        # Filter to fully classified instruments (same rule as the web intraday job).
+        metadata_map = db.get_instrument_metadata_map()
+        classified = filter_fully_classified(symbols, metadata_map)
 
-    # Optional category filter (match any level, case-insensitive).
-    if category.strip():
-        kw = category.strip().lower()
-        classified = [
-            s for s in classified
-            if kw in str(metadata_map[s].get("category_l1", "")).lower()
-            or kw in str(metadata_map[s].get("category_l2", "")).lower()
-            or kw in str(metadata_map[s].get("category_l3", "")).lower()
-        ]
+        # Optional category filter (match any level, case-insensitive).
+        if category.strip():
+            kw = category.strip().lower()
+            classified = [
+                s for s in classified
+                if kw in str(metadata_map[s].get("category_l1", "")).lower()
+                or kw in str(metadata_map[s].get("category_l2", "")).lower()
+                or kw in str(metadata_map[s].get("category_l3", "")).lower()
+            ]
 
-    if not classified:
-        return {"ok": False, "error": "无符合条件的标的（需完整三级分类）"}
+        if not classified:
+            return {"ok": False, "error": "无符合条件的标的（需完整三级分类）"}
 
-    payload = build_intraday_dashboard(
-        classified, db, get_data_service(), _trend_config()
-    )
-    payload["ok"] = True
-    payload["post_close"] = not is_realtime_available(now)
-    payload["requested_category"] = category.strip() or None
+        built = build_intraday_dashboard(
+            classified, db, get_data_service(), _trend_config()
+        )
+        built["ok"] = True
+        built["post_close"] = not is_realtime_available(market_now())
+        built["requested_category"] = category.strip()
+        return built
+
+    payload = _intraday_payload_cache.get_or_compute(category.strip().lower(), _compute)
+    if detail == "lite":
+        lite = _dashboard_lite(payload)
+        lite["detail"] = "lite"
+        return lite
     return payload
 
 # ---------------------------------------------------------------------------
@@ -356,6 +449,59 @@ def calc_stop_loss(
     except StopLossError as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, **payload}
+
+# ---------------------------------------------------------------------------
+# Tool 4b -- calc_stop_loss_batch (bulk trial)
+# ---------------------------------------------------------------------------
+
+#: 单次批量试算的标的数上限。约束不在行情限流（2000 只 = 40 个 50 标的
+#: chunk，仍在 60 req/min 预算内），而在服务端内存（全量日K批量读出）
+#: 与响应体积——2000 已覆盖整个市场（约 900 只）并留有充足余量。
+_BATCH_STOP_LOSS_MAX_ITEMS = 2000
+
+
+@mcp.tool()
+def calc_stop_loss_batch(items: list[dict], stop_mode: str | None = None) -> dict:
+    """批量计算硬止损价和吊灯止损价（与 calc_stop_loss 同一计算口径）。
+
+    专为扫描类场景设计：一次调用完成全部候选标的的试算。服务端内部
+    统一做一次批量实时报价、一次批量日K读取、一次批量 ATR 读取，
+    IO 次数与标的数解耦——N=100+ 时比逐次调用 calc_stop_loss 快
+    一个数量级以上（逐次调用在交易时段每标的一次行情请求，会打满
+    行情限流）。
+
+    Args:
+        items: 试算条目列表，每项 {"symbol", "buy_date", "buy_price",
+            "stop_mode"?}，字段含义同 calc_stop_loss；单次最多 2000 条
+            （足以覆盖全市场扫描）。
+        stop_mode: 批次级默认止损档位 "tight" / "loose"（默认），
+            单项里的 stop_mode 字段优先。
+
+    Returns:
+        - results: 与输入顺序对齐的结果列表，每项为 calc_stop_loss 的
+          完整字段（ok=True）或 {"ok": False, "symbol", "error"}——
+          单项失败不影响其他项
+        - succeeded / failed: 成功/失败计数
+        - is_intraday: True 表示结果含盘中实时数据
+    """
+    items = list(items or [])
+    if not items:
+        return {"ok": False, "error": "items 为空"}
+    if len(items) > _BATCH_STOP_LOSS_MAX_ITEMS:
+        return {
+            "ok": False,
+            "error": f"单次最多 {_BATCH_STOP_LOSS_MAX_ITEMS} 条（收到 {len(items)} 条），请分批调用",
+        }
+    results = compute_stop_loss_batch(items, stop_mode=stop_mode)
+    succeeded = sum(1 for r in results if r.get("ok"))
+    return {
+        "ok": True,
+        "count": len(results),
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+        "is_intraday": any(r.get("is_intraday") for r in results if r.get("ok")),
+        "results": results,
+    }
 
 # ---------------------------------------------------------------------------
 # Tool 5 -- list_instruments

@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
@@ -30,6 +31,7 @@ from core.calendar import is_past_market_open
 from core.strategy_config import get_strategy_config
 from core.symbols import normalize_symbol
 from core.trend import safe_float
+from data import indicator_store
 from data.indicator_store import get_series
 from data.intraday_service import build_synthetic_bar, has_persisted_today_bar, is_quote_fresh
 from data.service import get_data_service
@@ -133,6 +135,8 @@ def compute_stop_loss(
     intraday_bar: dict | None | object = UNSET_INTRADAY_BAR,
     stop_mode: str | None = None,
     df: pd.DataFrame | None = None,
+    atr_series: pd.Series | None = None,
+    metadata_map: dict | None = None,
 ) -> dict:
     """计算给定买入的硬止损价和吊灯止损价。
 
@@ -152,6 +156,8 @@ def compute_stop_loss(
     "最新价 / 买入以来最高价" 都按截止日口径，且强制关闭 intraday。
     ``df`` 预加载的日K（P2-18：持仓列表同一标的只读一次全量行情，
     调用方传入后不再重复 ``db.load_market_data``）。
+    ``atr_series`` / ``metadata_map`` 为批量路径（compute_stop_loss_batch）
+    的预取注入：传入后跳过 ``get_series`` 与逐标的 metadata 查询。
 
     Raises:
         StopLossError: 标的无效、无数据或 ATR 异常。
@@ -193,16 +199,21 @@ def compute_stop_loss(
 
         # Per-instrument stop_atr_mul override（主键查询；DB 行可能为 NULL）
         item = None
-        try:
-            item = db.get_instrument_metadata(symbol)
-        except (RuntimeError, sqlite3.Error) as exc:
-            logger.warning("Instrument metadata unavailable: %s", exc)
+        if metadata_map is not None:
+            # 批量路径：调用方已一次取出全量 metadata map，免去逐标的查询。
+            item = metadata_map.get(symbol)
+        else:
+            try:
+                item = db.get_instrument_metadata(symbol)
+            except (RuntimeError, sqlite3.Error) as exc:
+                logger.warning("Instrument metadata unavailable: %s", exc)
         if item and item.get("stop_atr_mul") is not None:
             hard_stop_mul = float(item["stop_atr_mul"])
 
     # ATR from the precomputed cache (single source, D11); the store falls
     # back to a live full-history compute when the cache is stale/missing.
-    atr_series = get_series(symbol, "atr", db=db)
+    if atr_series is None:
+        atr_series = get_series(symbol, "atr", db=db)
     if end_ts is not None:
         atr_series = atr_series[atr_series.index <= end_ts]
     if atr_series.empty:
@@ -292,12 +303,17 @@ def compute_stop_loss(
 
         # 吊灯止损历史首次跌破：逐日 吊灯_t = 截至当日最高价 − mul×当日 ATR，
         # 首个 收盘价 ≤ 吊灯_t 的交易日（供前端区分"曾跌破/已跌破"并展示悬停历史；
-        # NaN 参与比较恒为 False，ATR 缺失的早期日期自然跳过）
+        # NaN 参与比较恒为 False，ATR 缺失的早期日期自然跳过）。
+        # 买入当天不参与判定：日K 粒度无法区分当天收盘前的价格行为发生在买入
+        # 前后，不可能跌破自己尚未持有的持仓的止损（与 manual_trade 硬止损
+        # 「曾跌穿」排除买入日同一口径，2026-09）。
         daily_chandelier = (
             running_high.to_numpy(dtype=float) - chandelier_mul * atr_aligned.to_numpy(dtype=float)
         )
         closes_arr = pd.to_numeric(df.loc[mask_since, "close"], errors="coerce").to_numpy(dtype=float)
         below = closes_arr <= daily_chandelier
+        if len(below):
+            below[since_dates <= buy_ts] = False
         if below.any():
             first_idx = int(below.argmax())
             chandelier_first_trigger_date = str(since_dates[first_idx].date())
@@ -343,3 +359,82 @@ def compute_stop_loss(
             "close": round(float(synth["close"]), 4),
         }
     return payload
+
+
+def compute_stop_loss_batch(
+    items: list[dict],
+    db=None,
+    intraday: bool = True,
+    stop_mode: str | None = None,
+    max_workers: int = 4,
+) -> list[dict]:
+    """批量止损试算：N 个标的的 IO 与 N 解耦，逐项结果与输入顺序对齐。
+
+    与逐次 ``compute_stop_loss`` 的差别全部在 IO 层，计算口径完全一致：
+    - 日K：``db.load_market_data_many`` 单连接一次批量读取（替代 N 次逐标的全量读）；
+    - 盘中K线：``fetch_intraday_bars`` 一次批量报价请求合成全部标的
+      （替代逐标的单调实时行情 —— 后者会打满 tickflow 限流，N=100+ 时
+      光行情请求就要分钟级）；
+    - ATR：``indicator_store.get_series_bulk`` 常数条批量 SQL（替代逐标的
+      3 次新鲜度检查 + 1 次全量指标读），过期标的回退 live 重算并复用
+      已加载的日K；
+    - metadata：一次 ``get_instrument_metadata_map`` 全量 map（替代逐标的
+      主键查询）。
+
+    逐项计算注入预取数据后为纯 CPU，用小型线程池并行（pandas/numpy 会
+    释放 GIL）。任一项失败不影响其他项：对应位置返回
+    ``{"ok": False, "symbol", "error"}``。
+
+    ``stop_mode`` 为批次级默认档位，单项里的 ``stop_mode`` 字段优先。
+    """
+    db = db or get_db()
+    items = list(items or [])
+    if not items:
+        return []
+
+    symbols = [
+        normalize_symbol(str((item or {}).get("symbol", "") or "")) for item in items
+    ]
+    unique = list(dict.fromkeys(s for s in symbols if s))
+
+    dfs = db.load_market_data_many(unique) if unique else {}
+    bars = (
+        fetch_intraday_bars(dfs)
+        if intraday
+        else {s: None for s in dfs}
+    )
+    atr_map = (
+        indicator_store.get_series_bulk(unique, "atr", db=db, bars_map=dfs)
+        if unique
+        else {}
+    )
+    metadata_map: dict | None = None
+    try:
+        metadata_map = db.get_instrument_metadata_map()
+    except (RuntimeError, sqlite3.Error, AttributeError) as exc:
+        logger.warning("Instrument metadata map unavailable: %s", exc)
+
+    def _one(idx: int) -> dict:
+        item = items[idx] or {}
+        symbol = symbols[idx]
+        try:
+            payload = compute_stop_loss(
+                symbol,
+                item.get("buy_date"),
+                float(item.get("buy_price") or 0),
+                db=db,
+                intraday=intraday,
+                intraday_bar=bars.get(symbol),
+                stop_mode=item.get("stop_mode") or stop_mode,
+                df=dfs.get(symbol),
+                atr_series=atr_map.get(symbol),
+                metadata_map=metadata_map,
+            )
+            return {"ok": True, **payload}
+        except Exception as exc:  # 单项失败不拖垮整批
+            return {"ok": False, "symbol": symbol or str(item.get("symbol", "")), "error": str(exc)}
+
+    if len(items) == 1:
+        return [_one(0)]
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(items)))) as ex:
+        return list(ex.map(_one, range(len(items))))

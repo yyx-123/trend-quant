@@ -384,3 +384,192 @@ class TestComputeStopLossIntraday:
         assert out["is_intraday"] is False
         assert "intraday_bar" not in out
         assert out["chandelier_stop_price"] == eod["chandelier_stop_price"]
+
+
+class TestComputeStopLossBatch:
+    """compute_stop_loss_batch：与逐次 compute_stop_loss 同一计算口径，
+
+    IO 走批量路径（load_market_data_many / get_series_bulk / metadata map）。
+    盘中行情预取在单测中 stub 掉（网络无关）。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_intraday_prefetch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            sl, "fetch_intraday_bars", lambda dfs: dict.fromkeys(dfs, None)
+        )
+
+    @pytest.fixture
+    def two_symbol_db(self, test_db):
+        from conftest import make_bull_bars
+
+        bars_a = make_bull_bars(40)
+        bars_b = make_bull_bars(40)
+        test_db.save_market_data("510300.SS", bars_a, price_mode="qfq")
+        test_db.save_market_data("510500.SS", bars_b, price_mode="qfq")
+        return test_db, bars_a, bars_b
+
+    def test_empty_items(self, test_db) -> None:
+        assert sl.compute_stop_loss_batch([], db=test_db) == []
+
+    def test_matches_single_calls(self, two_symbol_db) -> None:
+        db, bars_a, bars_b = two_symbol_db
+        buy_date, buy_price = _buy_inputs(bars_a)
+
+        items = [
+            {"symbol": "510300", "buy_date": buy_date, "buy_price": buy_price},
+            {"symbol": "510500.SS", "buy_date": buy_date, "buy_price": buy_price},
+        ]
+        results = sl.compute_stop_loss_batch(items, db=db)
+
+        assert [r["ok"] for r in results] == [True, True]
+        for item_result, symbol in zip(results, ("510300.SS", "510500.SS"), strict=True):
+            single = sl.compute_stop_loss(symbol, buy_date, buy_price, db=db)
+            assert item_result["symbol"] == symbol
+            for key in (
+                "hard_stop_price",
+                "chandelier_stop_price",
+                "chandelier_stop_ratchet_price",
+                "atr_at_buy",
+                "current_atr",
+                "highest_since_buy",
+                "latest_price",
+            ):
+                assert item_result[key] == pytest.approx(single[key]), key
+            assert item_result["is_intraday"] is False
+
+    def test_order_preserved_and_item_isolation(self, two_symbol_db) -> None:
+        db, bars_a, _ = two_symbol_db
+        buy_date, buy_price = _buy_inputs(bars_a)
+
+        items = [
+            {"symbol": "510300.SS", "buy_date": buy_date, "buy_price": buy_price},
+            {"symbol": "999999.SS", "buy_date": buy_date, "buy_price": buy_price},  # 无数据
+            {"symbol": "510300.SS", "buy_date": "not-a-date", "buy_price": buy_price},
+            {"symbol": "", "buy_date": buy_date, "buy_price": buy_price},
+            {"symbol": "510500.SS", "buy_date": buy_date, "buy_price": -1.0},  # 非法价格
+        ]
+        results = sl.compute_stop_loss_batch(items, db=db)
+
+        assert len(results) == 5
+        assert results[0]["ok"] is True
+        assert results[1]["ok"] is False and "未找到" in results[1]["error"]
+        assert results[2]["ok"] is False and "买入日期" in results[2]["error"]
+        assert results[3]["ok"] is False and "无效" in results[3]["error"]
+        assert results[4]["ok"] is False and "大于 0" in results[4]["error"]
+        # 失败项携带原始 symbol 便于调用方定位
+        assert results[1]["symbol"] == "999999.SS"
+
+    def test_batch_default_and_per_item_stop_mode(self, two_symbol_db) -> None:
+        db, bars_a, _ = two_symbol_db
+        buy_date, buy_price = _buy_inputs(bars_a)
+
+        items = [
+            {"symbol": "510300.SS", "buy_date": buy_date, "buy_price": buy_price},
+            {
+                "symbol": "510500.SS",
+                "buy_date": buy_date,
+                "buy_price": buy_price,
+                "stop_mode": "loose",  # 单项覆盖批次默认
+            },
+        ]
+        results = sl.compute_stop_loss_batch(items, db=db, stop_mode="tight")
+
+        assert results[0]["stop_mode"] == "tight"
+        assert results[0]["hard_stop_atr_mul"] == 1.0
+        assert results[1]["stop_mode"] == "loose"
+        assert results[1]["hard_stop_atr_mul"] == 1.5
+
+    def test_intraday_prefetched_bar_reused(self, two_symbol_db, monkeypatch) -> None:
+        """批量路径的盘中K线来自统一预取，逐项不再单独拉行情。"""
+        db, bars_a, _ = two_symbol_db
+        buy_date, buy_price = _buy_inputs(bars_a)
+        synth = {
+            "time": pd.Timestamp("2026-08-27 14:00:00"),  # 与 build_synthetic_bar 同为 Timestamp
+            "open": 99.0,
+            "high": 100.0,
+            "low": 98.0,
+            "close": 99.5,
+            "volume": 1.0,
+        }
+        monkeypatch.setattr(
+            sl,
+            "fetch_intraday_bars",
+            lambda dfs: {s: dict(synth) for s in dfs},
+        )
+
+        calls: list[int] = []
+        monkeypatch.setattr(
+            sl, "_fetch_intraday_bar", lambda symbol, df: calls.append(1) or None
+        )
+        results = sl.compute_stop_loss_batch(
+            [{"symbol": "510300.SS", "buy_date": buy_date, "buy_price": buy_price}],
+            db=db,
+        )
+        assert results[0]["ok"] is True
+        assert results[0]["is_intraday"] is True
+        assert calls == []  # 逐项零行情请求
+
+
+class TestChandelierFirstTriggerExcludesBuyDay:
+    """吊灯止损「首次跌破」排除买入当天（与 manual_trade 硬止损曾跌穿同口径）。"""
+
+    @staticmethod
+    def _bars_with_buy_day_spike() -> pd.DataFrame:
+        """25 个平静上涨日 + 买入日长上影大振幅 + 次日高开企稳。
+
+        买入日：high 远高于 close，使 当日close ≤ 当日吊灯候选值
+        （= 当日 high − 2.5×ATR）——旧逻辑会把首次跌破记到买入当天；
+        次日 close 回到吊灯候选值之上，之后不再跌破。
+        """
+        base = date(2025, 1, 6)
+        records: list[dict] = []
+        price = 10.0
+        offset = 0
+        made = 0
+        while made < 28:
+            day = base + timedelta(days=offset)
+            offset += 1
+            if day.weekday() >= 5:
+                continue
+            made += 1
+            if made == 26:  # 买入日：长上影（high +10%），close −2%
+                row = dict(open=price, high=price * 1.10, low=price * 0.97,
+                           close=price * 0.98)
+            elif made == 27:  # 次日高开企稳：close 回到吊灯候选值之上
+                row = dict(open=price * 1.06, high=price * 1.10, low=price * 1.055,
+                           close=price * 1.09)
+            else:
+                row = dict(open=price, high=price * 1.002, low=price * 0.998,
+                           close=price * 1.01)
+            records.append(
+                {
+                    "time": day.isoformat(),
+                    "open": round(float(row["open"]), 4),
+                    "high": round(float(row["high"]), 4),
+                    "low": round(float(row["low"]), 4),
+                    "close": round(float(row["close"]), 4),
+                    "volume": 1_000_000,
+                }
+            )
+            price = float(row["close"])
+        return pd.DataFrame(records)
+
+    def test_buy_day_close_below_chandelier_not_counted(self, test_db) -> None:
+        bars = self._bars_with_buy_day_spike()
+        test_db.save_market_data("510300.SS", bars, price_mode="qfq")
+        buy_row = bars.iloc[25]
+        buy_date = str(buy_row["time"])[:10]
+        buy_price = round(float(buy_row["open"]), 4)  # 落在买入日 [low, high] 内
+
+        out = sl.compute_stop_loss("510300.SS", buy_date, buy_price, db=test_db)
+
+        # 前置条件：买入日收盘确实低于买入日吊灯候选值（旧逻辑会记为首次跌破日）
+        atr_series = compute_live_series(bars, "atr")
+        atr_at_buy = float(atr_series[atr_series.index <= pd.Timestamp(buy_date)].iloc[-1])
+        buy_day_chandelier = float(buy_row["high"]) - 2.5 * atr_at_buy
+        assert float(buy_row["close"]) <= buy_day_chandelier
+
+        # 新逻辑：买入日不参与 → 之后无跌破 → 无首次跌破记录
+        assert out["chandelier_first_trigger_date"] is None
+        assert out["chandelier_first_trigger_close"] is None

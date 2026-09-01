@@ -1347,6 +1347,17 @@ class Database:
         self._market_symbols_cache.pop(table, None)
         return len(records)
 
+    @staticmethod
+    def _market_rows_to_df(rows) -> "pd.DataFrame":
+        """market_data 行 → DataFrame 的统一转换（load_market_data /
+        load_market_data_many 共用，dtype 口径一致）。"""
+        df = pd.DataFrame([dict(r) for r in rows])
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        for col in ("open", "high", "low", "close", "volume", "amount"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+
     def load_market_data(self, symbol: str, price_mode: str = "qfq"):
 
         table = self._market_table(price_mode)
@@ -1358,12 +1369,88 @@ class Database:
             ).fetchall()
         if not rows:
             return pd.DataFrame()
-        df = pd.DataFrame([dict(r) for r in rows])
-        df["time"] = pd.to_datetime(df["time"], errors="coerce")
-        for col in ("open", "high", "low", "close", "volume", "amount"):
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df
+        return self._market_rows_to_df(rows)
+
+    def load_market_data_many(
+        self, symbols, price_mode: str = "qfq"
+    ) -> "dict[str, pd.DataFrame]":
+        """多标的批量读全量日K：单连接 + chunked IN 查询，按 symbol 分组返回。
+
+        批量止损试算（calc_stop_loss_batch）一次需要上百只标的的全历史，
+        逐只 load_market_data 每次新建连接、单条查询，连接/查询开销随标的
+        数线性放大。这里改为单连接分块查询（每块 500 只，远离 SQLite
+        变量上限）。无数据的 symbol 不出现在返回 dict 中。
+        """
+        table = self._market_table(price_mode)
+        unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
+        if not unique:
+            return {}
+        grouped: dict[str, list] = {s: [] for s in unique}
+        with self._connect() as conn:
+            for i in range(0, len(unique), 500):
+                chunk = unique[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""SELECT time, open, high, low, close, volume, amount, symbol, provider
+                       FROM {table} WHERE symbol IN ({placeholders})
+                       ORDER BY symbol, time""",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    grouped[row["symbol"]].append(row)
+        return {
+            symbol: self._market_rows_to_df(rows)
+            for symbol, rows in grouped.items()
+            if rows
+        }
+
+    def get_market_data_summary_many(
+        self, symbols, price_mode: str = "qfq"
+    ) -> "dict[str, dict]":
+        """多标的 {symbol: {rows, start, end}}——单连接 chunked IN + GROUP BY。
+
+        与 list_market_data_summaries（全表 GROUP BY）不同，这里按给定标的
+        过滤，走 symbol 索引，供批量新鲜度检查使用。
+        """
+        table = self._market_table(price_mode)
+        unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
+        if not unique:
+            return {}
+        out: dict[str, dict] = {}
+        with self._connect() as conn:
+            for i in range(0, len(unique), 500):
+                chunk = unique[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""SELECT symbol, COUNT(*) AS rows, MIN(time) AS start, MAX(time) AS end
+                       FROM {table} WHERE symbol IN ({placeholders}) GROUP BY symbol""",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    out[r["symbol"]] = {
+                        "rows": int(r["rows"] or 0),
+                        "start": r["start"],
+                        "end": r["end"],
+                    }
+        return out
+
+    def get_data_versions(self, names) -> dict[str, int]:
+        """多名称批量读 data_versions（单连接 chunked IN）；未写入的名称缺省为 0。"""
+        unique = [n for n in dict.fromkeys(str(n) for n in names) if n]
+        if not unique:
+            return {}
+        out: dict[str, int] = {}
+        with self._connect() as conn:
+            for i in range(0, len(unique), 500):
+                chunk = unique[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT name, version FROM data_versions WHERE name IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    out[r["name"]] = int(r["version"] or 0)
+        return out
 
     def list_market_symbols(self, price_mode: str = "qfq") -> list[str]:
         table = self._market_table(price_mode)
@@ -1809,6 +1896,43 @@ class Database:
             return pd.DataFrame()
         return pd.DataFrame([dict(r) for r in rows])
 
+    def load_indicator_daily_many(
+        self, symbols, columns=("time", "atr")
+    ) -> "dict[str, pd.DataFrame]":
+        """多标的批量读 indicator_daily 指定列：单连接 + chunked IN，按 symbol 分组。
+
+        批量止损试算只需要 ATR 序列；逐只 load_indicator_daily 是 SELECT *
+        全历史（~25 列），这里只取需要的列且一次出结果。``columns`` 必须含
+        "time"；列名经标识符白名单校验（防注入），非法列直接抛 ValueError。
+        """
+        cols = [str(c).strip() for c in columns]
+        if "time" not in cols:
+            cols.insert(0, "time")
+        for c in cols:
+            if not c.isidentifier():
+                raise ValueError(f"invalid indicator_daily column: {c}")
+        unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
+        if not unique:
+            return {}
+        select_cols = ", ".join(["symbol", *cols])
+        grouped: dict[str, list] = {s: [] for s in unique}
+        with self._connect() as conn:
+            for i in range(0, len(unique), 500):
+                chunk = unique[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""SELECT {select_cols} FROM indicator_daily
+                       WHERE symbol IN ({placeholders}) ORDER BY symbol, time""",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    grouped[row["symbol"]].append(row)
+        return {
+            symbol: pd.DataFrame([dict(r) for r in rows])
+            for symbol, rows in grouped.items()
+            if rows
+        }
+
     def save_trend_daily(
         self, symbol: str, df, formula_version: int, param_set: str = "default",
         price_mode: str = "qfq", data_version: int = 0
@@ -1903,6 +2027,60 @@ class Database:
             "trend_version": trend["ver"],
             "trend_data_version": int(trend["dv"] or 0),
         }
+
+    def indicator_cache_info_many(self, symbols) -> "dict[str, dict]":
+        """多标的批量版 indicator_cache_info：两张缓存表各一次 GROUP BY 查询。
+
+        返回结构与 indicator_cache_info 相同；无任何缓存行的 symbol 不出现
+        在返回 dict 中（调用方按 rows=0 处理）。
+        """
+        unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
+        if not unique:
+            return {}
+        out: dict[str, dict] = {}
+
+        def _blank() -> dict:
+            return {
+                "indicator_rows": 0,
+                "indicator_last": None,
+                "indicator_version": None,
+                "indicator_data_version": 0,
+                "trend_rows": 0,
+                "trend_last": None,
+                "trend_version": None,
+                "trend_data_version": 0,
+            }
+
+        with self._connect() as conn:
+            for i in range(0, len(unique), 500):
+                chunk = unique[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                for r in conn.execute(
+                    f"""SELECT symbol, COUNT(*) AS n, MAX(time) AS last,
+                              MAX(formula_version) AS ver, MAX(data_version) AS dv
+                       FROM indicator_daily WHERE symbol IN ({placeholders})
+                       GROUP BY symbol""",
+                    chunk,
+                ).fetchall():
+                    info = out.setdefault(r["symbol"], _blank())
+                    info["indicator_rows"] = int(r["n"] or 0)
+                    info["indicator_last"] = r["last"]
+                    info["indicator_version"] = r["ver"]
+                    info["indicator_data_version"] = int(r["dv"] or 0)
+                for r in conn.execute(
+                    f"""SELECT symbol, COUNT(*) AS n, MAX(time) AS last,
+                              MAX(formula_version) AS ver, MAX(data_version) AS dv
+                       FROM trend_daily
+                       WHERE symbol IN ({placeholders}) AND param_set = 'default'
+                       GROUP BY symbol""",
+                    chunk,
+                ).fetchall():
+                    info = out.setdefault(r["symbol"], _blank())
+                    info["trend_rows"] = int(r["n"] or 0)
+                    info["trend_last"] = r["last"]
+                    info["trend_version"] = r["ver"]
+                    info["trend_data_version"] = int(r["dv"] or 0)
+        return out
 
     def indicator_cache_symbols(self) -> set[str]:
         with self._connect() as conn:
