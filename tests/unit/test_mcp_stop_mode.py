@@ -34,33 +34,26 @@ def test_open_positions_passes_stop_mode(monkeypatch):
     def fake_token_user(ctx):
         return {"id": 1, "username": "alice", "is_admin": False}
 
-    def fake_list_trades(user, **kwargs):
-        captured.update(kwargs)
+    def fake_overview(user, stop_mode=None, db=None):
+        captured["stop_mode"] = stop_mode
         return {
-            "user": {"username": user["username"]},
-            "trades": [
+            "ok": True,
+            "user": user["username"],
+            "positions": [
                 {
-                    "id": 1,
-                    "status": "open",
+                    "trade_id": 1,
                     "symbol": "510300.SS",
-                    "name": "沪深300ETF",
-                    "buy_date": "2026-08-10",
-                    "buy_price": 4.0,
-                    "shares": 100,
-                    "latest_price": 4.2,
-                    "stops": {"hard_stop_price": 3.9, "stop_mode": kwargs.get("stop_mode") or "loose"},
-                    "holding": {},
+                    "stop_mode": stop_mode or "loose",
                 }
             ],
         }
 
     monkeypatch.setattr(server, "_token_user", fake_token_user)
-    monkeypatch.setattr(server.tr, "list_trades", fake_list_trades)
+    monkeypatch.setattr(server.tr, "open_positions_overview", fake_overview)
 
     result = server.open_positions(stop_mode="tight", ctx=object())
     assert result["ok"] is True
     assert captured["stop_mode"] == "tight"
-    assert captured["intraday"] is True
     assert result["positions"][0]["stop_mode"] == "tight"
     assert result["user"] == "alice"
 

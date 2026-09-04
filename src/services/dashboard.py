@@ -368,3 +368,52 @@ def build_subject_dashboard_payload(db=None) -> dict:
         "category_count": len(l3_items),
         "instrument_count": int(source["symbol"].nunique()),
     }
+
+
+# ---------------------------------------------------------------------------
+# 看板响应的读取口径（EOD 缓存 + lite 瘦身）：MCP 看板工具的唯一入口，
+# 工具层不再自持缓存/变换逻辑。
+# ---------------------------------------------------------------------------
+
+# detail="lite" 瘦身规则：序列字段只留末尾 N 个 / 整键删除 / 浮点 6 位。
+# 扫描类消费方只用各序列的最新值（金叉缺口用最后两个 DIF/DEA），
+# mini K线/MACD 全序列与 61 日 trend_history 是全量响应 10MB 的大头。
+_LITE_TAIL_KEYS = {"kline": 2, "macd_dif": 2, "macd_dea": 2, "macd_dates": 2}
+_LITE_DROP_KEYS = {"kline_ma5", "macd_hist", "trend_history", "trend_dates"}
+
+
+def dashboard_lite(node):
+    """看板 payload 的 lite 变换：构建新结构，绝不改动共享缓存里的原对象。"""
+    if isinstance(node, dict):
+        out = {}
+        for key, value in node.items():
+            if key in _LITE_DROP_KEYS:
+                continue
+            if key in _LITE_TAIL_KEYS and isinstance(value, list):
+                out[key] = [dashboard_lite(v) for v in value[-_LITE_TAIL_KEYS[key]:]]
+            else:
+                out[key] = dashboard_lite(value)
+        return out
+    if isinstance(node, list):
+        return [dashboard_lite(v) for v in node]
+    if isinstance(node, float):
+        return round(node, 6)
+    return node
+
+
+def trend_dashboard_payload(detail: str = "full") -> dict:
+    """EOD 标的大盘看板：RevisionCache（按日K数据版本失效，与 Web 共用）。
+
+    ``detail="lite"`` 时对缓存 payload 做瘦身副本（响应体积约 1/10），
+    不污染缓存里的 full 对象。
+    """
+    db = get_db()
+    revision = db.get_market_dashboard_revision()
+    payload = dashboard_revision_cache.get_or_compute(
+        revision, lambda: build_subject_dashboard_payload(db)
+    )
+    if detail == "lite":
+        lite = dashboard_lite(payload)
+        lite["detail"] = "lite"
+        return lite
+    return payload

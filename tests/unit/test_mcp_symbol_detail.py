@@ -1,9 +1,11 @@
-"""Unit tests for trend_mcp.server.symbol_detail intraday overlay gating.
+"""Unit tests for symbol_detail intraday overlay gating.
 
 Rules under test (the overlay itself lives in
 ``data.intraday_service.build_intraday_overlay``, shared with the
 /market-view/api/daily endpoint; the gate/quote/trend collaborators are
-therefore patched in that module's namespace):
+therefore patched in that module's namespace; the payload assembly lives in
+``services.symbol_detail.symbol_detail_payload`` and its DB/name dependencies
+are patched in that module's namespace):
   1. Not a trading day / before 9:30 -> no overlay.
   2. Trading day past 9:30 and DB lacks today's bar -> synthesize one from
      live quotes (also covers the post-close window before the 16:30 daily
@@ -21,6 +23,7 @@ import pandas as pd
 import pytest
 
 from data import intraday_service
+from services import symbol_detail as symbol_detail_service
 
 pytest.importorskip("mcp")
 
@@ -96,12 +99,11 @@ class _FakeDb:
 
 def _call_symbol_detail(df: pd.DataFrame, *, past_open: bool):
     with (
-        patch.object(server, "get_db", return_value=_FakeDb(df)),
+        patch.object(symbol_detail_service, "get_db", return_value=_FakeDb(df)),
         patch.object(intraday_service, "is_past_market_open", return_value=past_open),
         patch.object(intraday_service, "get_data_service") as mock_ds_cls,
         patch.object(intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT),
-        patch.object(server, "_config_name_map", return_value={}),
-        patch.object(server, "_load_instruments_raw", return_value=[]),
+        patch.object(symbol_detail_service, "load_instrument_name_map", return_value={}),
     ):
         mock_ds_cls.return_value.fetch_latest_quote.return_value = _fake_quote()
         payload = server.symbol_detail("518850.SS", days=60, intraday=True)
@@ -156,15 +158,41 @@ class TestSymbolDetailIntradayOverlay:
         stale_quote = dict(_fake_quote(), ts=(date.today() - timedelta(days=3)).isoformat() + "T15:00:00")
 
         with (
-            patch.object(server, "get_db", return_value=_FakeDb(df)),
+            patch.object(symbol_detail_service, "get_db", return_value=_FakeDb(df)),
             patch.object(intraday_service, "is_past_market_open", return_value=True),
             patch.object(intraday_service, "get_data_service") as mock_ds_cls,
             patch.object(intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT),
-            patch.object(server, "_config_name_map", return_value={}),
-            patch.object(server, "_load_instruments_raw", return_value=[]),
+            patch.object(symbol_detail_service, "load_instrument_name_map", return_value={}),
         ):
             mock_ds_cls.return_value.fetch_latest_quote.return_value = stale_quote
             payload = server.symbol_detail("518850.SS", days=60, intraday=True)
 
         assert payload["meta"]["is_intraday"] is False
         assert len(payload["dates"]) == self.DAYS
+
+
+class TestSymbolDetailContract:
+    """services.symbol_detail.symbol_detail_payload 的基础契约（截尾 / 错误）。"""
+
+    def test_days_tail(self) -> None:
+        df = _daily_bars_ending(date(2026, 8, 27), rows=100)
+        with (
+            patch.object(symbol_detail_service, "get_db", return_value=_FakeDb(df)),
+            patch.object(symbol_detail_service, "load_instrument_name_map", return_value={}),
+        ):
+            payload = symbol_detail_service.symbol_detail_payload("518850.SS", days=5)
+        assert payload["ok"] is True
+        assert len(payload["dates"]) == 5
+        expected = [str(d.date()) for d in pd.to_datetime(df["time"])][-5:]
+        assert payload["dates"] == expected
+        assert payload["meta"]["is_intraday"] is False
+
+    def test_empty_symbol_error(self) -> None:
+        assert symbol_detail_service.symbol_detail_payload("")["ok"] is False
+
+    def test_no_data_error(self) -> None:
+        empty = pd.DataFrame(columns=["time", "close"])
+        with patch.object(symbol_detail_service, "get_db", return_value=_FakeDb(empty)):
+            payload = symbol_detail_service.symbol_detail_payload("999999.SS")
+        assert payload["ok"] is False
+        assert "未找到" in payload["error"]

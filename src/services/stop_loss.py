@@ -43,6 +43,11 @@ logger = get_logger(__name__)
 #: 显式传 None 表示「已确认无盘中数据，直接用 EOD」（交易记录列表的同 symbol 去重用）。
 UNSET_INTRADAY_BAR: object = object()
 
+#: 单次批量试算的标的数上限。约束不在行情限流（2000 只 = 40 个 50 标的
+#: chunk，仍在 60 req/min 预算内），而在服务端内存（全量日K批量读出）
+#: 与响应体积——2000 已覆盖整个市场（约 900 只）并留有充足余量。
+MAX_BATCH_ITEMS = 2000
+
 
 def stop_mode_toggle_title() -> str:
     """止损松紧档位开关的统一悬停文案（P2-28：market_view 与 manual_trade
@@ -386,11 +391,17 @@ def compute_stop_loss_batch(
     ``{"ok": False, "symbol", "error"}``。
 
     ``stop_mode`` 为批次级默认档位，单项里的 ``stop_mode`` 字段优先。
+    空列表 / 超过 ``MAX_BATCH_ITEMS`` 抛 StopLossError（入参契约统一在
+    服务层校验，工具/路由层不再各查一遍）。
     """
     db = db or get_db()
     items = list(items or [])
     if not items:
-        return []
+        raise StopLossError("items 为空")
+    if len(items) > MAX_BATCH_ITEMS:
+        raise StopLossError(
+            f"单次最多 {MAX_BATCH_ITEMS} 条（收到 {len(items)} 条），请分批调用"
+        )
 
     symbols = [
         normalize_symbol(str((item or {}).get("symbol", "") or "")) for item in items
@@ -438,3 +449,16 @@ def compute_stop_loss_batch(
         return [_one(0)]
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(items)))) as ex:
         return list(ex.map(_one, range(len(items))))
+
+
+def summarize_stop_loss_batch(results: list[dict]) -> dict:
+    """批量试算结果的响应封套：计数 + 盘中口径标记（MCP 工具直接用）。"""
+    succeeded = sum(1 for r in results if r.get("ok"))
+    return {
+        "ok": True,
+        "count": len(results),
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+        "is_intraday": any(r.get("is_intraday") for r in results if r.get("ok")),
+        "results": results,
+    }

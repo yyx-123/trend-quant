@@ -36,7 +36,9 @@ __all__ = [
     "close_trade",
     "create_trade",
     "list_trades",
+    "open_positions_overview",
     "symbol_annotations",
+    "user_by_username",
 ]
 
 
@@ -65,6 +67,17 @@ def authenticate(username: str, password: str, db=None) -> dict:
     user = db.get_user_by_username(str(username))
     if user is None or not verify_password(user["password"], str(password)):
         raise TradeAuthError("用户名或密码错误")
+    return {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
+
+
+def user_by_username(username: str, db=None) -> dict:
+    """按用户名取用户（MCP Bearer token 映射后的身份解析）；不存在抛 TradeAuthError。"""
+    db = db or get_db()
+    user = db.get_user_by_username(str(username))
+    if user is None:
+        raise TradeAuthError(
+            f"token 映射的用户「{username}」在 users 表中不存在，请检查 TREND_MCP_TOKENS 配置"
+        )
     return {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
 
 
@@ -278,6 +291,87 @@ def list_trades(
     return {
         "user": user,
         "trades": open_items + closed_items,
+    }
+
+
+def open_positions_overview(user: dict, stop_mode: str | None = None, db=None) -> dict:
+    """当前持仓（未清仓交易）的实时概览 — MCP open_positions 工具的唯一实现。
+
+    口径与 ``list_trades(intraday=True)`` 一致：交易时段内最新价/浮盈/
+    吊灯止损价含盘中实时报价，非交易时段回退为最新日K收盘。单笔计算
+    失败的持仓以 error 行返回且不计入汇总。
+    """
+    payload = list_trades(user, db=db, intraday=True, stop_mode=stop_mode)
+
+    positions: list[dict] = []
+    total_value = 0.0
+    total_pnl = 0.0
+    total_cost = 0.0
+    is_intraday = False
+    intraday_ts: str | None = None
+
+    for t in payload["trades"]:
+        if t["status"] != "open":
+            continue
+        if t.get("error"):
+            positions.append(
+                {
+                    "trade_id": t["id"],
+                    "symbol": t["symbol"],
+                    "name": t["name"],
+                    "buy_date": t["buy_date"],
+                    "buy_price": t["buy_price"],
+                    "shares": t["shares"],
+                    "error": t["error"],
+                }
+            )
+            continue
+        stops = t.get("stops") or {}
+        holding = t.get("holding") or {}
+        positions.append(
+            {
+                "trade_id": t["id"],
+                "symbol": t["symbol"],
+                "name": t["name"],
+                "buy_date": t["buy_date"],
+                "buy_price": t["buy_price"],
+                "shares": t["shares"],
+                "latest_price": t.get("latest_price"),
+                "prev_close": t.get("prev_close"),
+                "daily_change_pct": t.get("daily_change_pct"),
+                "position_value": t.get("position_value"),
+                "pnl_amount": t.get("pnl_amount"),
+                "pnl_pct": holding.get("pnl_pct"),
+                "max_gain_pct": holding.get("max_gain_pct"),
+                "max_drawdown": holding.get("max_drawdown"),
+                "hold_days": holding.get("hold_days"),
+                "hard_stop_price": stops.get("hard_stop_price"),
+                "hard_stop_triggered": stops.get("hard_stop_triggered"),
+                "chandelier_stop_price": stops.get("chandelier_stop_price"),
+                "chandelier_stop_triggered": stops.get("chandelier_stop_triggered"),
+                "chandelier_stop_ratchet_price": stops.get("chandelier_stop_ratchet_price"),
+                "chandelier_stop_ratchet_triggered": stops.get("chandelier_stop_ratchet_triggered"),
+                "stop_mode": stops.get("stop_mode"),
+            }
+        )
+        total_value += float(t.get("position_value") or 0.0)
+        total_pnl += float(t.get("pnl_amount") or 0.0)
+        total_cost += float(t["buy_price"]) * float(t["shares"])
+        is_intraday = is_intraday or bool(t.get("is_intraday"))
+        intraday_ts = intraday_ts or t.get("intraday_ts")
+
+    return {
+        "ok": True,
+        "user": payload["user"]["username"],
+        "is_intraday": is_intraday,
+        "intraday_ts": intraday_ts,
+        "summary": {
+            "count": len(positions),
+            "total_position_value": round(total_value, 2),
+            "total_pnl_amount": round(total_pnl, 2),
+            "total_pnl_pct": round(total_pnl / total_cost * 100, 2) if total_cost > 0 else 0.0,
+        },
+        "positions": positions,
     }
 
 

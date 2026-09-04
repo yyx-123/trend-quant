@@ -61,8 +61,8 @@ def build_symbol_display(symbol: str | None, name_map: dict[str, str] | None = N
 def filter_fully_classified(symbols: list[str], metadata_map: dict[str, dict]) -> list[str]:
     """Keep only symbols with a complete L1/L2/L3 category classification.
 
-    Shared by the web intraday dashboard job and the MCP intraday_dashboard
-    tool (both require fully classified instruments).
+    Used by the intraday dashboard snapshot job (only fully classified
+    instruments enter the dashboard).
     """
     return [
         s

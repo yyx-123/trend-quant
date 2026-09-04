@@ -1,5 +1,8 @@
-"""咽喉模块覆盖率补测（二）：data/service 抓取与回填、MCP list_instruments、
-main 的任务闭包与 AuthWall 续期路径。"""
+"""咽喉模块覆盖率补测（二）：data/service 抓取与回填、
+main 的任务闭包与 AuthWall 续期路径。
+
+（原 MCP list_instruments 用例已随逻辑下沉迁至 test_instrument_catalog.py。）
+"""
 
 from __future__ import annotations
 
@@ -152,68 +155,6 @@ class TestEnsureDailyHistoryBranches:
         test_db.save_market_data("510300.SS", _bars(5, start=date(2026, 8, 1)), price_mode="qfq")
         result = service.rematerialize_qfq("510300.SS", db=test_db)
         assert result["status"] == "raw_incomplete"
-
-
-# ---------------------------------------------------------------------------
-# MCP list_instruments
-# ---------------------------------------------------------------------------
-class TestMcpListInstruments:
-    def _stub(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pytest.importorskip("mcp")
-        from trend_mcp import server
-
-        instruments = [
-            {"symbol": "510300.SS", "name": "沪深300ETF", "category_l1": "ETF", "category_l2": "宽基",
-             "category_l3": "沪深300", "enabled": True},
-            {"symbol": "513100.SS", "name": "纳指ETF", "category_l1": "ETF", "category_l2": "跨境",
-             "category_l3": "纳斯达克", "enabled": True},
-            {"symbol": "159999.SZ", "name": "停用", "category_l1": "ETF", "category_l2": "宽基",
-             "category_l3": "其他", "enabled": False},
-        ]
-        monkeypatch.setattr(server, "_load_instruments_raw", lambda: instruments)
-
-        class FakeDb:
-            def get_market_data_summary(self, symbol, price_mode="qfq"):
-                return {"rows": 100, "start": "2025-01-01", "end": "2026-08-24"}
-
-        monkeypatch.setattr(server, "get_db", lambda: FakeDb())
-        return server
-
-    def test_enabled_only_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        server = self._stub(monkeypatch)
-        result = server.list_instruments()
-        assert result["ok"] is True
-        assert result["count"] == 2
-        symbols = {i["symbol"] for i in result["instruments"]}
-        assert "159999.SZ" not in symbols
-
-    def test_enabled_only_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        server = self._stub(monkeypatch)
-        result = server.list_instruments(enabled_only=False)
-        assert result["count"] == 3
-
-    def test_category_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        server = self._stub(monkeypatch)
-        result = server.list_instruments(category="跨境")
-        assert result["count"] == 1
-        assert result["instruments"][0]["symbol"] == "513100.SS"
-
-    def test_keyword_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        server = self._stub(monkeypatch)
-        result = server.list_instruments(keyword="300")
-        assert result["count"] == 1
-        assert result["instruments"][0]["symbol"] == "510300.SS"
-
-
-class TestMcpHelpers:
-    def test_load_instruments_raw_db_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pytest.importorskip("mcp")
-        from trend_mcp import server
-
-        monkeypatch.setattr(
-            server, "get_db", lambda: (_ for _ in ()).throw(RuntimeError("db down"))
-        )
-        assert server._load_instruments_raw() == []
 
 
 # ---------------------------------------------------------------------------

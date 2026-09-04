@@ -410,7 +410,29 @@ class TestComputeStopLossBatch:
         return test_db, bars_a, bars_b
 
     def test_empty_items(self, test_db) -> None:
-        assert sl.compute_stop_loss_batch([], db=test_db) == []
+        with pytest.raises(sl.StopLossError, match="为空"):
+            sl.compute_stop_loss_batch([], db=test_db)
+
+    def test_over_limit_rejected(self, test_db) -> None:
+        items = [
+            {"symbol": "510300.SS", "buy_date": "2026-08-10", "buy_price": 4.0}
+        ] * (sl.MAX_BATCH_ITEMS + 1)
+        with pytest.raises(sl.StopLossError, match=str(sl.MAX_BATCH_ITEMS)):
+            sl.compute_stop_loss_batch(items, db=test_db)
+
+    def test_summarize_envelope(self) -> None:
+        summary = sl.summarize_stop_loss_batch(
+            [
+                {"ok": True, "symbol": "A.SS", "is_intraday": True},
+                {"ok": False, "symbol": "B.SS", "error": "x"},
+            ]
+        )
+        assert summary["ok"] is True
+        assert summary["count"] == 2
+        assert summary["succeeded"] == 1
+        assert summary["failed"] == 1
+        assert summary["is_intraday"] is True
+        assert sl.summarize_stop_loss_batch([{"ok": False, "symbol": "B.SS"}])["is_intraday"] is False
 
     def test_matches_single_calls(self, two_symbol_db) -> None:
         db, bars_a, bars_b = two_symbol_db

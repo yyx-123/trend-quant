@@ -140,7 +140,7 @@ class TestTokenUser:
             def get_user_by_username(self, username):
                 return None
 
-        monkeypatch.setattr(server, "get_db", lambda: FakeDb())
+        monkeypatch.setattr(tr, "get_db", lambda: FakeDb())
         with pytest.raises(tr.TradeAuthError, match="users 表中不存在"):
             server._token_user(_FakeCtx({"state": {"mcp_user": "ghost"}}))
 
@@ -150,7 +150,7 @@ class TestTokenUser:
                 assert username == "yyx"
                 return {"id": 7, "username": "yyx", "is_admin": True}
 
-        monkeypatch.setattr(server, "get_db", lambda: FakeDb())
+        monkeypatch.setattr(tr, "get_db", lambda: FakeDb())
         user = server._token_user(_FakeCtx({"state": {"mcp_user": "yyx"}}))
         assert user == {"id": 7, "username": "yyx", "is_admin": True}
 
