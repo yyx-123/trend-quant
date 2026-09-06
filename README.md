@@ -75,7 +75,8 @@ sudo systemctl restart trend-quant.service
 
 - **chinese_calendar 每年 12 月升级**：`pip install --upgrade chinese_calendar`，否则次年法定假日会被误判为交易日（库数据超界时应用启动与导航栏均有「日历数据过期」提示）；
 - 脚本直写库后需重启 web 服务（进程内标的符号缓存跨进程不失效）；
-- tushare 镜像站：`scripts/tushare_common.py` 经 tushare 私有属性改写镜像地址——对 tushare 升级脆弱，且 token 与全部请求经第三方镜像，属知情风险，仅在临时账号窗口期使用。
+- tushare 镜像站：`scripts/tushare_common.py` 经 tushare 私有属性改写镜像地址——对 tushare 升级脆弱，且 token 与全部请求经第三方镜像，属知情风险，仅在临时账号窗口期使用；
+- MCP 看板等大响应依赖云服务器 nginx 对 SSE（`text/event-stream`）开启 gzip（默认不压缩，8.8MB 裸传实测 52s），配置与验证见 [docs/deploy-notes-2026-09-06.md](docs/deploy-notes-2026-09-06.md)。
 
 ## 备份
 
