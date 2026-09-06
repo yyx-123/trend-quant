@@ -75,3 +75,25 @@ EOF
 
 SSE 通道本身的流式写出速率折损（约为静态文件的 1/3）在开 gzip 后
 不再重要——传输基数小了 7 倍。
+
+## 实施记录（2026-09-06 已完成）
+
+云上改动：`/etc/nginx/nginx.conf`（http 块启用全局 gzip_types，原行是注释、
+即此前只有默认 text/html 压缩）+ `/etc/nginx/sites-available/trend-quant`
+（新增独立 `location /mcp`，复制代理参数并补 `proxy_buffering off`——
+原配置 /mcp 走 `location /` 且全配置无此指令）。备份在
+`/root/nginx.conf.bak.20260906221001`、`/root/trend-quant.bak.20260906221001`。
+
+实测结果（客户端为 daily-trade-report 技能的 McpClient，requests 透明解压，
+客户端零改动）：
+
+| 响应 | 改前 | 改后实测 |
+|---|---|---|
+| SSE 200 响应头 | 无 Content-Encoding | `Content-Encoding: gzip` ✓ |
+| dashboard full（8.84MB 解压后） | 52s | 9.6s |
+| dashboard lite（1.41MB 解压后） | 6.6s | 1.5s |
+| dashboard 宽基+lite | 0.31s | 0.16s |
+
+遗留观察项：`location /mcp` 沿用 `proxy_read_timeout 60s`——SSE 长连接
+依赖服务端心跳（约 15s 一次）保活，若发现 SSE 空闲 60s 被断开，把该
+location 的 read timeout 单独调大。
