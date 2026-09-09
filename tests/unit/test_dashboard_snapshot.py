@@ -194,6 +194,81 @@ def test_failed_run_keeps_previous_snapshot(runner_env, test_db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 看门狗：卡死运行的重置与僵尸结果作废（2026-09-09 快照停摆事故回归：
+# getaddrinfo 阻塞读无超时，重算线程永久挂起 → _running 卡死 → 全天停摆）
+# ---------------------------------------------------------------------------
+
+def test_watchdog_resets_stuck_run_and_discards_zombie(runner_env, test_db, monkeypatch):
+    """上一轮超过 _RUN_TIMEOUT_SECONDS 未结束：本次触发应重置并立即重开；
+    旧线程（僵尸）醒来后结果必须被丢弃，不得覆盖新一轮快照。"""
+    runner, monkeypatch = runner_env
+    _set_trading_moment(monkeypatch, datetime(2026, 8, 17, 10, 0))
+    monkeypatch.setattr(type(test_db), "list_market_symbols", lambda self, price_mode="qfq": ["510300.SS"])
+    monkeypatch.setattr(type(test_db), "get_instrument_metadata_map", lambda self: {"510300.SS": {}})
+    monkeypatch.setattr(snapshot_module, "filter_fully_classified", lambda symbols, meta: list(symbols))
+    monkeypatch.setattr(snapshot_module, "get_data_service", lambda: object())
+    monkeypatch.setattr(snapshot_module, "trend_config", dict)
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    def fake_build(symbols, db, data_service, trend_config, *, progress_callback=None):
+        n = len(calls)
+        calls.append(n)
+        if n == 0:
+            entered.set()
+            release.wait(timeout=10)  # 首轮模拟卡死
+            return {"as_of": "2026-08-17", "v": "zombie"}
+        return {"as_of": "2026-08-17", "v": "fresh"}
+
+    monkeypatch.setattr(snapshot_module, "build_intraday_dashboard", fake_build)
+
+    assert runner.ensure_running(trigger="schedule")["status"] == "started"
+    assert entered.wait(timeout=5)
+
+    # 未超时前：第二个触发复用进行中的任务，不重置
+    assert runner.ensure_running(trigger="schedule")["status"] == "running"
+
+    # 模拟首轮已卡死超过看门狗时限 → 本次触发应重置并立即重开
+    with runner._lock:
+        runner._started_at = time.monotonic() - (snapshot_module._RUN_TIMEOUT_SECONDS + 1)
+    assert runner.ensure_running(trigger="schedule")["status"] == "started"
+
+    _wait_done(runner)  # 新一轮（fresh）完成
+    assert test_db.load_dashboard_snapshot()["payload"] == {"as_of": "2026-08-17", "v": "fresh"}
+
+    # 放醒僵尸线程：其结果被代次校验丢弃，fresh 快照不被覆盖
+    release.set()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and len(calls) < 2:
+        time.sleep(0.02)
+    time.sleep(0.2)  # 等僵尸线程走完 _run 尾段（校验 + finally）
+    assert test_db.load_dashboard_snapshot()["payload"] == {"as_of": "2026-08-17", "v": "fresh"}
+    assert runner.latest_snapshot()["payload"] == {"as_of": "2026-08-17", "v": "fresh"}
+    # 僵尸的 finally 不得误清新一轮的 running 标志（此时新一轮已结束，应为 False）
+    assert runner.status()["running"] is False
+
+
+def test_watchdog_not_triggered_before_timeout(runner_env, test_db, monkeypatch):
+    """进行中的正常轮（未超时）不得被看门狗误杀。"""
+    runner, monkeypatch = runner_env
+    _set_trading_moment(monkeypatch, datetime(2026, 8, 17, 10, 0))
+    hold = threading.Event()
+    payload = {"as_of": "2026-08-17", "groups": [], "is_intraday": True}
+    _stub_compute(monkeypatch, test_db, payload, hold=hold)
+
+    assert runner.ensure_running(trigger="schedule")["status"] == "started"
+    with runner._lock:
+        runner._started_at = time.monotonic() - (snapshot_module._RUN_TIMEOUT_SECONDS - 60)
+    assert runner.ensure_running(trigger="schedule")["status"] == "running"
+
+    hold.set()
+    _wait_done(runner)
+    assert runner.latest_snapshot()["payload"] == payload
+
+
+# ---------------------------------------------------------------------------
 # 读取口径：intraday_dashboard_snapshot（MCP 工具的唯一数据来源）
 # ---------------------------------------------------------------------------
 

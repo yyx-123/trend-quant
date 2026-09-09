@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import threading
+import time as time_module
 from datetime import datetime, time
 from typing import Any
 
@@ -39,6 +40,13 @@ from services.market_indicators import trend_config
 
 logger = get_logger(__name__)
 
+# 单轮重算看门狗：正常一轮约 35 秒；超过该时长视为卡死（2026-09-09 事故：
+# getaddrinfo 阻塞读无超时兜底——httpx 的 30s 超时不覆盖 DNS 解析——线程永久
+# 挂起 → _running 卡死 → 全天快照停摆）。Python 无法强杀线程，看门狗只做两件
+# 事：释放 _running 让下一轮定时触发重开；递增 generation 使僵尸线程即便日后
+# 醒来，其结果也被丢弃（见 _run / _on_progress 的代次校验）。
+_RUN_TIMEOUT_SECONDS = 600.0
+
 
 class IntradaySnapshotRunner:
     """进程级单例：管理盘中看板重算任务与最新快照。"""
@@ -46,6 +54,8 @@ class IntradaySnapshotRunner:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._running = False
+        self._started_at: float | None = None
+        self._generation = 0
         self._percent = 0.0
         self._message = ""
         self._last_error: str | None = None
@@ -96,7 +106,25 @@ class IntradaySnapshotRunner:
         today = now.date()
         with self._lock:
             if self._running:
-                return {"status": "running", "percent": self._percent, "message": self._message}
+                started_at = self._started_at
+                elapsed = (
+                    time_module.monotonic() - started_at
+                    if started_at is not None
+                    else _RUN_TIMEOUT_SECONDS
+                )
+                if elapsed < _RUN_TIMEOUT_SECONDS:
+                    return {"status": "running", "percent": self._percent, "message": self._message}
+                # 看门狗：上一轮卡死——递增代次作废旧线程，释放标志后落入正常
+                # 开跑分支（本次触发直接重试，不必等下一轮）。
+                logger.error(
+                    "Intraday snapshot recompute stuck (elapsed %.0fs >= %.0fs); "
+                    "resetting runner so this trigger can retry",
+                    elapsed,
+                    _RUN_TIMEOUT_SECONDS,
+                )
+                self._running = False
+                self._generation += 1
+                self._last_error = f"上一轮计算超时（{elapsed:.0f}s），看门狗已重置"
             if not is_trading_day(today):
                 return {"status": "skipped", "reason": "non_trading_day"}
             # 午间休盘与收盘后（日K补库落库前）同样允许：报价分别是上午
@@ -113,16 +141,19 @@ class IntradaySnapshotRunner:
                 # 今日日K已落库，EOD 看板即为盘后确认值，无需实时估算。
                 return {"status": "skipped", "reason": "eod_current"}
             self._running = True
+            self._started_at = time_module.monotonic()
+            self._generation += 1
+            generation = self._generation
             self._percent = 0.0
             self._message = "正在准备…"
             self._last_error = None
 
-        thread = threading.Thread(target=self._run, args=(trigger,), daemon=True)
+        thread = threading.Thread(target=self._run, args=(trigger, generation), daemon=True)
         thread.start()
         return {"status": "started"}
 
     # ------------------------------------------------------------------
-    def _run(self, trigger: str) -> None:
+    def _run(self, trigger: str, generation: int) -> None:
         try:
             db = get_db()
             symbols = db.list_market_symbols(price_mode="qfq")
@@ -139,17 +170,26 @@ class IntradaySnapshotRunner:
                 db=db,
                 data_service=data_service,
                 trend_config=trend_config(),
-                progress_callback=self._on_progress,
+                progress_callback=lambda update: self._on_progress(update, generation),
             )
 
-            computed_at = db.save_dashboard_snapshot("intraday", payload.get("as_of"), payload)
-            snapshot = {
-                "kind": "intraday",
-                "as_of": payload.get("as_of"),
-                "computed_at": computed_at,
-                "payload": payload,
-            }
+            # 持锁做代次校验 + 落库 + 状态更新：避免作废旧线程与新一轮之间的竞争
+            # （僵尸线程醒来时不得用陈旧快照覆盖更新的一轮）。
             with self._lock:
+                if generation != self._generation:
+                    logger.warning(
+                        "Discarding result from superseded recompute (trigger=%s, generation=%d)",
+                        trigger,
+                        generation,
+                    )
+                    return
+                computed_at = db.save_dashboard_snapshot("intraday", payload.get("as_of"), payload)
+                snapshot = {
+                    "kind": "intraday",
+                    "as_of": payload.get("as_of"),
+                    "computed_at": computed_at,
+                    "payload": payload,
+                }
                 self._snapshot = snapshot
                 self._snapshot_loaded = True
                 self._last_finished_at = computed_at
@@ -163,13 +203,17 @@ class IntradaySnapshotRunner:
         except Exception as exc:
             logger.exception("Intraday dashboard recompute failed (trigger=%s)", trigger)
             with self._lock:
-                self._last_error = str(exc)
+                if generation == self._generation:
+                    self._last_error = str(exc)
         finally:
             with self._lock:
-                self._running = False
+                if generation == self._generation:
+                    self._running = False
 
-    def _on_progress(self, update: dict) -> None:
+    def _on_progress(self, update: dict, generation: int) -> None:
         with self._lock:
+            if generation != self._generation:
+                return
             self._percent = float(update.get("percent", 0))
             self._message = str(update.get("message", ""))
 
