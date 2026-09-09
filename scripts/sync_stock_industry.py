@@ -1,6 +1,6 @@
 """从 TickFlow universes 同步申万行业分类到 stock_industry 表（免费，starter 档）。
 
-方案文档：docs/stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md §5
+方案文档：docs/26-08-24-stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md §5
 
 用法（项目根目录）：
     .venv/Scripts/python scripts/sync_stock_industry.py              # 全量同步 + 待分类回补

@@ -1,7 +1,7 @@
 # 评审意见 B：覆盖面查漏与建议质量评估
 
 - 评审日期：2026-08-24
-- 评审对象：`docs/code-review-2026-08-24/review-report.md`（终版）
+- 评审对象：`docs/26-08-24-code-review/review-report.md`（终版）
 - 评审方式：通读终版报告后，独立浏览 `web/templates`、`scripts/`、`tests/`、`pyproject.toml`、`config/app.yaml`、`scripts/deploy.sh`、`Makefile`、`.gitignore`、`src/app/main.py`、`src/data/storage/db.py`、`src/services/auth.py`、`src/trend_mcp/server.py` 等报告自承覆盖薄弱的区域，并与本目录已有的 `review-1-factcheck.md`（事实核查）和 `review-2-arch.md`（架构评审）交叉比对——重点确认「前两轮已亲核属实的发现」在终版中是否被保留。
 - 约束：只读；未修改除本文件外的任何项目文件。
 

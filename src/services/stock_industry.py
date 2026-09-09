@@ -1,6 +1,6 @@
 """申万行业分类：名称规范化、归类解析、TickFlow 同步与待分类回补。
 
-方案文档：docs/stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md
+方案文档：docs/26-08-24-stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md
 
 数据流（应用运行时对外部数据源零在线依赖，只读写本地表）：
 

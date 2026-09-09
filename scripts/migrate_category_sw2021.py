@@ -1,6 +1,6 @@
 """一次性数据迁移：股票类目树重建为申万 2021 体系（2026-08）。
 
-方案文档：docs/stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md §7
+方案文档：docs/26-08-24-stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md §7
 
     1. 旧「股票」二三级类目归档到 stock_category_archive（可回溯）；
     2. instrument_categories 的「股票」子树重建：二级=申万一级 31 个、

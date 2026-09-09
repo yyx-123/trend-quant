@@ -1,4 +1,4 @@
-"""批量回测执行服务（方案 docs/batch-backtest/2026-07-26-batch-backtest-plan.md §5.2）。
+"""批量回测执行服务（方案 docs/26-07-26-batch-backtest/2026-07-26-batch-backtest-plan.md §5.2）。
 
 按「标的 × 策略」格子串行执行规则回测：每标的加载一次行情（多策略复用），
 每格独立 try/except（失败 continue），逐格写库（per-cell commit），

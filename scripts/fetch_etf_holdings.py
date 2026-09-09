@@ -1,7 +1,7 @@
 """ETF 前十大重仓股季度快照（tushare 临时账号窗口内运行）。
 
 方案文档：
-- docs/stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md
+- docs/26-08-24-stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md
 - （注：早期 docs/etf-weighted-stocks/ 方案文档已删除，本脚本即其落地实现）
 
 tushare fund_portfolio（5000 积分，季度更新，季报口径天然即前十大重仓）。

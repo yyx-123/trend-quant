@@ -310,7 +310,7 @@ XSS 专项：95 处 `innerHTML` 赋值逐一抽查，未见 `eval`/`new Function
 1. **README.md 明显过时**：「MCP 服务（/mcp/sse）：**5 个工具**」——实际已是 7 个（add_trade、open_positions 后加）；架构树缺 `audit/`、`stock_industry`、`dashboard_snapshot`、`manual_trade`、`stop_loss`、`trade_records`、`auth`、`batch_service`、`rule_backtest/sizing/` 等后增模块；「关键设计」未提登录墙（2026-08 落地）、申万行业分类体系、ETF 重仓股、手工交易、仓位策略；`core/jobs.py` 标为「领域核心（纯计算）」但它做编排（§4.4-A4）；
 2. **CLAUDE.md**：自述基线 2 个红测试（§8-9），且同样未覆盖近期模块；
 3. **TODO.md**：引用不存在的 `/backtest` 页面（实际为 `/rule-backtest`）；
-4. `docs/architecture-review-2026-08-01.md` 距今 3 周+，其间落地了登录墙、申万分类、ETF 重仓、批量回测增强，需要刷新或标注历史版本；
+4. `docs/26-08-01-architecture-review/architecture-review-2026-08-01.md` 距今 3 周+，其间落地了登录墙、申万分类、ETF 重仓、批量回测增强，需要刷新或标注历史版本；
 5. `config/app.yaml:13` 注释说「当前为付费年会员」但 `plan: starter`——`plan` 字段实际语义是「限额档位」而非会员状态（provider 里 `plan != "starter"` 直接 raise），命名误导；
 6. **部署形态三处互相矛盾**：`scripts/deploy.sh`（/opt/trend-quant + nginx + root）vs `main.py:381-383` 注释（frp 直连、无 nginx）vs 运维文档（/srv/trend-quant）——以哪个为准需要落定一份；
 7. 代码内注释质量整体很高（设计理由、事故记录、口径约定都写了），未见大面积注释腐烂；个别「future P1」表述指向的 P1 已完成（§5-B14）；

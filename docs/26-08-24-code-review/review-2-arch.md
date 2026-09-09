@@ -1,7 +1,7 @@
 # 评审意见（review-2：架构师/技术负责人视角）
 
 - 评审日期：2026-08-24
-- 评审对象：`docs/code-review-2026-08-24/code-review-report.md` v1
+- 评审对象：`docs/26-08-24-code-review/code-review-report.md` v1
 - 评审方式：通读主报告后独立扫描 `src/`（68 模块）、`web/`、`scripts/`、`tests/`、`pyproject.toml`、`.gitignore`、`git remote/log`，并对关键条目打开代码亲核。本评审不做逐条事实核查（另有评审负责），聚焦覆盖面、分级、方案质量、行动清单、报告结构五个维度。
 
 ---

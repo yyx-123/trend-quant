@@ -104,7 +104,7 @@
 
 - 位置：`scripts/deploy.sh:11,68,106-109,169-176`
 - 问题：INSTALL_DIR 硬编码 `/opt/trend-quant`（线上实为 `/srv/trend-quant`，git log 04559e4 更正过文档但脚本没跟上）；目录无 `.git` 时无确认 `rm -rf`（:68）；systemd `User=root`；配 nginx 反代而线上实际直连 frp（main.py:381-383）；auth_basic 默认注释（假设无登录墙时代）；代码走 GitHub clone 而 README:68 说分发走 git bundle——**脚本、文档、现实三方互不一致**。
-- 建议：按 frp + /srv 现状重写或删除（以 docs/stock-industry-etf-holdings/server-rollout.md 为准）；服务降权专用用户；删除前把仍有效的步骤（systemd/log 目录）抽出来。
+- 建议：按 frp + /srv 现状重写或删除（以 docs/26-08-24-stock-industry-etf-holdings/server-rollout.md 为准）；服务降权专用用户；删除前把仍有效的步骤（systemd/log 目录）抽出来。
 
 ### P1-8 前端存储型 XSS 三处 + 一处双重转义（全部亲核）
 
@@ -418,9 +418,9 @@
 
 - `README.md:11` 与 `CLAUDE.md:30`：写 MCP 5 个工具，实际 **7 个**（add_trade/open_positions 未列入）。
 - `main.py:304-305` 注释「MCP 工具调用自带 username/password 逐次鉴权」与实现矛盾（见 P0-1）。
-- `docs/architecture-review-2026-08-01.md`：称 MCP 6 工具、db.py 1522 行（现 2119 行）；其 P0 结论是否闭环无跟踪。
+- `docs/26-08-01-architecture-review/architecture-review-2026-08-01.md`：称 MCP 6 工具、db.py 1522 行（现 2119 行）；其 P0 结论是否闭环无跟踪。
 - `scripts/fetch_etf_holdings.py:5` docstring 引用已删除的旧方案文档且未注明。
-- `docs/batch-backtest/`（4 份）与 `docs/stock-industry-etf-holdings/`（5 份）plan/review 多轮堆积（历史上有两次批量清理先例）；verification-and-rollout 与 server-rollout 内容重叠。
+- `docs/26-07-26-batch-backtest/`（4 份）与 `docs/26-08-24-stock-industry-etf-holdings/`（5 份）plan/review 多轮堆积（历史上有两次批量清理先例）；verification-and-rollout 与 server-rollout 内容重叠。
 - `TODO.md`（160 字节，3 月后未动）疑似过期。
 - **chinese_calendar 年度边界的运维仪式无着落**（评审 2 新发现）：calendar.py:60-85 对超库年份退化为 weekday-only 且每年只 warning 一次；2027-01-01 起法定假日会被当成交易日——更糟的是 `_daily_update_catchup` 的 expected 计算走同一日历，会把假日判为「应更未更」，**每次重启触发一次无效 force 补跑**，直到人工升级库。「每年 12 月 pip install --upgrade chinese_calendar」只写在 calendar.py docstring，README/CLAUDE.md/部署文档均无（grep 确认）。建议写入部署文档 + 导航栏复用渠道暴露「日历数据过期」状态。
 

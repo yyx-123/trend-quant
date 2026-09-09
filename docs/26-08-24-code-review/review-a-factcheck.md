@@ -1,7 +1,7 @@
 # 主审查报告事实核查（review-a-factcheck）
 
 - **核查日期**：2026-08-24
-- **核查对象**：`docs/code-review-2026-08-24/review-report.md`（下称"报告"）
+- **核查对象**：`docs/26-08-24-code-review/review-report.md`（下称"报告"）
 - **核查方式**：只读代码逐条比对（文件:行号 + 代码内容），并用 `.venv/Scripts/ruff.exe check src scripts --select F401,F841,F811` 对报告 §5 的死代码清单做了全量复核。未运行 pytest。
 - **核查范围**：全部 6 条 P0 + S/Q/C 系列全部条目 + §4/§5 全部条目 + §7/§8/§9/§10 抽查，合计约 50 条论断。
 - **合规说明**：核查中曾误用 `uv run` 触发依赖同步，在项目根目录生成了 `uv.lock`（git untracked），已删除恢复原状；`.venv`/`.uv-cache` 为环境缓存，不涉及项目源文件。除此之外未对项目做任何写操作。
@@ -152,7 +152,7 @@ XSS 专项：报告"94 处 innerHTML"实测 95 处（`grep -ro innerHTML web/tem
 - §8.6 `_daily_update_catchup` 存在（main.py:182），tests 中无对应命名单测文件，属实。
 - §8.8 `test_tushare_scripts.py` 存在、其余脚本无对应测试文件，属实。
 - §9.1 README 过时 —— 属实：README:11 仍写"MCP 服务（/mcp/sse）：5 个工具"，server.py 实际 7 个；README 架构树的 services 列举（22-23 行）确实缺 stock_industry/manual_trade/stop_loss/trade_records/auth/batch_service 等。
-- §9.2 `docs/architecture-review-2026-08-01.md` 存在，属实。
+- §9.2 `docs/26-08-01-architecture-review/architecture-review-2026-08-01.md` 存在，属实。
 - §9.3 `config/app.yaml:13` 注释"【会员状态】当前为付费年会员"与 19 行 `plan: starter` 并存，provider `plan != "starter"` 直接 raise（`provider_tickflow.py:39-40`），属实。
 - §9.4 `core/indicators.py:23`、`core/trend.py:27` 两处"future P1"注释逐字存在；`data/indicator_store.py` 已落地（193 行 `get_series`），属实。
 - §9.5 git 状态 4 份文档 D、多份 M —— 与核查时 `git status --short` 输出完全一致，属实。

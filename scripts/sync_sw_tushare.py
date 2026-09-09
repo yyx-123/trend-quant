@@ -1,6 +1,6 @@
 """tushare 申万行业分类全量同步（季度临时账号窗口内运行）。
 
-方案文档：docs/stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md §5
+方案文档：docs/26-08-24-stock-industry-etf-holdings/2026-08-24-stock-industry-etf-holdings-plan.md §5
 
 index_classify（2000 积分）拿 SW2021 一级列表 → 逐一级 index_member_all
 （2000 积分，单次最大 2000 行，按一级拆分天然分页）拿官方全量成分，
