@@ -83,6 +83,7 @@
       <button type="button" class="batch-tab" data-tab="scatter">超额 vs 特征</button>
       <button type="button" class="batch-tab" data-tab="bucket">特征分桶</button>
       <button type="button" class="batch-tab" data-tab="year">策略×年份</button>
+      <button type="button" class="batch-tab" data-tab="stopdiag">止损诊断</button>
     </div>
     <p class="batch-analysis-banner" id="bbAnalysisBanner" hidden>
       ⚠️ 本视图仅用于<strong>描述性观察与假设生成</strong>，非统计推断。样本量有限、多重比较下可能出现噪声“规律”；超额 = 策略年化 − 买入持有年化（基准不含交易摩擦，超额系统性略偏低，对交易多的策略不利）。结论需独立验证。
@@ -121,6 +122,9 @@
           <option value="excess_calmar">超额卡玛（中位数）</option>
           <option value="avg_holding_days">平均持仓天数（中位数）</option>
           <option value="avg_flat_days">平均空仓天数（中位数）</option>
+          <option value="r_mean">R均值（中位数）</option>
+          <option value="stop_exit_ratio">硬止损占比（中位数）</option>
+          <option value="exit_efficiency">出场效率（中位数）</option>
         </select>
         <select id="bbHeatLevel">
           <option value="category_l1">一级类目</option>
@@ -183,6 +187,36 @@
         <span class="batch-muted">逐格子的年度收益按（策略 × 自然年）聚合，快速定位某段年份（如 2018 熊市）各策略表现；每格标注样本量 n；n&lt;5 置灰不参与解读。自然年边界与行情起止不齐，锁定区间后建议用窗口批次精确回测</span>
       </div>
       <div id="bbYearChart" class="batch-chart"></div>
+    </div>
+
+    <!-- Tab 6: 止损诊断（方案 2026-08-30 §4/§6.1：分桶×策略的 round-trip 聚合） -->
+    <div id="bbTabStopdiag" class="batch-tab-page" hidden>
+      <div class="batch-filter-bar">
+        <select id="bbDiagDim">
+          <option value="vol_quintile">按入场波动率（ATR%）五分桶</option>
+          <option value="asset_type">按标的类型</option>
+          <option value="trend_regime">按趋势 regime 三档</option>
+          <option value="exit_year">按出场年度</option>
+        </select>
+        <select id="bbDiagStrategy"></select>
+        <span class="batch-muted">逐笔 round-trip 聚合；假止损 = 硬止损出场后 10 日内收盘重回入场价；n&lt;30 低置信置灰</span>
+      </div>
+      <div class="table-shell batch-detail-shell">
+        <table class="backtest-metrics-table" id="bbDiagTable">
+          <thead>
+            <tr>
+              <th>分桶</th><th>n</th><th>R均值</th><th>R P25</th><th>R P75</th>
+              <th>胜率</th><th>盈亏比</th><th>止损占比</th><th>≤3日触发</th>
+              <th>假止损率5日</th><th>假止损率10日</th><th>假止损率20日</th>
+              <th>止损后漂移10日</th><th>出场效率</th>
+              <th>吊灯MFE中位(ATR)</th><th>吊灯兑现R中位</th>
+            </tr>
+          </thead>
+          <tbody id="bbDiagBody">
+            <tr><td colspan="16" class="batch-muted">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </section>
 

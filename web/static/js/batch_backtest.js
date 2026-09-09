@@ -42,6 +42,8 @@
     compareSel: new Set(),
     yearAgg: null,
     yearAggBatch: null,
+    stopDiag: null,
+    stopDiagBatch: null,
     modalCell: null,
     compare: null,
     // 透视热力图行列视图：key 为行/列名，1=置灰 2=隐藏；Order 数组记录拖动后的顺序
@@ -106,6 +108,13 @@
     { key: 'trade_count', label: '交易数', fmt: int },
     { key: 'avg_holding_days', label: '平均持仓', fmt: days1 },
     { key: 'avg_flat_days', label: '平均空仓', fmt: days1 },
+    // 止损诊断平铺列（2026-08-30 方案 §3.1；旧批次未回填时为 NULL 显示 —）
+    { key: 'r_mean', label: 'R均值', fmt: num2Signed },
+    { key: 'stop_exit_ratio', label: '止损占比', fmt: pct },
+    { key: 'chandelier_exit_ratio', label: '吊灯占比', fmt: pct },
+    { key: 'exit_efficiency', label: '出场效率', fmt: pct },
+    { key: 'max_losing_streak', label: '最长连亏', fmt: int },
+    { key: 'max_dd_duration_days', label: '水下天数', fmt: int },
     { key: 'error', label: '备注', fmt: text }
   ];
 
@@ -548,7 +557,7 @@
     document.querySelectorAll('.batch-tab').forEach(function (b) {
       b.classList.toggle('is-active', b.dataset.tab === tab);
     });
-    ['detail', 'heatmap', 'scatter', 'bucket', 'year'].forEach(function (t) {
+    ['detail', 'heatmap', 'scatter', 'bucket', 'year', 'stopdiag'].forEach(function (t) {
       el('bbTab' + t[0].toUpperCase() + t.slice(1)).hidden = t !== tab;
     });
     el('bbAnalysisBanner').hidden = tab === 'detail';
@@ -562,6 +571,7 @@
     else if (state.activeTab === 'scatter') renderScatter();
     else if (state.activeTab === 'bucket') renderBucket();
     else if (state.activeTab === 'year') renderYearTab();
+    else if (state.activeTab === 'stopdiag') renderStopDiagTab();
   }
 
   function getChart(id) {
@@ -773,7 +783,8 @@
   var HEAT_METRIC_KIND = {
     excess_annual_return: 'pct', annual_return: 'pct', win_rate: 'pct',
     sharpe: 'num', excess_sharpe: 'num', calmar: 'num', excess_calmar: 'num',
-    avg_holding_days: 'days', avg_flat_days: 'days'
+    avg_holding_days: 'days', avg_flat_days: 'days',
+    r_mean: 'num', stop_exit_ratio: 'pct', exit_efficiency: 'pct'
   };
 
   // 把默认排序的轴名按拖动后的 Order 重排：Order 里仍在轴上的排前面，新增名追加在后
@@ -1336,6 +1347,70 @@
     chart.resize();
   }
 
+  // ── Tab 6: 止损诊断（2026-08-30 方案 §4：分桶 × 策略 的 round-trip 聚合表）──
+  function renderStopDiagTab() {
+    if (state.stopDiagBatch === state.currentBatchId && state.stopDiag) {
+      renderStopDiagTable();
+      return;
+    }
+    fetch('/batch-backtest/api/runs/' + encodeURIComponent(state.currentBatchId) + '/stop-diagnostics')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || state.currentBatchId !== data.batch_id) return;
+        state.stopDiag = data.diagnostics || [];
+        state.stopDiagBatch = data.batch_id;
+        // 策略筛选器（首次载入时重建）
+        var sel = el('bbDiagStrategy');
+        var strategies = [];
+        state.stopDiag.forEach(function (d) {
+          if (strategies.indexOf(d.strategy) < 0) strategies.push(d.strategy);
+        });
+        var prev = sel.value;
+        sel.innerHTML = '<option value="">全部策略</option>' + strategies.map(function (s) {
+          return '<option value="' + esc(s) + '">' + esc(s) + '</option>';
+        }).join('');
+        if (strategies.indexOf(prev) >= 0) sel.value = prev;
+        renderStopDiagTable();
+      });
+  }
+
+  function renderStopDiagTable() {
+    var body = el('bbDiagBody');
+    var rows = (state.stopDiag || []).filter(function (d) {
+      if (d.dim !== el('bbDiagDim').value) return false;
+      var st = el('bbDiagStrategy').value;
+      return !st || d.strategy === st;
+    });
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="16" class="batch-muted">该批次没有 round-trip 诊断数据（旧批次需先回填，或重跑批次）。</td></tr>';
+      return;
+    }
+    function pctOrDash(v) { return v == null || !isFinite(v) ? '—' : (v * 100).toFixed(1) + '%'; }
+    function numOrDash(v) { return v == null || !isFinite(v) ? '—' : Number(v).toFixed(2); }
+    body.innerHTML = rows.map(function (d) {
+      var dimCls = d.low_confidence ? ' class="batch-row-zero"' : '';
+      var rCls = d.r_mean == null ? '' : (d.r_mean > 0 ? ' class="batch-pos"' : ' class="batch-neg"');
+      return '<tr' + dimCls + '>' +
+        '<td>' + esc(d.bucket) + '</td>' +
+        '<td>' + d.n + '</td>' +
+        '<td' + rCls + '>' + numOrDash(d.r_mean) + '</td>' +
+        '<td>' + numOrDash(d.r_p25) + '</td>' +
+        '<td>' + numOrDash(d.r_p75) + '</td>' +
+        '<td>' + pctOrDash(d.win_rate) + '</td>' +
+        '<td>' + numOrDash(d.profit_factor) + '</td>' +
+        '<td>' + pctOrDash(d.stop_exit_ratio) + '</td>' +
+        '<td>' + pctOrDash(d.trigger_within_3d_ratio) + '</td>' +
+        '<td>' + pctOrDash(d.false_stop_rate_5d) + '</td>' +
+        '<td>' + pctOrDash(d.false_stop_rate_10d) + '</td>' +
+        '<td>' + pctOrDash(d.false_stop_rate_20d) + '</td>' +
+        '<td>' + pctOrDash(d.post_exit_drift_10d_mean) + '</td>' +
+        '<td>' + pctOrDash(d.avg_exit_efficiency) + '</td>' +
+        '<td>' + numOrDash(d.chandelier_mfe_atr_median) + '</td>' +
+        '<td>' + numOrDash(d.chandelier_r_median) + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
   // ── 格子详情弹窗 ──────────────────────────────────────────
   function openCellModal(cell) {
     state.modalCell = cell;
@@ -1641,6 +1716,8 @@
   ['bbScatterStrategy', 'bbScatterX', 'bbScatterY'].forEach(function (id) { el(id).addEventListener('change', renderScatter); });
   el('bbBucketFeature').addEventListener('change', renderBucket);
   el('bbYearMetric').addEventListener('change', renderYearChart);
+  el('bbDiagDim').addEventListener('change', renderStopDiagTable);
+  el('bbDiagStrategy').addEventListener('change', renderStopDiagTable);
   el('bbCompareBtn').addEventListener('click', runCompare);
   el('bbCompareClose').addEventListener('click', function () {
     el('bbCompareSection').hidden = true;
