@@ -52,6 +52,11 @@ def test_daily_indicators_do_not_depend_on_limit(client, test_db):
         for key, series in wide["indicators"][group].items():
             assert narrow["indicators"][group][key] == series[-30:], f"{group}.{key}"
     assert narrow["indicators"]["rsi"]["series"] == wide["indicators"]["rsi"]["series"][-30:]
+    # E-BIAS 与 RSI 同为混合结构节点（序列 + 周期/参考线），只截尾 series，
+    # 参考线/周期等短配置字段必须原样保留。
+    assert narrow["indicators"]["e_bias"]["series"] == wide["indicators"]["e_bias"]["series"][-30:]
+    assert narrow["indicators"]["e_bias"]["lines"] == wide["indicators"]["e_bias"]["lines"]
+    assert narrow["indicators"]["e_bias"]["period"] == 20
     assert narrow["indicators"]["trend"]["score"] == wide["indicators"]["trend"]["score"][-30:]
     for key, series in wide["indicators"]["trend"]["ma"].items():
         assert narrow["indicators"]["trend"]["ma"][key] == series[-30:]
@@ -69,4 +74,6 @@ def test_daily_dates_candles_tailed_to_limit(client, test_db):
     for group in ("ma", "atr", "boll", "macd", "bias", "volume_ma"):
         for key, series in payload["indicators"][group].items():
             assert len(series) == 10, f"{group}.{key}"
+    assert len(payload["indicators"]["e_bias"]["series"]) == 10
+    assert len(payload["indicators"]["e_bias"]["lines"]) == 4
     assert len(payload["indicators"]["trend"]["score"]) == 10

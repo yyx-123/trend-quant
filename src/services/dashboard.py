@@ -17,7 +17,7 @@ import pandas as pd
 from audit.app_logger import get_logger
 from core.indicators import detect_macd_phase, kline_mini, macd_mini
 from core.trend import TREND_FORMULA_VERSION, _detect_trend_ma5_phase, _detect_trend_phase
-from data.indicator_store import get_series
+from data.indicator_store import get_series, get_series_bulk
 from data.storage.db import get_db
 
 logger = get_logger(__name__)
@@ -86,6 +86,10 @@ def _aggregate_daily(frame: pd.DataFrame, group_columns: list[str]) -> pd.DataFr
         "change_5d": "return_5d",
         "change_20d": "return_20d",
         "change_60d": "return_60d",
+        # E-BIAS（均线偏离度）：类目级按成交额加权，与 trend_score 同口径。
+        # 单位与 daily_change_pct 一致为百分比（缓存列 e_bias20 是 decimal，
+        # 在 build_subject_dashboard_payload 里 ×100 转换）。
+        "e_bias_pct": "e_bias_pct",
         "close": "close",
     }
     columns = [*group_columns, "time", "amount", *metrics.values()]
@@ -131,6 +135,8 @@ def _metrics_summary(daily: pd.DataFrame, metadata: dict) -> dict | None:
         "member_count": int(metadata["member_count"]),
         "trend_score": _number(latest["trend_score"]),
         "trend_ma5": trend_ma5[-1] if trend_ma5 else None,
+        # 均线偏离度（百分比）：正=高于 20 日 EMA，负=低于。
+        "e_bias_pct": _number(latest["e_bias_pct"]),
         "daily_change_pct": _number(latest["daily_change_pct"]),
         "change_5d": _number(latest["change_5d"]),
         "change_20d": _number(latest["change_20d"]),
@@ -299,10 +305,24 @@ def build_subject_dashboard_payload(db=None) -> dict:
             if row["symbol"] not in trend_last or str(row["time"]) > trend_last[row["symbol"]]:
                 trend_last[row["symbol"]] = str(row["time"])
     market_last_by_symbol = source.groupby("symbol")["time"].max()
+    # E-BIAS（均线偏离度）：全市场一次批量读缓存，SQL 次数与标的数解耦
+    # （逐只 get_series 在上百标的时是上百次查询）。缓存未命中的标的由
+    # get_series_bulk 内部回退 live 重算，语义与逐只读一致。
+    e_bias_map = get_series_bulk(
+        source["symbol"].astype(str).unique().tolist(), "e_bias20", db=db
+    )
     for symbol, history in source.groupby("symbol", sort=False):
         data = history.sort_values("time").reset_index(drop=True).copy()
         symbol = str(symbol)
         market_last = str(market_last_by_symbol.get(symbol, ""))
+        # 缓存序列按日期对齐到行情网格；缓存缺失的标的整列为 None（看板显示 —）。
+        # ×100 把 decimal 缓存列转成展示层百分比（与 daily_change_pct 同单位）。
+        e_bias_series = e_bias_map.get(symbol.strip().upper(), pd.Series(dtype=float))
+        e_bias_values: list[float | None] = []
+        for stamp in data["time"]:
+            raw = e_bias_series.get(pd.Timestamp(stamp), np.nan) if not e_bias_series.empty else np.nan
+            e_bias_values.append(None if pd.isna(raw) else round(float(raw) * 100.0, 6))
+        data["e_bias_pct"] = e_bias_values
         if symbol in trend_last and market_last and trend_last[symbol] >= market_last:
             data["trend_score"] = [
                 trend_lookup.get((symbol, str(t)[:10]), np.nan) for t in data["time"]

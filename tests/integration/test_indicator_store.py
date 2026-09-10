@@ -67,6 +67,24 @@ class TestCacheHit:
             cached = get_series("TEST.SS", col, db=db)
             assert len(cached) == len(seeded)
 
+    def test_e_bias_cached_matches_live(self, db, seeded) -> None:
+        """e_bias20 落库往返：缓存读回与 core 实时计算逐值一致。"""
+        cached = get_series("TEST.SS", "e_bias20", db=db)
+        live = core_ind.e_bias(pd.to_numeric(seeded["close"], errors="coerce"), 20)
+        live.index = pd.to_datetime(seeded["time"])
+        pd.testing.assert_series_equal(cached, live, check_names=False)
+
+    def test_e_bias_column_is_not_all_null(self, db, seeded) -> None:
+        """防止「版本号没 bump」那类静默为空：缓存列必须有实际值。
+
+        列被 ALTER 出来但从未写入时，_cache_fresh 仍报新鲜、读回全 NaN、
+        永不回落 live 计算 —— 指标会安静地永远为空。
+        """
+        cached = get_series("TEST.SS", "e_bias20", db=db)
+        assert len(cached) == len(seeded)
+        assert cached.notna().all()
+        assert cached.abs().max() > 0
+
 
 class TestFallback:
     def test_missing_symbol_falls_back_to_live(self, db) -> None:
@@ -94,6 +112,19 @@ class TestFallback:
         # Live fallback recomputes over full history including the new bar.
         assert len(out) == len(seeded) + 1
         assert out.index[-1] == pd.Timestamp("2026-07-01")
+
+    def test_e_bias_live_fallback(self, db) -> None:
+        """未缓存时 e_bias20 走 live 重算分支。
+
+        compute_live_series 漏加该分支会在此 raise ValueError（unknown
+        indicator）—— 标的大盘对齐缓存缺失标的时会踩到。
+        """
+        bars = _make_bars(seed=9)
+        db.save_market_data("LIVEB.SS", bars, price_mode="qfq")
+        out = get_series("LIVEB.SS", "e_bias20", db=db)
+        expected = core_ind.e_bias(pd.to_numeric(bars["close"], errors="coerce"), 20)
+        expected.index = pd.to_datetime(bars["time"])
+        pd.testing.assert_series_equal(out, expected, check_names=False)
 
     def test_empty_symbol_returns_empty(self, db) -> None:
         out = get_series("NOPE.SS", "atr", db=db)

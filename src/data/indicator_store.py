@@ -34,6 +34,7 @@ INDICATOR_COLUMNS: tuple[str, ...] = (
     "boll_mid", "boll_up", "boll_dn",
     "rsi_avg_gain", "rsi_avg_loss",
     "macd_ema12", "macd_ema26",
+    "e_bias20",
 )
 
 TREND_COLUMNS: tuple[str, ...] = (
@@ -88,6 +89,9 @@ def compute_indicator_frame(df: pd.DataFrame, trend_cfg: dict | None = None) -> 
             "rsi_avg_loss": avg_loss,
             "macd_ema12": core_ind.ema(close, 12),
             "macd_ema26": core_ind.ema(close, 26),
+            # 周期入列名（与 sma20/rsi14 同约定）：E-BIAS 的周期锁定 20 日，
+            # 与广发策略原文及通达信复刻口径一致。
+            "e_bias20": core_ind.e_bias(close, 20),
         }
     )
     return frame
@@ -150,6 +154,8 @@ def compute_live_series(bars: pd.DataFrame, indicator: str, trend_cfg: dict | No
     elif indicator in ("boll_mid", "boll_up", "boll_dn"):
         boll_out = core_ind.bollinger(close)
         out = boll_out[{"boll_mid": "mid", "boll_up": "up", "boll_dn": "dn"}[indicator]]
+    elif indicator == "e_bias20":
+        out = core_ind.e_bias(close, 20)
     elif indicator in TREND_COLUMNS:
         series = calculate_trend_score_series(bars, trend_cfg or get_strategy_config())
         out = series[indicator]

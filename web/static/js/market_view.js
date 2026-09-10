@@ -66,6 +66,7 @@
   let rsiChart = null;
   let macdChart = null;
   let biasChart = null;
+  let eBiasChart = null;
   let heatChart = null;
   let charts = [];
   try {
@@ -75,7 +76,8 @@
     rsiChart = echarts.init(document.getElementById('mvRsiChart'));
     macdChart = echarts.init(document.getElementById('mvMacdChart'));
     biasChart = echarts.init(document.getElementById('mvBiasChart'));
-    charts = [priceChart, trendChart, volumeChart, rsiChart, biasChart, macdChart];
+    eBiasChart = echarts.init(document.getElementById('mvEBiasChart'));
+    charts = [priceChart, trendChart, volumeChart, rsiChart, biasChart, eBiasChart, macdChart];
     for (const chart of charts) chart.group = 'market-view-time';
     echarts.connect('market-view-time');
     // 止损线悬停说明：写入图上方 DOM 信息条（ECharts label 会被 grid 边缘裁剪，改用图外展示）
@@ -982,6 +984,71 @@
     }, true);
   }
 
+  // E-BIAS 参考线配色按阈值语义固定（与 RSI 子图 70/50/30 同族配色），
+  // 未知阈值兜底为灰。阈值为广发策略行业指数口径，未在本 ETF 池标定 ——
+  // 仅作看图辅助，不是已验证的信号线（说明文字见模板 .market-subchart-note）。
+  const EBIAS_LINE_COLORS = {
+    '15': 'rgba(209, 67, 67, 0.45)',
+    '5': 'rgba(199, 131, 76, 0.55)',
+    '-5': 'rgba(0, 167, 111, 0.45)',
+    '0': 'rgba(51, 65, 85, 0.34)',
+  };
+
+  function eBiasMarkLines(lines) {
+    return (lines || []).map((line) => {
+      const value = Number(line.value);
+      return {
+        yAxis: value,
+        label: {
+          show: true,
+          position: 'insideEndTop',
+          formatter: `${line.label || ''} ${num(value, 0)}`,
+          fontSize: 10,
+          color: '#6b7280',
+          // 曲线右端就是最新值，指标贴近阈值时标签必被压住（而那时最需要
+          // 看清）——加半透明底衬托，保证任何一种取值下都可读。
+          backgroundColor: 'rgba(255, 255, 255, 0.82)',
+          padding: [1, 3],
+          borderRadius: 3,
+        },
+        lineStyle: {
+          color: EBIAS_LINE_COLORS[String(value)] || 'rgba(107, 114, 128, 0.45)',
+          width: 1.2,
+          type: 'dashed',
+        },
+      };
+    });
+  }
+
+  function renderEBias(payload, zoom) {
+    if (!eBiasChart) return;
+    const dates = payload.dates || [];
+    const eBias = payload.indicators?.e_bias || {};
+    const period = Number(eBias.period || 20);
+    eBiasChart.setOption({
+      animation: false,
+      axisPointer: { link: [{ xAxisIndex: 'all' }] },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' }, valueFormatter: (v) => `${num(v, 2)}%` },
+      legend: { data: [`E-BIAS${period}`], top: 2 },
+      grid: { left: 62, right: 28, top: 36, bottom: 42 },
+      dataZoom: buildDataZoom(zoom.start, zoom.end),
+      xAxis: { type: 'category', data: dates, boundaryGap: false },
+      yAxis: { type: 'value', scale: true, axisLabel: { formatter: (v) => `${num(v, 1)}%` } },
+      series: [
+        {
+          name: `E-BIAS${period}`,
+          type: 'line',
+          data: eBias.series || [],
+          symbol: 'none',
+          smooth: true,
+          lineStyle: { width: 1.7, color: '#2563eb' },
+          itemStyle: { color: '#2563eb' },
+          markLine: { silent: true, symbol: 'none', data: eBiasMarkLines(eBias.lines) },
+        },
+      ],
+    }, true);
+  }
+
   function metricRowCells(summary, isBenchmark) {
     const s = summary || {};
     const metrics = [
@@ -1505,6 +1572,7 @@
     renderVolume(payload, zoom);
     renderRsi(payload, zoom);
     renderBias(payload, zoom);
+    renderEBias(payload, zoom);
     renderMacd(payload, zoom);
     setTimeout(() => { if (charts.length) charts.forEach((chart) => chart.resize()); }, 0);
   }

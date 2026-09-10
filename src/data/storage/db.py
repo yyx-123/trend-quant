@@ -327,6 +327,7 @@ class Database:
                     boll_mid REAL, boll_up REAL, boll_dn REAL,
                     rsi_avg_gain REAL, rsi_avg_loss REAL,
                     macd_ema12 REAL, macd_ema26 REAL,
+                    e_bias20 REAL,
                     price_mode TEXT NOT NULL DEFAULT 'qfq',
                     formula_version INTEGER NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -508,6 +509,8 @@ class Database:
             "ema_s": "REAL",
             "ema_m": "REAL",
             "ema_l": "REAL",
+            # E-BIAS（均线偏离度·减法版）：ln(C) - EMA(ln C, 20)。
+            "e_bias20": "REAL",
         }
         batch_cell_columns = {
             "avg_holding_days": "REAL",
@@ -1904,6 +1907,7 @@ class Database:
             "macd_dif", "macd_dea", "macd_hist",
             "boll_mid", "boll_up", "boll_dn",
             "rsi_avg_gain", "rsi_avg_loss", "macd_ema12", "macd_ema26",
+            "e_bias20",
         )
         values = [col(name) for name in columns]
         records = [
@@ -1920,8 +1924,9 @@ class Database:
                     macd_dif, macd_dea, macd_hist,
                     boll_mid, boll_up, boll_dn,
                     rsi_avg_gain, rsi_avg_loss, macd_ema12, macd_ema26,
+                    e_bias20,
                     price_mode, formula_version, data_version, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
                 records,
             )
         return len(records)

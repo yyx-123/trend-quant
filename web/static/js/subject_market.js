@@ -10,6 +10,8 @@
   let boardSections = [];
   const fmtScore = (value) => value == null ? '—' : value.toFixed(1);
   const fmtChange = (value) => value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+  // E-Bias 均线偏离度：单位为百分比（正 = 高于 20 日 EMA），1 位小数足够。
+  const fmtEBias = (value) => value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
   const getChangeClass = (value) => value != null && value >= 0 ? 'is-positive' : 'is-negative';
   const fmtPhase = (item) => {
     if (item.macd_phase != null && item.macd_phase_days != null) {
@@ -64,6 +66,10 @@
     ma5: { field: 'trend_ma5', maxAbs: 20, note: '最新趋势值 MA5', fmt: (m) => fmtScore(m.trend_ma5) },
     score: { field: 'trend_score', maxAbs: 20, note: '当日趋势值', fmt: (m) => fmtScore(m.trend_score) },
     change: { field: 'daily_change_pct', maxAbs: 5, note: '当日涨跌幅', fmt: (m) => fmtChange(m.daily_change_pct) },
+    // E-Bias（均线偏离度，%）：maxAbs 取 20 与上面两维同档，5%/15% 参考线
+    // 分别落在色阶 5 / 15。参考线阈值源自广发策略行业指数口径，未在本
+    // ETF 池标定，仅作查看辅助。
+    ebias: { field: 'e_bias_pct', maxAbs: 20, note: '最新 E-Bias 均线偏离度（%）', fmt: (m) => fmtEBias(m.e_bias_pct) },
   };
   let heatColorDim = 'ma5';
 
@@ -283,6 +289,7 @@
         `<tr><td>当日趋势值</td><td class="${signClass(m.trend_score)}">${fmtScore(m.trend_score)}</td></tr>`,
         `<tr><td>强度</td><td>${m.strength == null ? '—' : m.strength}</td></tr>`,
         `<tr><td>日涨跌</td><td class="${signClass(m.daily_change_pct)}">${fmtChange(m.daily_change_pct)}</td></tr>`,
+        `<tr><td>E-Bias 偏离度</td><td class="${signClass(m.e_bias_pct)}">${fmtEBias(m.e_bias_pct)}</td></tr>`,
         `<tr><td>5日 / 20日</td><td>${changeCell(m.change_5d)} / ${changeCell(m.change_20d)}</td></tr>`,
         `<tr><td>近20日均成交额</td><td>${m.amount_avg20 == null ? '—' : fmtAmount(m.amount_avg20)}</td></tr>`,
         `</table>`,
@@ -296,6 +303,7 @@
       `<tr><td>趋势 MA5</td><td class="${signClass(m.trend_ma5)}">${fmtScore(m.trend_ma5)}</td></tr>`,
       `<tr><td>强度</td><td>${m.strength == null ? '—' : m.strength}</td></tr>`,
       `<tr><td>日涨跌</td><td class="${signClass(m.daily_change_pct)}">${fmtChange(m.daily_change_pct)}</td></tr>`,
+      `<tr><td>E-Bias 偏离度</td><td class="${signClass(m.e_bias_pct)}">${fmtEBias(m.e_bias_pct)}</td></tr>`,
       `<tr><td>近20日均成交额</td><td>${m.amount_avg20 == null ? '—' : fmtAmount(m.amount_avg20)}</td></tr>`,
       `</table>`,
     ].join('');

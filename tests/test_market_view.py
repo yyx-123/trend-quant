@@ -38,6 +38,14 @@ class MarketViewIndicatorTest(unittest.TestCase):
         self.assertIn("20", indicators["atr"])
         self.assertEqual(len(indicators["rsi"]["series"]), len(df))
         self.assertEqual(indicators["rsi"]["period"], 14)
+        # E-BIAS 节点是混合结构（序列 + 周期 + 参考线），仿 rsi 单独断言，
+        # 不并入上面「纯序列字典」的 group 元组。
+        self.assertEqual(len(indicators["e_bias"]["series"]), len(df))
+        self.assertEqual(indicators["e_bias"]["period"], 20)
+        self.assertEqual(
+            [line["value"] for line in indicators["e_bias"]["lines"]],
+            [15.0, 5.0, -5.0, 0.0],
+        )
         self.assertEqual(len(indicators["trend"]["score"]), len(df))
         self.assertEqual(len(indicators["trend"]["ma"]["5"]), len(df))
         self.assertEqual(len(indicators["trend"]["ma"]["10"]), len(df))
@@ -59,6 +67,7 @@ class MarketViewIndicatorTest(unittest.TestCase):
         self.assertIn("40", indicators["ma"])
         self.assertIn("20", indicators["atr"])
         self.assertEqual(len(indicators["rsi"]["series"]), len(payload["dates"]))
+        self.assertEqual(len(indicators["e_bias"]["series"]), len(payload["dates"]))
         self.assertEqual(len(indicators["trend"]["score"]), len(payload["dates"]))
         self.assertEqual(len(indicators["trend"]["ma"]["5"]), len(payload["dates"]))
         self.assertEqual(len(indicators["trend"]["ma"]["10"]), len(payload["dates"]))
@@ -306,9 +315,23 @@ class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(indicators["atr"]["20"][-1])
         self.assertIsNotNone(indicators["volume_ma"]["5"][-1])
         self.assertIsNotNone(indicators["volume_ma"]["10"][-1])
+        # E-BIAS 同样含当日合成K线，且仍是百分比口径（序列 + 参考线结构）。
+        self.assertEqual(len(indicators["e_bias"]["series"]), expected_len)
+        self.assertIsNotNone(indicators["e_bias"]["series"][-1])
+        self.assertEqual(indicators["e_bias"]["period"], 20)
+        self.assertEqual(len(indicators["e_bias"]["lines"]), 4)
         # MA5 of today = mean of the last 4 historical closes + live price.
         hist_closes = list(df["close"].tail(4)) + [make_fresh_quote()["price"]]
         self.assertAlmostEqual(indicators["ma"]["5"][-1], sum(hist_closes) / 5, places=5)
+        # E-BIAS 末位 == ln(实时价) − EMA(ln 收盘, 20)（含合成K线）× 100。
+        from core.indicators import e_bias as _core_e_bias
+
+        closes_with_today = list(df["close"]) + [make_fresh_quote()["price"]]
+        self.assertAlmostEqual(
+            indicators["e_bias"]["series"][-1],
+            float(_core_e_bias(pd.Series(closes_with_today), 20).iloc[-1]) * 100,
+            places=4,
+        )
         # The fixed-semantics intraday trend snapshot is still injected.
         self.assertEqual(
             indicators["trend_intraday"]["score"], FAKE_INTRADAY_TREND_RESULT["trend_score"]

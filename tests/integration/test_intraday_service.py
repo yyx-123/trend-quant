@@ -401,6 +401,73 @@ class TestBuildIntradayDashboard:
             # 缓存路径下 trend_history（成交额加权 MA5 序列）也必须非空。
             assert len(inst.get("trend_history") or []) > 0
 
+    def test_instrument_rows_carry_intraday_e_bias(self, fake_deps) -> None:
+        """E-BIAS（均线偏离度）：标的行为盘中实时值，类目行为成交额加权。
+
+        盘中值必须由「历史 + 当日合成K线」得出 —— 与 MACD 相位/K线 mini 共用
+        同一份帧，因此未收盘即为不稳定的盘中估算值。
+        """
+        ds, db, cfg = fake_deps
+        from core.indicators import e_bias
+        from data.intraday_service import build_intraday_dashboard
+
+        result = build_intraday_dashboard(
+            symbols=["A.SS", "B.SS", "C.SS"], db=db, data_service=ds, trend_config=cfg
+        )
+        instruments = [
+            inst
+            for group in result["groups"]
+            for l2 in group["items"]
+            for l3 in l2["children"]
+            for inst in l3["children"]
+        ]
+        assert len(instruments) == 3
+
+        for inst in instruments:
+            value = inst.get("e_bias_pct")
+            assert isinstance(value, (int, float)) and np.isfinite(value), inst["symbol"]
+
+        # 独立复算：历史收盘 + 当日合成K线（close = 盘中报价）逐值一致。
+        # 这同时证明该值确实含盘中数据，而非缓存里的昨收口径。
+        quotes = ds.fetch_latest_quotes.return_value
+        for inst in instruments:
+            bars = db.load_market_data(inst["symbol"], price_mode="qfq")
+            intraday_price = quotes[inst["symbol"]]["price"]
+            # 合成K线的末根收盘即盘中报价（kline mini 亦取同一份帧）。
+            assert inst["kline"][-1]["c"] == pytest.approx(intraday_price, abs=1e-9)
+            closes = pd.to_numeric(bars["close"], errors="coerce").tolist() + [intraday_price]
+            expected = float(e_bias(pd.Series(closes), 20).iloc[-1]) * 100.0
+            assert inst["e_bias_pct"] == pytest.approx(expected, abs=1e-6), inst["symbol"]
+
+        # 类目级 = 成员成交额加权（与 trend_score 同聚合口径）。
+        l3 = result["groups"][0]["items"][0]["children"][0]
+        members = l3["children"]
+        total = sum(m["amount"] for m in members)
+        weighted = sum(m["e_bias_pct"] * m["amount"] for m in members) / total
+        assert l3["e_bias_pct"] == pytest.approx(weighted, abs=1e-6)
+
+    def test_e_bias_does_not_leak_across_symbols(self, fake_deps) -> None:
+        """bars 变量跨标的残留的回归钉子（E-BIAS 与 MACD/K线 共用该帧）。
+
+        某标的若走了无帧分支而未重置 e_bias，会沿用上一轮的值。这里用报价
+        价格差异极大的三只标的锁定：三者取值必须互不相同。
+        """
+        ds, db, cfg = fake_deps
+        from data.intraday_service import build_intraday_dashboard
+
+        result = build_intraday_dashboard(
+            symbols=["A.SS", "B.SS", "C.SS"], db=db, data_service=ds, trend_config=cfg
+        )
+        values = [
+            inst["e_bias_pct"]
+            for group in result["groups"]
+            for l2 in group["items"]
+            for l3 in l2["children"]
+            for inst in l3["children"]
+        ]
+        assert len(values) == 3
+        assert len({round(v, 6) for v in values}) == 3
+
     def test_instrument_rows_carry_macd_phase_and_kline(self, fake_deps) -> None:
         """标的行带 MACD 相位与近40日K线（末根=盘中实时合成K线）；类目行为占位。"""
         ds, db, cfg = fake_deps

@@ -22,6 +22,7 @@ from core.indicators import (
     atr,
     bias,
     bollinger,
+    e_bias,
     efficiency_ratio,
     ema,
     macd,
@@ -96,6 +97,28 @@ def ref_market_bias(close: pd.Series, period: int) -> pd.Series:
     """Copy of market_view BIAS block (percent)."""
     ma = close.rolling(period, min_periods=period).mean()
     return (close - ma) / ma * 100
+
+
+def ref_tdx_logbias(close: pd.Series, period: int = 20) -> pd.Series:
+    """Copy of earletf's Tongdaxin replication, decimal (no ×100).
+
+        EMA20 := EMA(LN(CLOSE), 20);
+        LOGBIAS: (LN(CLOSE) - EMA20) * 100;
+
+    Pins the EMA-over-log-prices convention: ``EMA(LN(CLOSE))`` is the
+    anchor, not ``LN(EMA(CLOSE))``.
+    """
+    logged = np.log(close)
+    return logged - logged.ewm(span=period, adjust=False).mean()
+
+
+def ref_ratio_bias(close: pd.Series, period: int = 20) -> pd.Series:
+    """The division form 广发策略 published first: ln(C)/EMA(C) - 1.
+
+    Kept only to demonstrate *why* the subtraction form is required — this
+    is the variant the project deliberately does not ship.
+    """
+    return np.log(close) / close.ewm(span=period, adjust=False).mean() - 1.0
 
 
 def ref_rb_rsi_cutler(series: pd.Series, period: int = 14) -> pd.Series:
@@ -209,6 +232,11 @@ class TestParityWithLegacy:
     def test_bias_decimal_vs_market_percent(self, uptrend) -> None:
         _assert_series_equal(bias(uptrend, 6) * 100, ref_market_bias(uptrend, 6))
 
+    def test_e_bias_matches_tongdaxin_logbias(self, uptrend, jumpy) -> None:
+        """E-BIAS 逐值对拍通达信复刻公式（decimal 口径，无 ×100）。"""
+        for s in (uptrend, jumpy):
+            _assert_series_equal(e_bias(s, 20), ref_tdx_logbias(s, 20))
+
     def test_sma_last_value_matches_rule_backtest(self, uptrend) -> None:
         for p in (5, 20, 60):
             expected = uptrend.dropna().tail(p).mean()
@@ -235,6 +263,68 @@ class TestParityWithLegacy:
 
 
 # ---------------------------------------------------------------------------
+# E-BIAS semantics (why the subtraction form is the only usable one)
+# ---------------------------------------------------------------------------
+
+
+class TestEBiasSemantics:
+    def test_flat_series_is_zero(self) -> None:
+        close = pd.Series([2.5] * 80)
+        assert (e_bias(close, 20).abs() < 1e-12).all()
+
+    def test_equals_log_gap_and_approximates_ratio_gap(self) -> None:
+        """数值 = ln(C / EMA锚点)，并近似算术偏离 C/EMA − 1。
+
+        「读数可直接当偏离百分比看」的依据是 ln(1+r) ≈ r，但该近似**系统性
+        偏低 r²/2**（r≈9% 时约 0.4 个百分点）—— 所以只做量级校验，不做等值。
+        """
+        close = pd.Series([100.0] * 60 + [110.0])
+        anchor = float(np.exp(np.log(close).ewm(span=20, adjust=False).mean().iloc[-1]))
+        value = float(e_bias(close, 20).iloc[-1])
+        assert value == pytest.approx(np.log(110.0 / anchor), abs=1e-12)
+        ratio_gap = 110.0 / anchor - 1.0
+        assert value == pytest.approx(ratio_gap, abs=1e-2)
+        # 对数读数偏低，差值首位项 = r²/2（余项 ~r³/3，故容差取 1e-3）
+        assert value < ratio_gap
+        assert (ratio_gap - value) == pytest.approx(ratio_gap**2 / 2, abs=1e-3)
+
+    def test_scale_invariant(self, uptrend) -> None:
+        """乘性缩放下逐值不变 —— 低价 ETF 与高价指数可同尺度比较。"""
+        _assert_series_equal(e_bias(uptrend * 0.001, 20), e_bias(uptrend, 20), tol=1e-9)
+
+    def test_ratio_form_not_scale_invariant(self, uptrend) -> None:
+        """除法版在同一缩放下完全变形（其除数恰是 ln(EMA)）。"""
+        assert not np.allclose(
+            ref_ratio_bias(uptrend * 0.001).to_numpy(),
+            ref_ratio_bias(uptrend).to_numpy(),
+            atol=1e-6,
+        )
+
+    def test_subtraction_form_survives_prices_below_one(self) -> None:
+        """1 元以下的上涨趋势：减法版符号正确，除法版符号颠倒。
+
+        本项目标的全是 ETF，含 1 元附近品种 —— 这是不实现除法版的直接原因。
+        """
+        close = pd.Series(np.linspace(0.5, 0.8, 60))
+        # 首根锚点即自身、偏离为 0，故从第 2 根起断言严格为正。
+        assert (e_bias(close, 20).iloc[1:] > 0).all()
+        assert (ref_ratio_bias(close, 20) < 0).all()
+
+    def test_ema_is_taken_over_log_prices(self, uptrend) -> None:
+        """口径锁定：EMA(ln C) ≠ ln(EMA C)，两者必须是不同的序列。"""
+        log_of_ema = np.log(ema(uptrend, 20, min_periods=0))
+        assert not np.allclose(
+            e_bias(uptrend, 20).to_numpy(),
+            (np.log(uptrend) - log_of_ema).to_numpy(),
+            atol=1e-9,
+        )
+
+    def test_no_warmup_hole(self, uptrend) -> None:
+        """min_periods=0：首根起即有值，无 NaN 空洞（与 ema 族其余指标一致）。"""
+        assert e_bias(uptrend, 20).notna().all()
+
+
+# ---------------------------------------------------------------------------
 # Independent unit tests (prove the new implementation right, not just equal)
 # ---------------------------------------------------------------------------
 
@@ -251,24 +341,37 @@ class TestEdgeCases:
         assert macd(empty_s)["dif"].empty
         assert bollinger(empty_s)["mid"].empty
         assert momentum_return(empty_s).empty
+        assert e_bias(empty_s, 20).empty
 
     def test_all_nan_series(self) -> None:
         s = pd.Series([np.nan] * 50)
         assert sma(s, 5).isna().all()
         assert ema(s, 5).isna().all()
         assert rsi(s, 14).isna().all()
+        assert e_bias(s, 5).isna().all()
 
     def test_single_element(self) -> None:
         s = pd.Series([10.0])
         assert pd.isna(sma(s, 5).iloc[-1])
         assert ema(s, 5).iloc[-1] == pytest.approx(10.0)
         assert pd.isna(rsi(s, 14).iloc[-1])
+        # 单元素：锚点即自身，偏离度恒为 0（min_periods=0，无 NaN）。
+        assert e_bias(s, 5).iloc[-1] == pytest.approx(0.0)
 
     def test_short_series_below_period(self) -> None:
         s = pd.Series([1.0, 2.0, 3.0])
         assert sma(s, 20).isna().all()
         assert bollinger(s, 20)["mid"].isna().all()
         assert rsi(s, 14).isna().all()
+        assert len(e_bias(s, 20)) == 3
+        assert e_bias(s, 20).notna().all()
+
+    def test_e_bias_non_positive_prices_do_not_produce_inf(self) -> None:
+        """0/负价格不得产生 -inf（会经 EMA 递推污染后续全部值）。"""
+        s = pd.Series([10.0, 10.0, 0.0, -1.0, 10.0, 10.0])
+        out = e_bias(s, 3)
+        assert not np.isinf(out.to_numpy()).any()
+        assert pd.isna(out.iloc[2]) and pd.isna(out.iloc[3])
 
     def test_sma_known_values(self) -> None:
         s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])

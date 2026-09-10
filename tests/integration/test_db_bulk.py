@@ -156,6 +156,24 @@ class TestGetSeriesBulk:
             )
         assert bulk["MISSING.SS"].empty
 
+    def test_e_bias_bulk_matches_single(self, db, two_symbols) -> None:
+        """e_bias20 批量读 == 逐只读（标的大盘全市场扫描的取值路径）。"""
+        bars_a, _ = two_symbols
+        ind = compute_indicator_frame(bars_a, DEFAULT_STRATEGY_CONFIG)
+        db.save_indicator_daily("AAA.SS", ind, formula_version=INDICATOR_FORMULA_VERSION)
+
+        dfs = db.load_market_data_many(["AAA.SS", "BBB.SS"])
+        bulk = get_series_bulk(["AAA.SS", "BBB.SS"], "e_bias20", db=db, bars_map=dfs)
+
+        for symbol in ("AAA.SS", "BBB.SS"):
+            single = get_series(symbol, "e_bias20", db=db)
+            pd.testing.assert_series_equal(
+                bulk[symbol].reset_index(drop=True),
+                single.reset_index(drop=True),
+                check_names=False,
+            )
+        assert bulk["AAA.SS"].notna().all()
+
     def test_trend_column_rejected(self, db) -> None:
         with pytest.raises(ValueError):
             get_series_bulk(["AAA.SS"], "trend_score", db=db)

@@ -186,6 +186,15 @@ class TestSymbolDetailContract:
         expected = [str(d.date()) for d in pd.to_datetime(df["time"])][-5:]
         assert payload["dates"] == expected
         assert payload["meta"]["is_intraday"] is False
+        # E-BIAS 契约：与其余指标组一致 —— series 为全历史长度（symbol_detail
+        # 只截尾 dates/candles，indicators 各组一律全量返回），周期/参考线为
+        # 短配置字段。
+        total = len(df)
+        e_bias = payload["indicators"]["e_bias"]
+        assert len(e_bias["series"]) == total
+        assert len(payload["indicators"]["bias"]["6"]) == total
+        assert e_bias["period"] == 20
+        assert [line["value"] for line in e_bias["lines"]] == [15.0, 5.0, -5.0, 0.0]
 
     def test_empty_symbol_error(self) -> None:
         assert symbol_detail_service.symbol_detail_payload("")["ok"] is False

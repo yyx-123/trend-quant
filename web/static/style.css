@@ -782,6 +782,17 @@ button:disabled {
   letter-spacing: 0.08em;
   pointer-events: none;
 }
+/* 副图右上角的来源/口径说明（如 E-BIAS 的参考线未标定声明）：靠右对齐，
+   避开左上的标题胶囊。 */
+.market-subchart-note {
+  position: absolute;
+  top: 13px;
+  right: 14px;
+  z-index: 2;
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+}
 .market-table-head {
   display: flex;
   flex-wrap: wrap;

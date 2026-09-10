@@ -181,6 +181,60 @@ class SubjectMarketApiTest(unittest.TestCase):
         self.assertIsNone(aaa["macd_golden_count"])
         self.assertIsNone(aaa["macd_dead_count"])
 
+        # E-BIAS 均线偏离度（%，正 = 高于 20 日 EMA）：标的级为自身值，
+        # 类目级为成员成交额加权（与 trend_score 同聚合口径）。
+        bbb = instruments_by_symbol["BBB"]
+        self.assertGreater(aaa["e_bias_pct"], 0)      # 单调上涨 → 高于均线
+        self.assertGreater(bbb["e_bias_pct"], 0)
+        self.assertLess(ccc["e_bias_pct"], 0)         # 单调下跌 → 低于均线
+        self.assertAlmostEqual(
+            service["e_bias_pct"],
+            (aaa["e_bias_pct"] * 100 + bbb["e_bias_pct"] * 300) / 400,
+            places=4,
+        )
+        self.assertAlmostEqual(
+            l2["e_bias_pct"],
+            (aaa["e_bias_pct"] * 100 + bbb["e_bias_pct"] * 300 + ccc["e_bias_pct"] * 200) / 600,
+            places=4,
+        )
+        self.assertAlmostEqual(chemical["e_bias_pct"], ccc["e_bias_pct"], places=5)
+
+    def test_e_bias_pct_matches_core_log_bias(self) -> None:
+        """看板 e_bias_pct == core.e_bias(decimal) × 100（单位换算契约）。"""
+        from core.indicators import e_bias
+
+        history_rows = _rows("AAA", "医疗服务", 100.0, 0.5)
+
+        class FakeDb:
+            def load_market_dashboard_history(self, days: int) -> list[dict]:
+                return history_rows
+
+            def load_market_tail(self, days: int, price_mode: str = "qfq") -> list[dict]:
+                return history_rows
+
+            def indicator_cache_info(self, symbol: str) -> dict:
+                return {
+                    "indicator_rows": 0, "indicator_last": None, "indicator_version": None,
+                    "trend_rows": 0, "trend_last": None, "trend_version": None,
+                }
+
+            def get_param_set(self, param_set: str):
+                return None
+
+            def get_market_data_summary(self, symbol: str) -> dict:
+                return {"rows": 0, "start": None, "end": None}
+
+            def load_market_data(self, symbol: str):
+                return pd.DataFrame([r for r in history_rows if r["symbol"] == symbol])
+
+        with patch("services.dashboard.get_db", return_value=FakeDb()):
+            payload = build_subject_dashboard_payload()
+
+        item = payload["groups"][0]["items"][0]["children"][0]["children"][0]
+        closes = pd.Series([row["close"] for row in history_rows])
+        expected = float(e_bias(closes, 20).iloc[-1]) * 100.0
+        self.assertAlmostEqual(item["e_bias_pct"], expected, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

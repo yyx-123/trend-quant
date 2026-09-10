@@ -22,6 +22,21 @@ VOL_MA_PERIODS = (5, 10)
 TREND_MA_PERIODS = (5, 10)
 DEFAULT_RSI_PERIOD = 14
 
+# E-BIAS（均线偏离度·减法版）：周期锁定 20 日，与广发策略原文及通达信
+# 复刻口径一致（见 core.indicators.e_bias）。
+E_BIAS_PERIOD = 20
+# 参考线取自广发策略《如何区分主线是调整还是终结？》与《6大指标看居民入市》
+# 的减法版阈值。**该阈值来自 2012 年以来 A 股行业指数的分组统计，未在本
+# 项目 ETF 池上标定** —— 仅作看图辅助，不是已验证的交易信号，前端必须
+# 如实标注来源（改阈值前请先做回测标定）。
+E_BIAS_LINES: tuple[tuple[float, str], ...] = (
+    (15.0, "过热"),
+    (5.0, "失速"),
+    (-5.0, "止损参考"),
+    (0.0, "零轴"),
+)
+E_BIAS_LINE_NOTE = "参考线取自广发策略行业指数口径，未在本 ETF 池标定"
+
 
 def _num(value: object) -> float | None:
     return number6_or_none(value)
@@ -91,6 +106,16 @@ def compute_market_indicators(
     for period in BIAS_PERIODS:
         bias[str(period)] = _series(core_ind.bias(close, period) * 100)
 
+    # E-BIAS：core 出 decimal，展示层 ×100 转百分比（与上面 bias 同约定）。
+    # 盘中场景 df 已含当日合成K线（routers/market_view、symbol_detail 的
+    # intraday overlay），此处无需特判即得盘中实时值。
+    e_bias = {
+        "series": _series(core_ind.e_bias(close, E_BIAS_PERIOD) * 100),
+        "period": E_BIAS_PERIOD,
+        "lines": [{"value": value, "label": label} for value, label in E_BIAS_LINES],
+        "note": E_BIAS_LINE_NOTE,
+    }
+
     volume_ma = {
         str(period): _series(core_ind.sma(volume, period))
         for period in VOL_MA_PERIODS
@@ -110,6 +135,7 @@ def compute_market_indicators(
         "boll": boll,
         "macd": macd,
         "bias": bias,
+        "e_bias": e_bias,
         "volume_ma": volume_ma,
         "rsi": rsi,
         "trend": compute_trend_indicator(df, trend_config(trend_cfg)),

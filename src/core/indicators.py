@@ -6,6 +6,14 @@ Locked semantics (master plan v1.1):
 - RSI: Wilder smoothing (alpha = 1/period)
 - MACD histogram: (DIF - DEA) * 2  (China charting convention)
 - BIAS: decimal ratio (presentation layer multiplies by 100 when needed)
+- E-BIAS: decimal ratio, log-difference form (same presentation convention)
+
+Three distinct "bias" concepts coexist in this project — do not conflate:
+- ``bias``           (close - SMA(n)) / SMA(n)      arithmetic, SMA anchor
+- ``bias_atr_normed``(close - SMA(n)) / ATR(m)      volatility-normalized (rule_backtest)
+- ``e_bias``         ln(close) - EMA(ln close, n)   log-difference, EMA anchor
+(``survivorship_bias`` / ``bias_disclosures`` in batch_backtest_cells are
+survivorship disclosures, unrelated to any of the above.)
 
 Only price/volume-derived deterministic indicators belong here; anything
 stochastic or non-price-derived (e.g. random_uniform) must never be cached
@@ -19,9 +27,16 @@ import pandas as pd
 
 # Bump when any formula in this module changes (or cached-column semantics
 # change — v2: ema5/10/20 anchors renamed to ema_s/ema_m/ema_l, spans now
-# follow strategy n_short/n_mid/n_long); indicator cache tables keyed by
-# this version are rebuilt at startup (see data/indicator_store, future P1).
-INDICATOR_FORMULA_VERSION = 2
+# follow strategy n_short/n_mid/n_long; v3: added the e_bias20 cached column);
+# indicator cache tables keyed by this version are rebuilt at startup (see
+# data/indicator_store, future P1).
+#
+# NOTE: a *new* cached column always requires a bump. Without one,
+# indicator_store._cache_fresh still reports the cache fresh (it only
+# compares this version and the cached end date), so reads return the
+# freshly ALTERed-but-all-NULL column and never fall back to live compute —
+# the indicator silently stays empty forever.
+INDICATOR_FORMULA_VERSION = 3
 
 
 def sma(series: pd.Series, period: int, min_periods: int | None = None) -> pd.Series:
@@ -271,6 +286,47 @@ def bias(close: pd.Series, period: int = 20) -> pd.Series:
     """(close - SMA(period)) / SMA(period) as a decimal ratio."""
     ma = sma(close, period)
     return (close - ma) / ma
+
+
+def e_bias(close: pd.Series, period: int = 20) -> pd.Series:
+    """ln(close) - EMA(ln(close), period) as a decimal ratio ("E-BIAS").
+
+    The log-difference (subtraction) form of the moving-average deviation:
+    ``ln(C) - ln(E) = ln(C/E)``, so the value reads directly as the
+    percentage deviation from the EMA (0.05 == 5% above it) and is
+    independent of the instrument's price level.
+
+    Uses the **natural** logarithm throughout: mixing in log10 changes
+    nothing for the ratio form but materially changes this one (the two
+    log bases differ by a constant factor that does not cancel in a
+    difference of logs).
+
+    Why this form rather than the ratio form ``ln(close)/EMA(close) - 1``
+    that 广发策略 originally published: that one divides by ``ln(EMA)``,
+    which is ~0 for instruments priced near 1 and negative below 1 — it
+    diverges and even flips sign on exactly the low-priced ETFs this
+    project tracks. The subtraction form has no such failure mode.
+
+    The EMA is taken **over the log prices** (``EMA(ln C)``), matching the
+    Tongdaxin replication ``EMA20 := EMA(LN(CLOSE), 20); LOGBIAS: (LN(CLOSE)
+    - EMA20) * 100``. ``ln(EMA(C))`` is a different (and not equivalent)
+    quantity — keep the log inside the smoothing.
+
+    Distinct from :func:`bias` (SMA anchor, arithmetic difference) and from
+    the ATR-normalized bias inside ``core.trend``.
+
+    Warmup follows ``ema``'s default ``min_periods=0``: values exist from
+    the first bar with no NaN hole, but the earliest bars (roughly the
+    first few multiples of ``period``) have an unconverged anchor and are
+    not meaningful.
+    """
+    if close.empty:
+        return pd.Series(dtype=float)
+    values = pd.to_numeric(close, errors="coerce")
+    # Defensive: ln of a non-positive price is NaN/-inf and would poison
+    # every later value through the recursive EMA.
+    logs = np.log(values.where(values > 0))
+    return logs - ema(logs, period)
 
 
 def momentum_return(series: pd.Series, period: int = 20) -> pd.Series:

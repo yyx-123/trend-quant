@@ -141,7 +141,10 @@ def symbol_detail(symbol: str, days: int = 60, rsi_period: int = 14, intraday: b
     Returns:
         包含 dates、candles(OHLC)、volumes、indicators 的完整数据。
         indicators 包含: trend(score/ma/price_direction/confidence),
-        ma, atr, bias, boll, macd, rsi。
+        ma, atr, bias, e_bias, boll, macd, rsi。
+        e_bias 为均线偏离度（减法版）：ln(close)-EMA(ln close,20)，单位
+        为百分点（series 元素 5.0 表示高于 20 日 EMA 5%），lines 为其
+        参考线（取自广发策略行业指数口径，未在本 ETF 池标定，仅供参考）。
         meta.is_intraday 标记是否包含实时数据。
     """
     return symbol_detail_payload(symbol, days=days, rsi_period=rsi_period, intraday=intraday)

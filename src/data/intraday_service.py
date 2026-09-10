@@ -19,6 +19,7 @@ from audit.app_logger import get_logger
 from core.calendar import is_past_market_open, is_realtime_available, market_now
 from core.indicators import atr as _compute_atr
 from core.indicators import detect_macd_phase, kline_mini, macd_mini
+from core.indicators import e_bias as _compute_e_bias
 from core.numfmt import number_or_none as _number
 from core.trend import (
     _detect_trend_ma5_phase,
@@ -672,6 +673,10 @@ def build_intraday_dashboard(
         macd_phase_info: dict = {"phase": None, "days": None, "change_pct": None, "signal_date": None}
         kline_payload: dict = {"kline": [], "kline_ma5": []}
         macd_mini_payload: dict = {"macd_dif": [], "macd_dea": [], "macd_hist": [], "macd_dates": []}
+        # E-BIAS（均线偏离度）：默认值必须先于下面的 if 初始化。bars 在分支内
+        # 赋值，循环变量会跨标的残留上一轮的帧 —— 其他 payload 同样靠这里的
+        # 预置默认值规避，e_bias 必须照做。
+        e_bias_pct: float | None = None
         macd_src = hist if (hist is not None and not hist.empty) else tail
         if macd_src is not None and not macd_src.empty:
             bars = macd_src.copy()
@@ -686,6 +691,12 @@ def build_intraday_dashboard(
             macd_phase_info = detect_macd_phase(list(bars["close"]), macd_dates)
             kline_payload = kline_mini(bars)
             macd_mini_payload = macd_mini(bars)
+            # E-BIAS 与 MACD/K线 mini 复用同一份帧（历史 + 当日合成K线），
+            # 因此盘中偏离度含实时价，未收盘即为不稳定的盘中估算值。
+            # EMA20 在数百根内收敛，1y 尾部与全历史口径的差异可忽略。
+            # ×100：core 出 decimal，看板口径统一为百分比。
+            raw_e_bias = safe_float(_compute_e_bias(bars["close"], 20).iloc[-1])
+            e_bias_pct = None if raw_e_bias is None else raw_e_bias * 100.0
 
         name = str(meta.get("name") or name_map.get(symbol, "")).strip()
         if hist is not None and not hist.empty:
@@ -700,6 +711,8 @@ def build_intraday_dashboard(
                 "name": name or symbol,
                 "time": market_now().replace(tzinfo=None),
                 "trend_score": result["trend_score"],
+                # E-BIAS（均线偏离度，百分比）：含当日合成K线的盘中实时值。
+                "e_bias_pct": e_bias_pct,
                 # 初始化为 None：日涨幅必须由「今收/昨收」在下方重算得出，
                 # 尾部数据缺失时保持 None 而不是错误地显示价格本身。
                 "return_1d": None,
@@ -835,6 +848,7 @@ def build_intraday_dashboard(
             return None
 
         avg_trend = _weighted_avg_intra(rows_df, "trend_score")
+        avg_e_bias = _weighted_avg_intra(rows_df, "e_bias_pct")
         avg_1d = _weighted_avg_intra(rows_df, "return_1d")
         avg_5d = _weighted_avg_intra(rows_df, "return_5d")
         avg_20d = _weighted_avg_intra(rows_df, "return_20d")
@@ -852,6 +866,8 @@ def build_intraday_dashboard(
             "member_count": int(meta.get("member_count", len(rows_df))),
             "trend_score": avg_trend,
             "trend_ma5": latest_ma5 if latest_ma5 is not None else avg_trend,
+            # E-BIAS：类目级成交额加权，标的级即成员原值（与 EOD 看板同口径）。
+            "e_bias_pct": avg_e_bias,
             "daily_change_pct": avg_1d,
             "change_5d": avg_5d,
             "change_20d": avg_20d,
