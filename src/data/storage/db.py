@@ -2427,9 +2427,18 @@ class Database:
         return {r["symbol"]: int(r["n"]) for r in rows}
 
 
-def init_db(db_path: str | Path = "data/trend_quant.db") -> Database:
+def init_db(db_path: str | Path | None = None) -> Database:
+    """进程级单例初始化。
+
+    默认路径走 ``core.paths.default_db_path()``（项目根锚定 + 支持
+    ``TREND_QUANT_HOME`` 覆盖），与 ``Database()`` 的缺省一致。此前这里是
+    硬编码的 CWD 相对字符串 ``"data/trend_quant.db"``——与 core/paths 文档
+    「已消除 CWD 相对路径」相矛盾，且让 ``TREND_QUANT_HOME`` 对主应用
+    （app.main 的无参调用）完全失效：从非项目根目录启动会静默连到
+    另一个库。
+    """
     global _db_instance
-    _db_instance = Database(db_path)
+    _db_instance = Database(db_path if db_path is not None else default_db_path())
     return _db_instance
 
 
