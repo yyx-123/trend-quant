@@ -16,6 +16,7 @@ import pytest
 from core.indicators import atr as _core_atr
 from core.indicators import efficiency_ratio as _core_er
 from core.trend import (
+    _detect_trend_ma5_phase,
     calculate_trend_score_series,
     calculate_trend_score_snapshot,
     safe_float,
@@ -337,3 +338,63 @@ class TestSnapshotDirection:
         result = calculate_trend_score_snapshot(bars, CFG)
         assert result["ok"] is True
         assert result["trend_score"] < 0
+
+
+class TestTrendMa5Phase:
+    """趋势相位：判定量 = 趋势值 MA5 的符号（看板「趋势相位」列口径）。
+
+    MA5 由 ≤0 转正当日为趋势启动第 1 天，由 ≥0 转负当日为趋势结束第 1 天；
+    change_pct = 相位首日收盘 → 最新收盘。回扫逻辑与 detect_macd_phase 一致。
+    """
+
+    def test_start_phase_counts_from_flip_day(self) -> None:
+        # MA5 预热期 None 不参与相位；首个正值出现在 d4（第 3 个有效值）。
+        ma5 = [None, None, -1.0, -0.5, 0.5, 1.0, 2.0]
+        closes = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+        dates = [f"2026-01-0{i + 1}" for i in range(7)]
+
+        info = _detect_trend_ma5_phase(ma5, closes, dates)
+
+        assert info["phase"] == "start"
+        assert info["days"] == 3  # d4 / d5 / d6：翻正当日即第 1 天
+        assert info["signal_date"] == "2026-01-05"
+        assert info["change_pct"] == pytest.approx(round((16.0 / 14.0 - 1.0) * 100.0, 2))
+
+    def test_end_phase_counts_from_flip_day(self) -> None:
+        ma5 = [1.0, 0.5, -0.5, -1.0]
+        closes = [10.0, 11.0, 12.0, 13.0]
+        dates = [f"2026-02-0{i + 1}" for i in range(4)]
+
+        info = _detect_trend_ma5_phase(ma5, closes, dates)
+
+        assert info["phase"] == "end"
+        assert info["days"] == 2  # 转负当日 + 最新一日
+        assert info["signal_date"] == "2026-02-03"
+        assert info["change_pct"] == pytest.approx(round((13.0 / 12.0 - 1.0) * 100.0, 2))
+
+    def test_zero_ma5_breaks_the_run(self) -> None:
+        """MA5 == 0 不属于任何相位：回扫在零值处中断（与 MACD 相位同处理）。"""
+        ma5 = [1.0, 0.0, 2.0, 3.0]
+        closes = [10.0, 11.0, 12.0, 13.0]
+        dates = ["d1", "d2", "d3", "d4"]
+
+        info = _detect_trend_ma5_phase(ma5, closes, dates)
+
+        assert info["phase"] == "start"
+        assert info["days"] == 2
+        assert info["signal_date"] == "d3"
+
+    def test_latest_zero_or_missing_is_no_phase(self) -> None:
+        assert _detect_trend_ma5_phase([1.0, 0.0], [10.0, 11.0], ["d1", "d2"])["phase"] is None
+        assert _detect_trend_ma5_phase([-1.0, None], [10.0, 11.0], ["d1", "d2"])["phase"] is None
+
+    def test_insufficient_series_returns_default(self) -> None:
+        default = {"phase": None, "days": None, "change_pct": None, "signal_date": None}
+        assert _detect_trend_ma5_phase([None, None, 1.0], [1.0, 2.0, 3.0], ["a", "b", "c"]) == default
+        assert _detect_trend_ma5_phase([], [], []) == default
+
+    def test_invalid_signal_close_returns_default(self) -> None:
+        """相位首日收盘缺失/非正时不报相位（无法计算涨跌幅基准）。"""
+        ma5 = [1.0, 2.0]
+        assert _detect_trend_ma5_phase(ma5, [0.0, 10.0], ["d1", "d2"])["phase"] is None
+        assert _detect_trend_ma5_phase(ma5, [None, 10.0], ["d1", "d2"])["phase"] is None

@@ -99,10 +99,16 @@ class SubjectMarketApiTest(unittest.TestCase):
         instrument_avg = {item["symbol"]: item["amount_avg20"] for item in service["children"]}
         self.assertEqual(instrument_avg, {"AAA": 100.0, "BBB": 300.0})
         self.assertEqual(l2["amount_avg20"], 600.0)
-        self.assertEqual(len(service["trend_history"]), 61)
+        self.assertEqual(len(service["trend_history"]), 42)
         self.assertAlmostEqual(service["trend_history"][-1], service["trend_ma5"])
-        self.assertEqual(len(service["trend_upper_history"]), 61)
-        self.assertEqual(len(service["trend_lower_history"]), 61)
+        self.assertEqual(len(service["trend_upper_history"]), 42)
+        self.assertEqual(len(service["trend_lower_history"]), 42)
+        # 逐日原始趋势值与 MA5 序列同窗口、逐位对齐（趋势 mini 图悬停数据源）。
+        self.assertEqual(len(service["trend_score_history"]), 42)
+        self.assertEqual(service["trend_score_history"][-1], service["trend_score"])
+        # 逐日强度与 trend_dates 对齐、末位等于「强度」列（同口径）。
+        self.assertEqual(len(service["strength_history"]), 42)
+        self.assertEqual(service["strength_history"][-1], service["strength"])
         self.assertGreaterEqual(service["trend_upper_history"][-1], service["trend_history"][-1])
         self.assertLessEqual(service["trend_lower_history"][-1], service["trend_history"][-1])
         chemical = next(item for item in l2["children"] if item["category_l3"] == "化学制药")
@@ -127,7 +133,7 @@ class SubjectMarketApiTest(unittest.TestCase):
         self.assertAlmostEqual(service["daily_change_pct"], (latest_a * 100 + latest_b * 300) / 4)
         self.assertEqual(service["strength"], 100)
 
-        # MACD 金叉/死叉相位 + 近30日K线：仅具体标的级有值，类目聚合行为占位。
+        # MACD 金叉/死叉相位 + 近40日K线：仅具体标的级有值，类目聚合行为占位。
         instruments_by_symbol = {
             item["symbol"]: item
             for l3 in l2["children"]
@@ -140,12 +146,20 @@ class SubjectMarketApiTest(unittest.TestCase):
         self.assertEqual(ccc["macd_phase"], "dead")
         self.assertGreaterEqual(aaa["macd_phase_days"], 1)
         self.assertIsNotNone(aaa["macd_phase_signal_date"])
-        self.assertEqual(len(aaa["kline"]), 30)
-        self.assertEqual(len(aaa["kline_ma5"]), 30)
+        # 趋势相位（趋势值 MA5 符号）：AAA 单调上涨 → 启动、CCC 单调下跌 → 结束。
+        self.assertEqual(aaa["trend_ma5_phase"], "start")
+        self.assertEqual(ccc["trend_ma5_phase"], "end")
+        self.assertGreaterEqual(aaa["trend_ma5_phase_days"], 1)
+        self.assertIn(aaa["trend_ma5_phase_signal_date"], {row["time"][:10] for row in history_rows})
+        # 涨跌幅 = 相位首日收盘 → 最新收盘；AAA 一路上涨故为正、CCC 下跌故为负。
+        self.assertGreater(aaa["trend_ma5_phase_change_pct"], 0)
+        self.assertLess(ccc["trend_ma5_phase_change_pct"], 0)
+        self.assertEqual(len(aaa["kline"]), 40)
+        self.assertEqual(len(aaa["kline_ma5"]), 40)
         # 末根K线 = 最后一根日K；末位 MA5 = 最后 5 根收盘均值。
         last_close = 100.0 + 0.5 * 89
         self.assertAlmostEqual(aaa["kline"][-1]["c"], last_close)
-        self.assertAlmostEqual(aaa["kline"][0]["c"], 100.0 + 0.5 * 60)
+        self.assertAlmostEqual(aaa["kline"][0]["c"], 100.0 + 0.5 * 50)
         self.assertAlmostEqual(
             aaa["kline_ma5"][-1],
             sum(100.0 + 0.5 * i for i in range(85, 90)) / 5,

@@ -20,11 +20,17 @@ from core.calendar import is_past_market_open, is_realtime_available, market_now
 from core.indicators import atr as _compute_atr
 from core.indicators import detect_macd_phase, kline_mini, macd_mini
 from core.numfmt import number_or_none as _number
-from core.trend import _detect_trend_phase, calculate_trend_score_snapshot, safe_float
+from core.trend import (
+    _detect_trend_ma5_phase,
+    _detect_trend_phase,
+    calculate_trend_score_snapshot,
+    safe_float,
+)
 from data.service import DataService, get_data_service
 from data.storage.db import Database
 from services.dashboard_common import DISPLAY_DAYS as _DISPLAY_DAYS
 from services.dashboard_common import assign_strength as _assign_strength
+from services.dashboard_common import assign_strength_history as _assign_strength_history
 from services.dashboard_common import key_tuple as _key_tuple
 from services.dashboard_common import ma5 as _ma5
 from services.dashboard_common import macd_counts as _macd_counts
@@ -655,6 +661,10 @@ def build_intraday_dashboard(
                 if sig_close and sig_close > 0:
                     phase_info["change_pct"] = round((intraday_price / sig_close - 1.0) * 100.0, 2)
 
+        # 趋势相位（看板「趋势相位」列）：判定量是趋势值 MA5 的符号，与 EOD
+        # 看板同口径；extended_closes 末位已是实时价，故盘中当日启动/结束即可见。
+        ma5_phase_info = _detect_trend_ma5_phase(extended_ma5, extended_closes, extended_dates)
+
         # --- MACD 金叉/死叉相位 + 近10日K线 --------------------------------
         # 与 EOD 看板同口径（1y qfq 尾部），盘中把当日合成K线追加在末尾 —
         # 盘中金叉/死叉当天即可见；涨跌幅基准为金叉/死叉首日收盘，分子为
@@ -714,6 +724,10 @@ def build_intraday_dashboard(
                 "trend_phase_days": phase_info["days"],
                 "trend_phase_change_pct": phase_info["change_pct"],
                 "trend_phase_signal_date": phase_info["signal_date"],
+                "trend_ma5_phase": ma5_phase_info["phase"],
+                "trend_ma5_phase_days": ma5_phase_info["days"],
+                "trend_ma5_phase_change_pct": ma5_phase_info["change_pct"],
+                "trend_ma5_phase_signal_date": ma5_phase_info["signal_date"],
                 "macd_phase": macd_phase_info["phase"],
                 "macd_phase_days": macd_phase_info["days"],
                 "macd_phase_change_pct": macd_phase_info["change_pct"],
@@ -844,6 +858,9 @@ def build_intraday_dashboard(
             "change_60d": avg_60d,
             "amount": total_amount,
             "trend_history": ma5_series[-_DISPLAY_DAYS:],
+            # 逐日原始趋势值（未做 MA5 平滑），与 trend_dates 逐位对齐，
+            # 供前端趋势 mini 图悬停提示使用（与 EOD 看板同口径）。
+            "trend_score_history": series_scores[-_DISPLAY_DAYS:],
             "trend_dates": series_dates[-_DISPLAY_DAYS:],
             "as_of": market_now().replace(tzinfo=None).date().isoformat(),
             "priority_l1": _priority(meta.get("priority_l1", 9999)),
@@ -859,6 +876,11 @@ def build_intraday_dashboard(
             result["trend_phase_days"] = _number(row.get("trend_phase_days"))
             result["trend_phase_change_pct"] = _number(row.get("trend_phase_change_pct"))
             result["trend_phase_signal_date"] = row.get("trend_phase_signal_date")
+            # 趋势相位（趋势值 MA5 符号）：仅标的行有值，与 MACD 相位并列展示。
+            result["trend_ma5_phase"] = row.get("trend_ma5_phase")
+            result["trend_ma5_phase_days"] = _number(row.get("trend_ma5_phase_days"))
+            result["trend_ma5_phase_change_pct"] = _number(row.get("trend_ma5_phase_change_pct"))
+            result["trend_ma5_phase_signal_date"] = row.get("trend_ma5_phase_signal_date")
             result["macd_phase"] = row.get("macd_phase")
             result["macd_phase_days"] = _number(row.get("macd_phase_days"))
             result["macd_phase_change_pct"] = _number(row.get("macd_phase_change_pct"))
@@ -875,6 +897,11 @@ def build_intraday_dashboard(
             result["trend_phase_days"] = None
             result["trend_phase_change_pct"] = None
             result["trend_phase_signal_date"] = None
+            # 趋势相位与 MACD 相位一样，仅标的行有值（类目行无 K 线/收盘序列）。
+            result["trend_ma5_phase"] = None
+            result["trend_ma5_phase_days"] = None
+            result["trend_ma5_phase_change_pct"] = None
+            result["trend_ma5_phase_signal_date"] = None
             # 类目聚合行：K线无聚合意义，看板显示「—」；
             # MACD 相位聚合为金叉/死叉家数，在嵌套完成后按成员填充。
             result["macd_phase"] = None
@@ -922,6 +949,11 @@ def build_intraday_dashboard(
     _assign_strength(l2_items, ("category_l1",))
     _assign_strength(l3_items, ("category_l1",))
     _assign_strength(instruments, ("category_l1",))
+
+    # 逐日强度（趋势 mini 图悬停数据源）：与 EOD 看板同口径、同调用位置。
+    _assign_strength_history(l2_items, ("category_l1",))
+    _assign_strength_history(l3_items, ("category_l1",))
+    _assign_strength_history(instruments, ("category_l1",))
 
     # Nest: instruments → l3 → l2.
     inst_by_l3: dict[tuple[str, str, str], list[dict]] = defaultdict(list)

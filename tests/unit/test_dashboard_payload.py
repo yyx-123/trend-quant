@@ -21,6 +21,8 @@ def _fake_board_payload() -> dict:
         "macd_hist": [0.0] * 30,
         "macd_dates": [f"2026-08-{i + 1:02d}" for i in range(30)],
         "trend_history": [1.0] * 61,
+        "trend_score_history": [0.9] * 61,
+        "strength_history": [50] * 61,
         "trend_dates": [f"d{i}" for i in range(61)],
     }
     l3 = {
@@ -46,7 +48,7 @@ class TestDashboardLite:
         assert len(inst["macd_dif"]) == 2
         assert len(inst["macd_dea"]) == 2
         assert len(inst["macd_dates"]) == 2
-        for dropped in ("kline_ma5", "macd_hist", "trend_history", "trend_dates"):
+        for dropped in ("kline_ma5", "macd_hist", "trend_history", "trend_score_history", "strength_history", "trend_dates"):
             assert dropped not in inst
         # 类目聚合行的长序列同样删除
         l3 = lite["groups"][0]["items"][0]["children"][0]

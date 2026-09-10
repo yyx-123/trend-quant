@@ -2126,7 +2126,7 @@ details > summary::marker {
 .index-group-head { display:flex; justify-content:space-between; gap:12px; padding: 11px 20px; color:#f8fbf8; background:#34454a; }
 .index-group-head strong { font-size:14px; letter-spacing:.02em; }
 .index-group-head span { color:#d3dfda; font-size:12px; }
-.index-grid-head, .index-row { display:grid; grid-template-columns:minmax(150px,1.3fr) minmax(96px,.7fr) minmax(120px,1fr) 74px minmax(90px,.8fr) minmax(190px,.9fr) minmax(120px,1fr) 60px 64px; align-items:center; gap:12px; padding: 0 20px; }
+.index-grid-head, .index-row { display:grid; grid-template-columns:minmax(150px,1.3fr) minmax(96px,.7fr) minmax(120px,1fr) 74px minmax(90px,.8fr) minmax(190px,.9fr) minmax(120px,1fr) minmax(190px,.9fr) 60px 64px; align-items:center; gap:12px; padding: 0 20px; }
 .index-grid-head { min-height:34px; color:#75847d; background:#f2f5f1; font-size:12px; font-weight:800; }
 .index-grid-head span:not(:first-child) { text-align:center; }
 .index-row > :not(:first-child) { text-align:center; }
@@ -2143,6 +2143,7 @@ details > summary::marker {
 .is-negative { color:#187b5f; }
 .index-change.is-negative { background:rgba(43, 151, 107, .12); }
 .index-phase { font-size:13px; font-weight:700; text-align:center; line-height:1.4; white-space:nowrap; }
+.index-tphase { font-size:13px; font-weight:700; text-align:center; line-height:1.4; white-space:nowrap; }
 .index-phase-na { color:#a8b1ac; font-weight:500; }
 .index-kspark { height:52px; }
 .index-kspark svg { width:100%; height:100%; overflow:visible; }
@@ -2183,7 +2184,7 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
 /* 表体横向滚动容器：窄视口下表格整体横向滚动，而不是裁掉右侧列；
    宽视口不受影响（min-width 只是下限，fr 列仍会拉伸铺满）。 */
 .index-table-scroll { overflow-x: auto; }
-.index-table-scroll .index-grid-head, .index-table-scroll .index-row, .index-table-scroll .subject-l2-head { min-width: 1100px; }
+.index-table-scroll .index-grid-head, .index-table-scroll .index-row, .index-table-scroll .subject-l2-head { min-width: 1302px; }
 /* 持仓金额列（标的看板，2026-08 登录墙后新增）：金额 + 占比两行 */
 .index-holding { display: grid; gap: 2px; justify-items: center; }
 .index-holding strong { font-size: 14px; color: var(--text); }
@@ -2625,8 +2626,8 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   font-size: 11px;
   color: #667680;
 }
-/* mini 图（日K / MACD）悬停提示与十字线 ------------------------------------ */
-.index-kspark, .index-mspark { position: relative; }
+/* mini 图（日K / MACD / 趋势）悬停提示与十字线 -------------------------------- */
+.index-kspark, .index-mspark, .index-spark { position: relative; }
 .chart-cross {
   position: absolute;
   top: 0;
@@ -3585,8 +3586,9 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
     grid-template-columns: repeat(7, minmax(0, 1fr));
     grid-template-areas:
       "name name name name view view view"
-      "phase phase holding holding change change strength"
-      "kspark kspark mspark mspark spark spark spark";
+      "phase phase tphase tphase change change strength"
+      "holding holding kspark kspark mspark mspark mspark"
+      "spark spark spark spark spark spark spark";
     gap: 10px;
     min-height: 0;
     padding: 12px 14px;
@@ -3605,6 +3607,13 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
 
   .index-board-page .index-phase {
     grid-area: phase;
+    font-size: 12px;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .index-board-page .index-tphase {
+    grid-area: tphase;
     font-size: 12px;
     text-align: left;
     white-space: normal;

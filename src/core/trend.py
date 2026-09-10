@@ -392,3 +392,67 @@ def _detect_trend_phase(
         "signal_date": signal_date,
     }
 
+
+def _detect_trend_ma5_phase(
+    trend_ma5: list[float | None],
+    closes: list[float | None],
+    dates: list[str],
+) -> dict:
+    """Detect the trend phase by the sign of the trend-value MA5.
+
+    与 ``detect_macd_phase`` 同一套回扫口径，只是把判定量换成趋势值 MA5：
+
+    - 趋势启动 (start): 趋势值 MA5 由 ≤0 转正当日为第 1 天；
+    - 趋势结束 (end):  趋势值 MA5 由 ≥0 转负当日为第 1 天；
+    - 最新一根 MA5 == 0 视为无相位（罕见）。
+
+    MA5 不足 5 根的前几根为 None，不参与相位；``closes`` 与 MA5 逐位对齐，
+    change_pct 为「相位首日收盘 → 最新收盘」的百分比变化（盘中场景收盘价
+    传入合成K线的实时价，故当日启动/结束当天即可见）。
+
+    Returns a dict with keys:
+      phase: "start" | "end" | None
+      days:  int (the transition bar is day 1, counted in bars)
+      change_pct: float
+      signal_date: str | None (ISO date of the transition bar)
+    """
+    default: dict = {"phase": None, "days": None, "change_pct": None, "signal_date": None}
+    frame = pd.DataFrame(
+        {
+            "ma5": pd.to_numeric(pd.Series(trend_ma5), errors="coerce"),
+            "close": pd.to_numeric(pd.Series(closes), errors="coerce"),
+        }
+    )
+    frame["date"] = list(dates) if dates is not None else [None] * len(frame)
+    # MA5 预热期为 None：丢弃这些行（close/date 同步丢弃，保持逐位对齐）。
+    frame = frame.dropna(subset=["ma5"]).reset_index(drop=True)
+    if len(frame) < 2:
+        return default
+
+    values = frame["ma5"].to_numpy(dtype=float)
+    if not np.isfinite(values[-1]) or values[-1] == 0.0:
+        return default
+    phase = "start" if values[-1] > 0 else "end"
+
+    # Walk backwards while MA5 stays on the current side; the first bar of the
+    # run is the transition bar (day 1). MA5 == 0 bars break the run.
+    latest_idx = len(values) - 1
+    signal_idx = latest_idx
+    for j in range(latest_idx - 1, -1, -1):
+        value = values[j]
+        if not np.isfinite(value) or value == 0.0 or (value > 0) != (values[-1] > 0):
+            break
+        signal_idx = j
+
+    latest_close = safe_float(frame["close"].iloc[latest_idx])
+    signal_close = safe_float(frame["close"].iloc[signal_idx])
+    if latest_close is None or signal_close is None or latest_close <= 0 or signal_close <= 0:
+        return default
+
+    return {
+        "phase": phase,
+        "days": latest_idx - signal_idx + 1,
+        "change_pct": round((latest_close / signal_close - 1.0) * 100.0, 2),
+        "signal_date": frame["date"].iloc[signal_idx],
+    }
+

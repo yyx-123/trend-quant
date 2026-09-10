@@ -22,6 +22,20 @@
     }
     return '<span class="index-phase-na">—</span>';
   };
+  // 趋势相位：判定量 = 趋势值 MA5 的符号（MA5 转正首日 = 启动第 1 天，由正
+  // 或零转负首日 = 结束第 1 天）。展示格式与配色完全对齐 MACD 相位：
+  // 启动=红（is-positive）、结束=绿（is-negative），涨跌幅 = 首日收盘→最新收盘。
+  const fmtTrendPhase = (item) => {
+    if (item.trend_ma5_phase != null && item.trend_ma5_phase_days != null) {
+      const phaseLabel = item.trend_ma5_phase === 'start' ? '启动' : '结束';
+      const phaseClass = item.trend_ma5_phase === 'start' ? 'is-positive' : 'is-negative';
+      const changeVal = item.trend_ma5_phase_change_pct != null ? item.trend_ma5_phase_change_pct.toFixed(2) : '—';
+      const changeSign = item.trend_ma5_phase_change_pct != null && item.trend_ma5_phase_change_pct >= 0 ? '+' : '';
+      const changeClass = item.trend_ma5_phase_change_pct != null ? (item.trend_ma5_phase_change_pct >= 0 ? 'is-positive' : 'is-negative') : '';
+      return `<span class="${phaseClass}">${phaseLabel}第 ${item.trend_ma5_phase_days} 天</span>，涨跌幅：<span class="${changeClass}">${changeSign}${changeVal}%</span>`;
+    }
+    return '<span class="index-phase-na">—</span>';
+  };
   // 类目行（一级头 / 二级分隔行）的金叉死叉家数：成员相位计数。
   const fmtCrossCounts = (golden, dead) => {
     if ((golden == null && dead == null) || (!golden && !dead)) return '';
@@ -439,9 +453,12 @@
     heatmapResizeTimer = setTimeout(() => renderHeatmap(heatmapPayload), 160);
   });
 
+// 趋势 mini 图绘图区左边界（viewBox 百分比）：绘图与悬停十字线共用。
+const SPARK_PLOT_LEFT = 18;
+
 const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const axisTicks = [-15, -10, -5, 0, 5, 10, 15];
-    const plotLeft = 18;
+    const plotLeft = SPARK_PLOT_LEFT;
     const clamp = (value) => Math.max(-15, Math.min(15, value));
     const xFor = (index) => points.length > 1 ? plotLeft + index / (points.length - 1) * (100 - plotLeft) : (100 + plotLeft) / 2;
     const series = points.map((value, index) => ({ index, value, x: xFor(index) }));
@@ -500,9 +517,9 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const yLabels = axisTicks.map(value => `<span class="spark-y-label" style="top:${y(value).toFixed(1)}%">${value > 0 ? '+' : ''}${value}</span>`).join('');
     const upperLine = pointsFor(upperPoints);
     const lowerLine = pointsFor(lowerPoints);
-    return `<div class="spark-plot">${yLabels}<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近三月趋势 MA5"><g class="spark-y-axis">${yGrid}</g><g class="spark-time-axis">${timeTicks.join('')}</g>${band ? `<polygon class="spark-range-band" points="${band}"/>` : ''}${upperLine ? `<polyline class="spark-bound spark-bound-upper" points="${upperLine}"/>` : ''}${lowerLine ? `<polyline class="spark-bound spark-bound-lower" points="${lowerLine}"/>` : ''}<line class="spark-zero-axis" x1="${plotLeft}" y1="${zeroY}" x2="100" y2="${zeroY}"/>${segments.join('')}</svg><span class="spark-latest-dot ${latestClass}" style="left:${latest.x.toFixed(1)}%;top:${y(latest.value).toFixed(1)}%" aria-label="最新趋势值"></span></div>`;
+    return `<div class="spark-plot">${yLabels}<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近二月趋势 MA5"><g class="spark-y-axis">${yGrid}</g><g class="spark-time-axis">${timeTicks.join('')}</g>${band ? `<polygon class="spark-range-band" points="${band}"/>` : ''}${upperLine ? `<polyline class="spark-bound spark-bound-upper" points="${upperLine}"/>` : ''}${lowerLine ? `<polyline class="spark-bound spark-bound-lower" points="${lowerLine}"/>` : ''}<line class="spark-zero-axis" x1="${plotLeft}" y1="${zeroY}" x2="100" y2="${zeroY}"/>${segments.join('')}</svg><span class="spark-latest-dot ${latestClass}" style="left:${latest.x.toFixed(1)}%;top:${y(latest.value).toFixed(1)}%" aria-label="最新趋势值"></span></div>`;
   };
-  // 近30日K线 mini 图：蜡烛（红涨绿跌）+ 5日均线。盘中模式下最后一根为
+  // 近40日K线 mini 图：蜡烛（红涨绿跌）+ 5日均线。盘中模式下最后一根为
   // 当日实时合成K线。仅具体标的行有数据，类目聚合行显示「—」。
   // dif/dea 与 candles 同窗口逐根对齐（同一 tail(30)）：据此在图内标注窗口
   // 内全部金叉（橙色小上箭头，置于该根K线低点下方）与死叉（黑色小下箭头，
@@ -585,10 +602,10 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       .map((value, i) => Number.isFinite(value) ? `${((i + 0.5) * step).toFixed(1)},${y(value).toFixed(1)}` : '')
       .filter(Boolean).join(' ');
     const maLine = maPoints ? `<polyline class="kspark-ma5" points="${maPoints}"/>` : '';
-    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近30日K线">${parts.join('')}${maLine}</svg>`;
+    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="近40日K线">${parts.join('')}${maLine}</svg>`;
   };
   // MACD mini 图：红柱/绿柱（hist = DIF-DEA 两倍）+ DIF/DEA 双线，根数与
-  // 近20日K线 mini 图一致（同一尾部窗口）。仅具体标的行有数据。
+  // 近40日K线 mini 图一致（同一尾部窗口）。仅具体标的行有数据。
   const macdSpark = (dif, dea, hist) => {
     if (!Array.isArray(hist) || !hist.length) return '<span class="spark-empty">—</span>';
     const n = hist.length;
@@ -688,6 +705,10 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       if (!Number.isFinite(item.macd_phase_days)) return null;
       return item.macd_phase === 'golden' ? item.macd_phase_days : -item.macd_phase_days;
     }
+    if (key === 'tphase') {
+      if (!Number.isFinite(item.trend_ma5_phase_days)) return null;
+      return item.trend_ma5_phase === 'start' ? item.trend_ma5_phase_days : -item.trend_ma5_phase_days;
+    }
     return null;
   };
   const cycleBoardSort = (key) => {
@@ -699,7 +720,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     const arrow = active ? (boardSort.dir === -1 ? '⬇️' : '⬆️') : '';
     return `<span class="sort-head${active ? ' is-sorted' : ''}" data-sort-key="${key}" title="点击排序（${esc(tip)}）：降序 → 升序 → 原始顺序">${label}<span class="sort-arrow">${arrow}</span></span>`;
   };
-  // 具体标的行：持仓金额/相位/日变动/近30日K线/MACD/趋势MA5/强度/操作（查看+试算）。
+  // 具体标的行：持仓金额/相位/日变动/近40日K线/MACD/趋势MA5/强度/操作（查看+试算）。
   const renderInstrumentRow = (item) => {
     const viewBtn = item.symbol
       ? `<a class="index-view-btn" href="/market-view?symbol=${encodeURIComponent(item.symbol)}" title="在标的查看页打开 ${esc(item.symbol)}">查看</a>`
@@ -728,7 +749,8 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
       <div class="index-mspark">${macdSpark(item.macd_dif || [], item.macd_dea || [], item.macd_hist || [])}<div class="chart-cross" hidden></div></div>
       <div class="index-phase">${fmtPhase(item)}</div>
-      <div class="index-spark">${sparkline(item.trend_history || [], item.trend_dates || [], item.trend_upper_history || [], item.trend_lower_history || [])}</div>
+      <div class="index-spark">${sparkline(item.trend_history || [], item.trend_dates || [], item.trend_upper_history || [], item.trend_lower_history || [])}<div class="chart-cross" hidden></div></div>
+      <div class="index-tphase">${fmtTrendPhase(item)}</div>
       <div class="index-strength">${item.strength == null ? '—' : item.strength}</div>
       <div class="index-view">${viewBtn}${trialBtn}</div>
     </div>`;
@@ -748,7 +770,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       const rows = ordered.map(renderInstrumentRow).join('');
       return `<div class="subject-l2-head"${section ? ` id="${esc(section.id)}"` : ''}><strong>${esc(l2.category_l2)}</strong><span class="subject-l2-meta">${dividerCross}</span></div>${rows}`;
     }).join('');
-    const gridHead = `<div class="index-grid-head"><span>标的</span>${sortHeadHtml('holding', '持仓金额', '按持仓金额（看板最新价×持仓份数），各类目内；无持仓为空')}<span>近30日K线</span>${sortHeadHtml('change', '日变动', '按日涨跌幅，各类目内')}<span>MACD</span>${sortHeadHtml('phase', 'MACD相位', '金叉久 > 金叉新 > 死叉新 > 死叉久，各类目内')}<span>近3月趋势 MA5</span>${sortHeadHtml('strength', '强度', '按强度，各类目内')}<span></span></div>`;
+    const gridHead = `<div class="index-grid-head"><span>标的</span>${sortHeadHtml('holding', '持仓金额', '按持仓金额（看板最新价×持仓份数），各类目内；无持仓为空')}<span>近40日K线</span>${sortHeadHtml('change', '日变动', '按日涨跌幅，各类目内')}<span>MACD</span>${sortHeadHtml('phase', 'MACD相位', '金叉久 > 金叉新 > 死叉新 > 死叉久，各类目内')}<span>近2月趋势 MA5</span>${sortHeadHtml('tphase', '趋势相位', '启动久 > 启动新 > 结束新 > 结束久，各类目内')}${sortHeadHtml('strength', '强度', '按强度，各类目内')}<span></span></div>`;
     return `<section class="index-provider subject-l1"><div class="index-provider-head"><h2>${esc(group.category_l1)}</h2><span>${headMeta}</span></div><div class="index-table-scroll">${gridHead}${body}</div></section>`;
   };
   const renderBoard = (data) => {
@@ -770,7 +792,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     }
   };
 
-  // ---- mini 图悬停提示（日K / MACD）---------------------------------------
+  // ---- mini 图悬停提示（日K / MACD / 趋势）---------------------------------
   const chartTip = document.createElement('div');
   chartTip.className = 'chart-tip';
   chartTip.hidden = true;
@@ -794,7 +816,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     }
   };
 
-  const showChartTip = (event, container, html, index, count) => {
+  const showChartTip = (event, container, html, xPercent) => {
     chartTip.innerHTML = html;
     chartTip.hidden = false;
     const tipRect = chartTip.getBoundingClientRect();
@@ -804,11 +826,11 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     if (y + tipRect.height > window.innerHeight - 8) y = event.clientY - tipRect.height - 14;
     chartTip.style.left = `${Math.max(8, x)}px`;
     chartTip.style.top = `${Math.max(8, y)}px`;
-    // 十字线：定位到当前柱子中心。
+    // 十字线：定位到当前点中心（xPercent 为容器宽度百分比）。
     const cross = container.querySelector('.chart-cross');
     if (cross) {
       if (chartCrossEl && chartCrossEl !== cross) chartCrossEl.hidden = true;
-      cross.style.left = `${((index + 0.5) / count * 100).toFixed(2)}%`;
+      cross.style.left = `${xPercent.toFixed(2)}%`;
       cross.hidden = false;
       chartCrossEl = cross;
     }
@@ -833,6 +855,21 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       `<tr><td>MACD柱</td><td><span class="${histCls}">${fmtMacdVal(hist)}</span></td></tr>` +
       `</table>`;
   };
+  // 趋势 mini 图悬停：逐日原始趋势值 + 趋势值 MA5（mini 图主线即 MA5 序列）
+  // + 逐日同级强度百分位（服务端构建时按日横截面算好，与「强度」列同口径）。
+  const trendValHtml = (value) => {
+    if (value == null || !Number.isFinite(value)) return '<span>—</span>';
+    const cls = value >= 0 ? 'heat-tip-pos' : 'heat-tip-neg';
+    return `<span class="${cls}">${value >= 0 ? '+' : ''}${value.toFixed(2)}</span>`;
+  };
+  const trendStrengthHtml = (value) =>
+    value == null || !Number.isFinite(value) ? '<span>—</span>' : `<span>${Math.round(value)}</span>`;
+  const trendTipHtml = (date, score, ma5, strengthValue) =>
+    `<div class="heat-tip-title">${esc(date || '')}</div><table class="heat-tip-table">` +
+    `<tr><td>趋势值</td><td>${trendValHtml(score)}</td></tr>` +
+    `<tr><td>趋势值MA5</td><td>${trendValHtml(ma5)}</td></tr>` +
+    `<tr><td>强度</td><td>${trendStrengthHtml(strengthValue)}</td></tr>` +
+    `</table>`;
   let chartTipRafPending = false;
   let chartTipLastEvent = null;
   board.addEventListener('mousemove', (event) => {
@@ -847,7 +884,7 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
   });
   const handleBoardMouseMove = (event) => {
     if (!event) return;
-    const svg = event.target.closest('.index-kspark svg, .index-mspark svg');
+    const svg = event.target.closest('.index-kspark svg, .index-mspark svg, .index-spark svg');
     const row = event.target.closest('.subject-inst-row');
     if (!svg || !row) {
       hideChartTip();
@@ -858,20 +895,50 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       hideChartTip();
       return;
     }
-    const container = svg.parentElement;
+    // 趋势图 svg 外层还包着 .spark-plot，容器必须用 closest 向上找。
+    const container = svg.closest('.index-kspark, .index-mspark, .index-spark');
     const isKline = container.classList.contains('index-kspark');
-    const count = isKline ? (inst.kline || []).length : (inst.macd_hist || []).length;
-    if (!count) {
-      hideChartTip();
-      return;
-    }
+    const isTrend = container.classList.contains('index-spark');
     const rect = svg.getBoundingClientRect();
     const ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0;
-    const index = Math.max(0, Math.min(count - 1, Math.floor(ratio * count)));
-    const html = isKline
-      ? klineTipHtml(inst.kline[index])
-      : macdTipHtml((inst.macd_dates || [])[index], (inst.macd_dif || [])[index], (inst.macd_dea || [])[index], (inst.macd_hist || [])[index]);
-    showChartTip(event, container, html, index, count);
+    let count;
+    let index;
+    let xPercent;
+    if (isTrend) {
+      // 趋势图为逐点连线：悬停点吸附到最近序列点，十字线落在该点 x 坐标上。
+      count = (inst.trend_history || []).length;
+      if (!count) {
+        hideChartTip();
+        return;
+      }
+      const frac = (ratio * 100 - SPARK_PLOT_LEFT) / (100 - SPARK_PLOT_LEFT);
+      index = Math.max(0, Math.min(count - 1, Math.round(frac * (count - 1))));
+      xPercent = count > 1
+        ? SPARK_PLOT_LEFT + index / (count - 1) * (100 - SPARK_PLOT_LEFT)
+        : (100 + SPARK_PLOT_LEFT) / 2;
+    } else {
+      count = isKline ? (inst.kline || []).length : (inst.macd_hist || []).length;
+      if (!count) {
+        hideChartTip();
+        return;
+      }
+      index = Math.max(0, Math.min(count - 1, Math.floor(ratio * count)));
+      xPercent = (index + 0.5) / count * 100;
+    }
+    let html;
+    if (isKline) {
+      html = klineTipHtml(inst.kline[index]);
+    } else if (isTrend) {
+      html = trendTipHtml(
+        (inst.trend_dates || [])[index],
+        (inst.trend_score_history || [])[index],
+        (inst.trend_history || [])[index],
+        (inst.strength_history || [])[index],
+      );
+    } else {
+      html = macdTipHtml((inst.macd_dates || [])[index], (inst.macd_dif || [])[index], (inst.macd_dea || [])[index], (inst.macd_hist || [])[index]);
+    }
+    showChartTip(event, container, html, xPercent);
   };
   board.addEventListener('mouseleave', hideChartTip);
   window.addEventListener('scroll', hideChartTip, { passive: true });

@@ -16,7 +16,7 @@ import pandas as pd
 
 from audit.app_logger import get_logger
 from core.indicators import detect_macd_phase, kline_mini, macd_mini
-from core.trend import TREND_FORMULA_VERSION, _detect_trend_phase
+from core.trend import TREND_FORMULA_VERSION, _detect_trend_ma5_phase, _detect_trend_phase
 from data.indicator_store import get_series
 from data.storage.db import get_db
 
@@ -29,6 +29,9 @@ from services.dashboard_common import (
 )
 from services.dashboard_common import (
     assign_strength as _assign_strength,
+)
+from services.dashboard_common import (
+    assign_strength_history as _assign_strength_history,
 )
 from services.dashboard_common import (
     key_tuple as _key_tuple,
@@ -120,6 +123,9 @@ def _metrics_summary(daily: pd.DataFrame, metadata: dict) -> dict | None:
     latest = daily.iloc[-1]
 
     phase_info = _detect_trend_phase(raw_trend, trend_ma5, raw_close, dates)
+    # 趋势相位（看板「趋势相位」列）：判定量是趋势值 MA5 的符号——MA5 转正
+    # 当日为趋势启动第 1 天，转负当日为趋势结束第 1 天，与 MACD 相位同口径。
+    ma5_phase_info = _detect_trend_ma5_phase(trend_ma5, raw_close, dates)
 
     return {
         "member_count": int(metadata["member_count"]),
@@ -133,6 +139,9 @@ def _metrics_summary(daily: pd.DataFrame, metadata: dict) -> dict | None:
         # 近20日平均成交额：热力图框面积依据，比单日成交额更稳定。
         "amount_avg20": _number(daily["amount"].tail(20).mean()),
         "trend_history": trend_ma5[-DISPLAY_DAYS:],
+        # 逐日原始趋势值（未做 MA5 平滑），与 trend_dates 逐位对齐，
+        # 供前端趋势 mini 图悬停提示使用。
+        "trend_score_history": raw_trend[-DISPLAY_DAYS:],
         "trend_dates": [pd.Timestamp(value).date().isoformat() for value in recent["time"]],
         "as_of": pd.Timestamp(latest["time"]).date().isoformat(),
         "priority_l1": _priority(metadata["priority_l1"]),
@@ -142,6 +151,10 @@ def _metrics_summary(daily: pd.DataFrame, metadata: dict) -> dict | None:
         "trend_phase_days": phase_info["days"],
         "trend_phase_change_pct": phase_info["change_pct"],
         "trend_phase_signal_date": phase_info["signal_date"],
+        "trend_ma5_phase": ma5_phase_info["phase"],
+        "trend_ma5_phase_days": ma5_phase_info["days"],
+        "trend_ma5_phase_change_pct": ma5_phase_info["change_pct"],
+        "trend_ma5_phase_signal_date": ma5_phase_info["signal_date"],
     }
 
 
@@ -207,7 +220,7 @@ def _empty_macd_kline() -> dict:
 
 
 def _macd_kline_payloads(db) -> dict[str, dict]:
-    """Per-symbol MACD cross phase + 10-day kline mini from the 1y qfq tail.
+    """Per-symbol MACD cross phase + kline mini from the 1y qfq tail.
 
     仅具体标的级使用。MACD 用与盘中看板同口径的 1 年尾部收盘价计算
     （warmup=True，与 indicator_daily 缓存的 macd_dif/dea 一致）。
@@ -313,7 +326,7 @@ def build_subject_dashboard_payload(db=None) -> dict:
     l3_items = _build_level_summaries(calculated, l3_columns)
     instruments = _build_level_summaries(calculated, instrument_columns)
 
-    # MACD 金叉/死叉相位 + 近10日K线 mini 图：仅具体标的级；类目聚合行的
+    # MACD 金叉/死叉相位 + 近40日K线 mini 图：仅具体标的级；类目聚合行的
     # 聚合口径（成交额加权 MACD 并无意义）待定义，先给占位（看板显示 —）。
     macd_payloads = _macd_kline_payloads(db)
     for item in instruments:
@@ -324,6 +337,12 @@ def build_subject_dashboard_payload(db=None) -> dict:
     _assign_strength(l2_items, ("category_l1",))
     _assign_strength(l3_items, ("category_l1",))
     _assign_strength(instruments, ("category_l1",))
+
+    # 逐日强度（趋势 mini 图悬停数据源）：与上面的最新值强度同口径，只是对
+    # 窗口内每个交易日各算一次横截面百分位。
+    _assign_strength_history(l2_items, ("category_l1",))
+    _assign_strength_history(l3_items, ("category_l1",))
+    _assign_strength_history(instruments, ("category_l1",))
 
     instruments_by_l3: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for instrument in instruments:
@@ -377,9 +396,16 @@ def build_subject_dashboard_payload(db=None) -> dict:
 
 # detail="lite" 瘦身规则：序列字段只留末尾 N 个 / 整键删除 / 浮点 6 位。
 # 扫描类消费方只用各序列的最新值（金叉缺口用最后两个 DIF/DEA），
-# mini K线/MACD 全序列与 61 日 trend_history 是全量响应 10MB 的大头。
+# mini K线/MACD 全序列与 42 日 trend_history/trend_score_history 是全量响应 10MB 的大头。
 _LITE_TAIL_KEYS = {"kline": 2, "macd_dif": 2, "macd_dea": 2, "macd_dates": 2}
-_LITE_DROP_KEYS = {"kline_ma5", "macd_hist", "trend_history", "trend_dates"}
+_LITE_DROP_KEYS = {
+    "kline_ma5",
+    "macd_hist",
+    "trend_history",
+    "trend_score_history",
+    "strength_history",
+    "trend_dates",
+}
 
 
 def dashboard_lite(node):

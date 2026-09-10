@@ -262,6 +262,21 @@ class TestBuildIntradayDashboard:
                 "trend_dates length != trend_history length"
             )
 
+            # 逐日强度（趋势 mini 图悬停）与 trend_dates 逐位对齐；
+            # 末位即「强度」列的最新值（两者同口径）。
+            strength_history = item.get("strength_history")
+            assert strength_history is not None and len(strength_history) == len(dates), (
+                "strength_history length != trend_dates length"
+            )
+            if (
+                strength_history
+                and strength_history[-1] is not None
+                and item.get("strength") is not None
+            ):
+                assert strength_history[-1] == item["strength"], (
+                    "strength_history 末位应等于最新值强度"
+                )
+
     def test_trend_ma5_differs_from_trend_score(self, fake_deps) -> None:
         """BUG-2: Verify MA5 is different from raw trend score."""
         ds, db, cfg = fake_deps
@@ -382,12 +397,12 @@ class TestBuildIntradayDashboard:
         ]
         for inst in instruments:
             assert inst.get("macd_phase") in ("golden", "dead", None)
-            assert 0 < len(inst.get("kline") or []) <= 30
+            assert 0 < len(inst.get("kline") or []) <= 40
             # 缓存路径下 trend_history（成交额加权 MA5 序列）也必须非空。
             assert len(inst.get("trend_history") or []) > 0
 
     def test_instrument_rows_carry_macd_phase_and_kline(self, fake_deps) -> None:
-        """标的行带 MACD 相位与近30日K线（末根=盘中实时合成K线）；类目行为占位。"""
+        """标的行带 MACD 相位与近40日K线（末根=盘中实时合成K线）；类目行为占位。"""
         ds, db, cfg = fake_deps
         from data.intraday_service import build_intraday_dashboard
 
@@ -411,8 +426,16 @@ class TestBuildIntradayDashboard:
             assert inst.get("macd_phase") in ("golden", "dead", None)
             for key in ("macd_phase_days", "macd_phase_change_pct", "macd_phase_signal_date"):
                 assert key in inst, f"Missing key: {key}"
+            # 趋势相位（趋势值 MA5 符号）与 MACD 相位并列：标的行必须带上这四个字段。
+            assert inst.get("trend_ma5_phase") in ("start", "end", None)
+            for key in (
+                "trend_ma5_phase_days",
+                "trend_ma5_phase_change_pct",
+                "trend_ma5_phase_signal_date",
+            ):
+                assert key in inst, f"Missing key: {key}"
             kline = inst.get("kline") or []
-            assert 0 < len(kline) <= 30
+            assert 0 < len(kline) <= 40
             assert len(inst.get("kline_ma5") or []) == len(kline)
             # 当日K线未落库 → 末根为实时合成K线，close = 实时价。
             assert kline[-1]["c"] == pytest.approx(quotes[inst["symbol"]]["price"])
