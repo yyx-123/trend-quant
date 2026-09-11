@@ -13,6 +13,8 @@
   // E-Bias 均线偏离度：单位为百分比（正 = 高于 20 日 EMA），1 位小数足够。
   const fmtEBias = (value) => value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
   const getChangeClass = (value) => value != null && value >= 0 ? 'is-positive' : 'is-negative';
+  // 「，涨跌幅：」包进 .phase-sep、数值包进 .phase-change：桌面端无任何样式
+  // （文案与渲染不变），移动端媒体查询隐藏 .phase-sep 把两个相位压进一行。
   const fmtPhase = (item) => {
     if (item.macd_phase != null && item.macd_phase_days != null) {
       const phaseLabel = item.macd_phase === 'golden' ? '金叉' : '死叉';
@@ -20,7 +22,7 @@
       const changeVal = item.macd_phase_change_pct != null ? item.macd_phase_change_pct.toFixed(2) : '—';
       const changeSign = item.macd_phase_change_pct != null && item.macd_phase_change_pct >= 0 ? '+' : '';
       const changeClass = item.macd_phase_change_pct != null ? (item.macd_phase_change_pct >= 0 ? 'is-positive' : 'is-negative') : '';
-      return `<span class="${phaseClass}">${phaseLabel}第 ${item.macd_phase_days} 天</span>，涨跌幅：<span class="${changeClass}">${changeSign}${changeVal}%</span>`;
+      return `<span class="${phaseClass}">${phaseLabel}第 ${item.macd_phase_days} 天</span><span class="phase-sep">，涨跌幅：</span><span class="phase-change ${changeClass}">${changeSign}${changeVal}%</span>`;
     }
     return '<span class="index-phase-na">—</span>';
   };
@@ -34,7 +36,7 @@
       const changeVal = item.trend_ma5_phase_change_pct != null ? item.trend_ma5_phase_change_pct.toFixed(2) : '—';
       const changeSign = item.trend_ma5_phase_change_pct != null && item.trend_ma5_phase_change_pct >= 0 ? '+' : '';
       const changeClass = item.trend_ma5_phase_change_pct != null ? (item.trend_ma5_phase_change_pct >= 0 ? 'is-positive' : 'is-negative') : '';
-      return `<span class="${phaseClass}">${phaseLabel}第 ${item.trend_ma5_phase_days} 天</span>，涨跌幅：<span class="${changeClass}">${changeSign}${changeVal}%</span>`;
+      return `<span class="${phaseClass}">${phaseLabel}第 ${item.trend_ma5_phase_days} 天</span><span class="phase-sep">，涨跌幅：</span><span class="phase-change ${changeClass}">${changeSign}${changeVal}%</span>`;
     }
     return '<span class="index-phase-na">—</span>';
   };
@@ -750,8 +752,13 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
         : '';
       holdingTitle = `持仓金额 = 最新价 ${item.holding_price} × ${fmtShares(item.holding_shares)} 份 = ${fmtMoney0(item.holding_value)}${totalText}（随快照每 5 分钟重算）`;
     }
+    // 名称区透明链接：桌面端恒 display:none（零影响），移动端媒体查询下放出来
+    // 覆盖整个名称区，作为「查看/试算」按钮隐藏后跳标的查看页的入口。
+    const nameLink = item.symbol
+      ? `<a class="index-name-link" href="/market-view?symbol=${encodeURIComponent(item.symbol)}" aria-label="在标的查看页打开 ${esc(item.symbol)}"></a>`
+      : '';
     return `<div class="index-row subject-inst-row" data-symbol="${esc(item.symbol || '')}">
-      <div class="index-name"><strong>${esc(item.name || item.symbol)}</strong><span>${esc(item.symbol)} · 具体标的</span></div>
+      <div class="index-name"><strong>${esc(item.name || item.symbol)}</strong><span>${esc(item.symbol)} · 具体标的</span>${nameLink}</div>
       <div class="index-holding" ${holdingTitle ? `title="${esc(holdingTitle)}"` : ''}>${holdingCell}</div>
       <div class="index-kspark">${klineSpark(item.kline || [], item.kline_ma5 || [], item.macd_dif || [], item.macd_dea || [])}<div class="chart-cross" hidden></div></div>
       <div class="index-change ${getChangeClass(item.daily_change_pct)}">${fmtChange(item.daily_change_pct)}</div>
@@ -1192,6 +1199,15 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
     buyDateEl.addEventListener('change', refreshRangeHint);
     runBtn.addEventListener('click', runTrial);
   })();
+
+  // ---- 回到页首悬浮按钮（移动端专用，桌面端 CSS 恒隐藏） ------------------
+  const backToTopBtn = document.getElementById('backToTop');
+  if (backToTopBtn) {
+    const syncBackToTop = () => { backToTopBtn.hidden = window.scrollY < 600; };
+    window.addEventListener('scroll', syncBackToTop, { passive: true });
+    backToTopBtn.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+    syncBackToTop();
+  }
 
   // Init.
   loadBoard().then(autoRefreshBoard);
