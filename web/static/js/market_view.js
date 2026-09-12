@@ -59,6 +59,7 @@
   const rsiPeriodEl = document.getElementById('mvRsiPeriod');
   const stopModeToggleEl = document.getElementById('mvStopModeToggle');
   const stopInfoEl = document.getElementById('mvStopInfoBar');
+  const periodToggleEl = document.getElementById('mvPeriodToggle');
 
   let priceChart = null;
   let trendChart = null;
@@ -114,6 +115,9 @@
   // 来自 /market-view/api/my-trades；null 表示无持仓或加载失败（不渲染标注）
   let myTrades = null;
   let myStopMode = 'tight';  // 止损线档位：tight 紧止损（默认）/ loose 松止损
+  // K线周期：'1d' 日 / '1w' 周 / '1M' 月。切换后重新拉数并整图重渲染，
+  // 所有副图指标都由后端按该周期的 K 线重算（core.indicators 与周期无关）。
+  let currentPeriod = '1d';
   let allMultiKline = [];        // [{strategy_id, strategy_name, sizer_id, sizer_name, buy_points, sell_points, skipped_buy_points}]
   let activeResultKey = null;    // which 策略×仓位 combo's markers are shown on chart
   // Degraded sizing flags — synced from /api/meta (ruleMeta.sizing) in
@@ -216,6 +220,32 @@
     if (Number.isInteger(idx) && idx >= 0) return idx;
     const axisValue = String(param?.axisValue ?? param?.name ?? '');
     return Array.isArray(dates) ? dates.indexOf(axisValue) : -1;
+  }
+
+  // 日线日期 → 所请求周期的「包含它的那根 bar」标注日。
+  // 周/月视图下 K 线只有周期 bar（标注日 = 周期内最后一个交易日），而买卖点、
+  // 回测点位是日线日期，直接挂上去会因类目轴上找不到该值而整条消失。这里把
+  // 点位归到「第一个不早于它的 bar」；晚于最后一根 bar 的（如今天买入但本周
+  // 未收盘）归到最后一根，保证标注不丢。日K下恒等返回。
+  function barDateForPoint(dateText) {
+    const dates = currentPayload?.dates || [];
+    const target = String(dateText || '');
+    if (!target || !dates.length) return target;
+    for (const day of dates) {
+      if (String(day) >= target) return String(day);
+    }
+    return String(dates[dates.length - 1]);
+  }
+
+  // 点位有两种形态：回测点位是对象（{date, price, ...}），我的买卖点/止损
+  // 是三元数组 [日期, 价格, 原始记录]。两者都只改首元（挂靠的 bar 日期），
+  // 价格与原始记录原样透传（tooltip 仍显示真实成交日与成交价）。
+  function mapPointsToBarDates(points) {
+    return (points || []).map((p) => (
+      Array.isArray(p)
+        ? [barDateForPoint(p[0]), p[1], p[2]]
+        : [barDateForPoint(p.date), p.price, p]
+    ));
   }
 
   function compact(v) {
@@ -447,7 +477,8 @@
     return {
       name,
       type: 'scatter',
-      data: (points || []).map((p) => [p.date, p.price, p]),
+      // 周/月视图下把日线成交日归到包含它的那根周期 bar（见 barDateForPoint）
+      data: mapPointsToBarDates(points),
       symbol,
       symbolSize: 22,
       itemStyle: {
@@ -538,7 +569,7 @@
       series.push({
         name: '我的买入',
         type: 'scatter',
-        data: buys,
+        data: mapPointsToBarDates(buys),
         symbol: 'circle',
         symbolSize: 8,
         itemStyle: { color: '#c026d3', borderColor: '#ffffff', borderWidth: 1.5,
@@ -557,7 +588,7 @@
       series.push({
         name: '我的卖出',
         type: 'scatter',
-        data: sells,
+        data: mapPointsToBarDates(sells),
         symbol: 'circle',
         symbolSize: 8,
         itemStyle: { color: '#0891b2', borderColor: '#ffffff', borderWidth: 1.5,
@@ -1416,8 +1447,9 @@
     allMultiKline = [];
     activeResultKey = null;
     backtestSummaryEl.hidden = true;
-    backtestStartEl.value = meta.start || '';
-    backtestEndEl.value = meta.end || '';
+    // 回测跑日K：日期锚点优先取日K跨度（周/月视图下 meta.start/end 是周期 bar 标注日）
+    backtestStartEl.value = meta.daily_start || meta.start || '';
+    backtestEndEl.value = meta.daily_end || meta.end || '';
     updateBacktestRangeLabel();
     tradeMetaEl.textContent = '运行回测后显示。';
     tradesBodyEl.innerHTML = '<tr><td colspan="14">暂无交易明细。</td></tr>';
@@ -1551,8 +1583,12 @@
     currentPayload = payload;
     applyTrendConfigToInputs(payload.meta?.trend_config || {});
     applyRsiConfigToInputs(payload.meta?.rsi_config || {});
-    if (!backtestStartEl.value && payload.meta?.start) backtestStartEl.value = payload.meta.start;
-    if (!backtestEndEl.value && payload.meta?.end) backtestEndEl.value = payload.meta.end;
+    // 回测面板日期锚定日K（回测跑日K）：周/月视图下 meta.start/end 是周期 bar
+    // 的标注日，不能拿来当回测边界，故优先用 meta.daily_*。
+    const backtestStartAnchor = payload.meta?.daily_start || payload.meta?.start;
+    const backtestEndAnchor = payload.meta?.daily_end || payload.meta?.end;
+    if (!backtestStartEl.value && backtestStartAnchor) backtestStartEl.value = backtestStartAnchor;
+    if (!backtestEndEl.value && backtestEndAnchor) backtestEndEl.value = backtestEndAnchor;
     updateBacktestEndMax();
     updateBacktestRangeLabel();
     // Intraday badge: "盘中实时" while the session is running, "收盘估算"
@@ -1563,8 +1599,14 @@
     const afterClose = payload.meta?.post_close === true ||
       (payload.meta?.post_close == null && intradayTs && !Number.isNaN(intradayTs.getTime()) && intradayTs.getHours() >= 15);
     const intradayLabel = afterClose ? '收盘估算' : '盘中实时';
-    chartTitleEl.innerHTML = `${esc(payload.display_label || payload.display_name || payload.symbol || '')} 日 K${payload.meta?.is_intraday ? ` <span class="intraday-badge"><span class="intraday-dot" style="animation:intraday-pulse 1.6s ease-in-out infinite"></span>${intradayLabel}</span>` : ''}`;
-    rangeMetaEl.textContent = `${payload.meta?.start || '-'} ~ ${payload.meta?.end || '-'} | ${Number(payload.meta?.rows || 0)} 根${payload.meta?.is_intraday ? ` · 含${intradayLabel}数据` : ''}`;
+    const periodLabel = payload.meta?.period_label || '日';
+    chartTitleEl.innerHTML = `${esc(payload.display_label || payload.display_name || payload.symbol || '')} ${periodLabel} K${payload.meta?.is_intraday ? ` <span class="intraday-badge"><span class="intraday-dot" style="animation:intraday-pulse 1.6s ease-in-out infinite"></span>${intradayLabel}</span>` : ''}`;
+    // 周/月表只存已收盘周期：末根是「上一个走完的周期」，当期（本周/本月至今）
+    // 不在库内，如实标注避免误读为最新走势。
+    const closedHint = payload.meta?.only_closed_bars
+      ? ` · 仅完整周期（末根为${periodLabel}线收盘日，当期未收盘不显示）`
+      : '';
+    rangeMetaEl.textContent = `${payload.meta?.start || '-'} ~ ${payload.meta?.end || '-'} | ${Number(payload.meta?.rows || 0)} 根${payload.meta?.is_intraday ? ` · 含${intradayLabel}数据` : ''}${closedHint}`;
     // 我的止损档位开关：仅当当前标的存在带止损数据的未平仓持仓时显示
     updateStopModeToggle();
     renderPrice(payload, zoom);
@@ -1752,32 +1794,40 @@
     stopInfoEl.hidden = true;
     try {
       const previousSymbol = currentPayload?.symbol || '';
+      // 本次请求绑定的周期：用户中途切周期时，旧请求的后半段（阶段2/标注）
+      // 必须放弃，见下方 currentPeriod !== requestPeriod 的守卫。
+      const requestPeriod = currentPeriod;
       const params = new URLSearchParams();
       params.set('symbol', target);
+      params.set('period', requestPeriod);
       appendTrendParams(params);
       appendRsiParams(params);
       // 两阶段加载：阶段1 纯DB日K（本地毫秒级）立即渲染保证秒开；
       // 阶段2 带盘中合成K线（需一次 tickflow 报价，实测 RTT 约3秒）后台补齐，
       // 持仓标注同样含报价请求，三者并行，都不阻塞首渲染。
+      // 盘中合成 bar 只对日K有意义（周/月当期未收盘、库里也没有），故周/月
+      // 视图跳过阶段2，省掉一次无意义的报价往返。
       const resp = await fetch(`/market-view/api/daily?${params.toString()}`);
       if (resp.status === 401) { redirectToLogin(); return; }
       const data = await resp.json();
-      if (!resp.ok) throw new Error(data.detail || '日 K 加载失败');
+      if (!resp.ok) throw new Error(data.detail || 'K 线加载失败');
       myTrades = null;
       // 用服务端归一化后的代码拉取，口径与主数据一致
       const myTradesPromise = loadMyTrades(data.symbol);
       const liveParams = new URLSearchParams(params);
       liveParams.set('intraday', 'true');
-      const liveDailyPromise = (async () => {
-        try {
-          const r = await fetch(`/market-view/api/daily?${liveParams.toString()}`);
-          if (r.status === 401) { redirectToLogin(); return null; }
-          if (!r.ok) return null;
-          return await r.json();
-        } catch (err) {
-          return null;
-        }
-      })();
+      const liveDailyPromise = requestPeriod === '1d'
+        ? (async () => {
+          try {
+            const r = await fetch(`/market-view/api/daily?${liveParams.toString()}`);
+            if (r.status === 401) { redirectToLogin(); return null; }
+            if (!r.ok) return null;
+            return await r.json();
+          } catch (err) {
+            return null;
+          }
+        })()
+        : Promise.resolve(null);
       const matched = allSymbols.find((item) => item.symbol === data.symbol) || {
         symbol: data.symbol,
         name: data.name,
@@ -1791,8 +1841,10 @@
       }
       renderAll(data, false);
       const [trades, liveData] = await Promise.all([myTradesPromise, liveDailyPromise]);
-      // 等待期间用户可能已切换标的，仅当仍在同一标的时补画
-      if (currentPayload?.symbol !== data.symbol) return;
+      // 等待期间用户可能已切换标的**或周期**：仅当两者都没变时才补画。
+      // 只比 symbol 不够 —— 切到周K后，上一次日K请求的阶段2（盘中合成K线，
+      // 要等一次约3秒的报价）可能后到，会把日K的整套图与标题覆盖回日K。
+      if (currentPayload?.symbol !== data.symbol || currentPeriod !== requestPeriod) return;
       // 先挂交易标注再渲染：有盘中合成K线时整图替换的一次渲染即含买卖点，
       // 不再重复第三次 renderPrice（P2-20：单标的加载 3 次全图重渲染 → 最多 2 次）
       if (trades) {
@@ -1922,6 +1974,22 @@
     loadDaily();
   });
 
+  // K线周期切换（日/周/月）：重新拉该周期的行情，主图与全部副图一起重算。
+  // 与「我的止损」紧/松切换不同，这里必须重拉数据（不是重渲染），所以
+  // 变化的是数据源；回测结果保留（标记会按周期 bar 重新落位）。
+  periodToggleEl.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button[data-period]');
+    if (!btn || btn.dataset.period === currentPeriod) return;
+    currentPeriod = btn.dataset.period;
+    periodToggleEl.querySelectorAll('button[data-period]').forEach((b) => {
+      b.classList.toggle('is-active', b.dataset.period === currentPeriod);
+    });
+    // 周期切换后 bar 数变化很大（日K 上万根 → 月K 几百根），沿用旧缩放区间
+    // 会得到跨度错乱的视图，故不保留缩放（loadDaily → renderAll(false)）。
+    stopInfoEl.hidden = true;
+    loadDaily();
+  });
+
   // 我的止损紧/松切换（与手工交易页同一 seg 交互）：只重渲染价格图，不重拉数据
   stopModeToggleEl.addEventListener('click', (ev) => {
     const btn = ev.target.closest('button[data-mode]');
@@ -2039,7 +2107,10 @@
 
 
   function updateBacktestEndMax() {
-    const maxDate = currentPayload?.meta?.end || localToday();
+    // 回测按日K运行，上限取日K末日（meta.daily_end）；周/月视图下 meta.end
+    // 是周期 bar 标注日，用它会把回测结束日误限在上一周/月。
+    const meta = currentPayload?.meta || {};
+    const maxDate = meta.daily_end || meta.end || localToday();
     backtestEndEl.setAttribute('max', maxDate);
     if (backtestEndEl.value && backtestEndEl.value > maxDate) {
       backtestEndEl.value = maxDate;

@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 import pandas as pd
 
 from audit.app_logger import get_logger
+from core.bars import normalize_period
 from core.calendar import market_now
 from core.display import category_path
 from core.env import password_iterations
@@ -170,6 +171,65 @@ class Database:
                     PRIMARY KEY (symbol, time)
                 );
                 CREATE TABLE IF NOT EXISTS market_data_qfq (
+                    symbol TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    provider TEXT,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (symbol, time)
+                );
+                -- 周K/月K（2026-09-12）：结构与日K逐列一致，time 为周期内最后
+                -- 一个交易日（vendor 口径）。只存已收盘周期（未走完的当期 bar
+                -- 不落库，见 core/bars.closed_bars），故非复权表是追加型的。
+                -- 与日K的差别在复权口径：周/月 bar 内可能横跨除权日，同一个
+                -- bar 的 OHLC 里各日用的因子不同，无法由“raw 周/月 bar × 单一
+                -- 因子”本地物化 —— 所以 weekly/monthly 的 qfq 表直接存 vendor
+                -- 前复权结果，除权日变化时按标的整段重取（service 层负责）。
+                CREATE TABLE IF NOT EXISTS market_data_raw_weekly (
+                    symbol TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    provider TEXT,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (symbol, time)
+                );
+                CREATE TABLE IF NOT EXISTS market_data_qfq_weekly (
+                    symbol TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    provider TEXT,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (symbol, time)
+                );
+                CREATE TABLE IF NOT EXISTS market_data_raw_monthly (
+                    symbol TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    provider TEXT,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (symbol, time)
+                );
+                CREATE TABLE IF NOT EXISTS market_data_qfq_monthly (
                     symbol TEXT NOT NULL,
                     time TEXT NOT NULL,
                     open REAL,
@@ -1300,20 +1360,28 @@ class Database:
         return int(row["version"] or 0) if row else 0
 
     @staticmethod
-    def market_data_version_name(symbol: str, price_mode: str = "qfq") -> str:
-        return f"{Database._market_table(price_mode)}:{symbol}"
+    def market_data_version_name(symbol: str, price_mode: str = "qfq", period: str = "1d") -> str:
+        return f"{Database._market_table(price_mode, period)}:{symbol}"
 
     # ------------------------------------------------------------------
     # market_data
     # ------------------------------------------------------------------
+    # (period, price_mode) → 表名。周期值经 core.bars.normalize_period
+    # 规范化，故 'weekly'/'w'/'1w' 均落到同一张表；分钟线（'1m'）不在周期
+    # 表内，误传即 ValueError，不会静默写成月K。
+    _PERIOD_TABLE_SUFFIXES = {"1d": "", "1w": "_weekly", "1M": "_monthly"}
+
     @staticmethod
-    def _market_table(price_mode: str = "qfq") -> str:
+    def _market_table(price_mode: str = "qfq", period: str = "1d") -> str:
         value = str(price_mode or "qfq").strip().lower()
         if value in {"qfq", "forward", "forward_additive"}:
-            return "market_data_qfq"
-        if value in {"raw", "none", "unadjusted"}:
-            return "market_data_raw"
-        raise ValueError(f"unsupported market data price_mode: {price_mode}")
+            base = "market_data_qfq"
+        elif value in {"raw", "none", "unadjusted"}:
+            base = "market_data_raw"
+        else:
+            raise ValueError(f"unsupported market data price_mode: {price_mode}")
+        canonical = normalize_period(period)
+        return f"{base}{Database._PERIOD_TABLE_SUFFIXES[canonical]}"
 
     def _market_records(self, symbol: str, df, table: str) -> tuple[list[tuple], int]:
         """构建 upsert 记录；非正价格行（复权事故/脏数据）拦截并计数。"""
@@ -1352,10 +1420,10 @@ class Database:
             )
         return records, dropped_nonpositive
 
-    def save_market_data(self, symbol: str, df, price_mode: str = "qfq") -> None:
+    def save_market_data(self, symbol: str, df, price_mode: str = "qfq", period: str = "1d") -> None:
         if df.empty:
             return
-        table = self._market_table(price_mode)
+        table = self._market_table(price_mode, period)
         records, _ = self._market_records(symbol, df, table)
         if not records:
             return
@@ -1370,9 +1438,50 @@ class Database:
             self._bump_data_version_conn(conn, f"{table}:{symbol}")
         self._market_symbols_cache.pop(table, None)
 
-    def replace_market_data(self, symbol: str, df, price_mode: str = "qfq") -> int:
+    def save_market_data_many(
+        self, items, price_mode: str = "qfq", period: str = "1d"
+    ) -> dict[str, int]:
+        """一次连接批量 upsert 多个标的：(symbol, df) 列表 → {symbol: 写入行数}。
+
+        周/月K 日更要为 800+ 标的各写 raw+qfq 两张表 —— 逐标的调用
+        save_market_data 每次新建连接 + 独立事务，一晚能吃掉几十分钟。这里
+        合成一次连接 + 一个事务，与 load_market_data_many 的批量读思路对称。
+
+        data_versions 仍按「每标的 +1」并「表级 +1」推进，口径与单标的写入
+        完全一致（否则按标的失效的缓存会漏掉更新）。
+
+        行情为空、或整段被防御性丢弃（非正价格）的标的既不写入、也不出现在
+        返回 dict 中，调用方据此判断实际落库情况。
+        """
+        table = self._market_table(price_mode, period)
+        records: list[tuple] = []
+        written: dict[str, int] = {}
+        for symbol, df in items or []:
+            if df is None or df.empty:
+                continue
+            symbol_records, _ = self._market_records(symbol, df, table)
+            if not symbol_records:
+                continue
+            records.extend(symbol_records)
+            written[str(symbol)] = len(symbol_records)
+        if not records:
+            return {}
+        with self._connect() as conn:
+            conn.executemany(
+                f"""INSERT OR REPLACE INTO {table}
+                   (symbol, time, open, high, low, close, volume, amount, provider, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
+                records,
+            )
+            self._bump_data_version_conn(conn, table)
+            for symbol in written:
+                self._bump_data_version_conn(conn, f"{table}:{symbol}")
+        self._market_symbols_cache.pop(table, None)
+        return written
+
+    def replace_market_data(self, symbol: str, df, price_mode: str = "qfq", period: str = "1d") -> int:
         """同事务全量重写一个标的的行情（本地物化 qfq 用）。返回写入行数。"""
-        table = self._market_table(price_mode)
+        table = self._market_table(price_mode, period)
         records, _ = self._market_records(symbol, df, table)
         with self._connect() as conn:
             conn.execute(f"DELETE FROM {table} WHERE symbol = ?", (symbol,))
@@ -1401,9 +1510,9 @@ class Database:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
 
-    def load_market_data(self, symbol: str, price_mode: str = "qfq"):
+    def load_market_data(self, symbol: str, price_mode: str = "qfq", period: str = "1d"):
 
-        table = self._market_table(price_mode)
+        table = self._market_table(price_mode, period)
         with self._connect() as conn:
             rows = conn.execute(
                 f"""SELECT time, open, high, low, close, volume, amount, symbol, provider
@@ -1415,7 +1524,7 @@ class Database:
         return self._market_rows_to_df(rows)
 
     def load_market_data_many(
-        self, symbols, price_mode: str = "qfq"
+        self, symbols, price_mode: str = "qfq", period: str = "1d"
     ) -> "dict[str, pd.DataFrame]":
         """多标的批量读全量日K：单连接 + chunked IN 查询，按 symbol 分组返回。
 
@@ -1424,7 +1533,7 @@ class Database:
         数线性放大。这里改为单连接分块查询（每块 500 只，远离 SQLite
         变量上限）。无数据的 symbol 不出现在返回 dict 中。
         """
-        table = self._market_table(price_mode)
+        table = self._market_table(price_mode, period)
         unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
         if not unique:
             return {}
@@ -1448,14 +1557,14 @@ class Database:
         }
 
     def get_market_data_summary_many(
-        self, symbols, price_mode: str = "qfq"
+        self, symbols, price_mode: str = "qfq", period: str = "1d"
     ) -> "dict[str, dict]":
         """多标的 {symbol: {rows, start, end}}——单连接 chunked IN + GROUP BY。
 
         与 list_market_data_summaries（全表 GROUP BY）不同，这里按给定标的
         过滤，走 symbol 索引，供批量新鲜度检查使用。
         """
-        table = self._market_table(price_mode)
+        table = self._market_table(price_mode, period)
         unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
         if not unique:
             return {}
@@ -1495,8 +1604,8 @@ class Database:
                     out[r["name"]] = int(r["version"] or 0)
         return out
 
-    def list_market_symbols(self, price_mode: str = "qfq") -> list[str]:
-        table = self._market_table(price_mode)
+    def list_market_symbols(self, price_mode: str = "qfq", period: str = "1d") -> list[str]:
+        table = self._market_table(price_mode, period)
         cached = self._market_symbols_cache.get(table)
         if cached is not None:
             return list(cached)
@@ -1508,8 +1617,8 @@ class Database:
         self._market_symbols_cache[table] = symbols
         return list(symbols)
 
-    def get_market_data_summary(self, symbol: str, price_mode: str = "qfq") -> dict:
-        table = self._market_table(price_mode)
+    def get_market_data_summary(self, symbol: str, price_mode: str = "qfq", period: str = "1d") -> dict:
+        table = self._market_table(price_mode, period)
         with self._connect() as conn:
             row = conn.execute(
                 f"""SELECT COUNT(*) AS rows, MIN(time) AS start, MAX(time) AS end
@@ -1520,11 +1629,11 @@ class Database:
             return {"rows": 0, "start": None, "end": None}
         return {"rows": row["rows"], "start": row["start"], "end": row["end"]}
 
-    def list_market_data_summaries(self, price_mode: str = "qfq") -> dict[str, dict]:
+    def list_market_data_summaries(self, price_mode: str = "qfq", period: str = "1d") -> dict[str, dict]:
         """全标的 {symbol: {rows, start, end}}——单条 GROUP BY（P2-18：
         标的管理列表接口原对 600+ 标的逐只 get_market_data_summary，
         每次新建连接；改单条聚合查询一次出结果）。"""
-        table = self._market_table(price_mode)
+        table = self._market_table(price_mode, period)
         with self._connect() as conn:
             rows = conn.execute(
                 f"""SELECT symbol, COUNT(*) AS rows, MIN(time) AS start, MAX(time) AS end
@@ -1535,8 +1644,8 @@ class Database:
             for row in rows
         }
 
-    def clear_market_data(self, price_mode: str = "qfq") -> int:
-        table = self._market_table(price_mode)
+    def clear_market_data(self, price_mode: str = "qfq", period: str = "1d") -> int:
+        table = self._market_table(price_mode, period)
         with self._connect() as conn:
             cur = conn.execute(f"DELETE FROM {table}")
             self._bump_data_version_conn(conn, table)
@@ -2403,13 +2512,14 @@ class Database:
         price_mode: str = "qfq",
         start: date | None = None,
         end: date | None = None,
+        period: str = "1d",
     ) -> dict[str, int]:
         """Bar counts per symbol (single indexed GROUP BY) — batch ETA estimates.
 
         start/end 限定统计窗口（按交易日计数，供窗口批次 ETA 使用）。
         time 列为 'YYYY-MM-DD HH:MM:SS' 文本，end 补到当日末尾做闭区间比较。
         """
-        table = self._market_table(price_mode)
+        table = self._market_table(price_mode, period)
         clauses: list[str] = []
         params: list[str] = []
         if start is not None:

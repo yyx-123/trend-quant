@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pandas as pd
 from conftest import FAKE_INTRADAY_TREND_RESULT, make_daily_bars_ending, make_fresh_quote
+from fastapi import HTTPException
 
 from app.routers import market_view
 from app.routers.market_view import build_market_payload, compute_market_indicators
@@ -158,13 +159,29 @@ class FakeMarketViewDb:
         df: pd.DataFrame,
         symbols: list[str] | None = None,
         metadata_map: dict[str, dict] | None = None,
+        period_frames: dict[str, pd.DataFrame] | None = None,
     ) -> None:
         self.df = df
         self.symbols = symbols or ["518850.SS"]
         self.metadata_map = metadata_map or {}
+        # 周期 → 该周期的行情（周期切换测试用）；缺省时任何周期都返回 df
+        self.period_frames = period_frames or {}
 
-    def load_market_data(self, symbol: str, price_mode: str = "qfq") -> pd.DataFrame:
-        return self.df.copy()
+    def load_market_data(self, symbol: str, price_mode: str = "qfq", period: str = "1d") -> pd.DataFrame:
+        return self.period_frames.get(period, self.df).copy()
+
+    def get_market_data_summary(
+        self, symbol: str, price_mode: str = "qfq", period: str = "1d"
+    ) -> dict:
+        frame = self.period_frames.get(period, self.df)
+        if frame.empty:
+            return {"rows": 0, "start": None, "end": None}
+        times = pd.to_datetime(frame["time"], errors="coerce").dropna()
+        return {
+            "rows": len(frame),
+            "start": times.min().date().isoformat(),
+            "end": times.max().date().isoformat(),
+        }
 
     def get_instrument_metadata(self, symbol: str) -> dict | None:
         return self.metadata_map.get(symbol)
@@ -224,6 +241,114 @@ class MarketViewApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["meta"]["rsi_config"]["period"], 7)
         self.assertEqual(payload["indicators"]["rsi"]["period"], 7)
         self.assertEqual(len(payload["indicators"]["rsi"]["series"]), len(df))
+
+class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
+    """周期切换：主图取该周期的 bar，副图指标按该周期 K 线重算。
+
+    指标不读 indicator_daily 缓存，而是吃 build_market_payload 传入的 OHLCV，
+    所以「切周期副图跟着切」是结构性的：同一函数喂不同周期的 K 线即可。
+    """
+
+    @staticmethod
+    def _weekly_frame() -> pd.DataFrame:
+        rows = []
+        for idx in range(30):
+            day = date(2026, 1, 9) + timedelta(days=7 * idx)
+            price = 4.0 + 0.05 * idx
+            rows.append(
+                {
+                    "time": day.isoformat(),
+                    "open": price,
+                    "high": price + 0.1,
+                    "low": price - 0.1,
+                    "close": price + 0.05,
+                    "volume": 5_000_000,
+                    "amount": 20_000_000,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    async def test_weekly_uses_weekly_bars_and_recomputes_indicators(self) -> None:
+        daily = sample_daily_bars(120)
+        weekly = self._weekly_frame()
+        fake_db = FakeMarketViewDb(daily, period_frames={"1w": weekly})
+
+        with patch.object(market_view, "get_db", return_value=fake_db):
+            weekly_payload = await market_view.get_market_daily(
+                symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, period="1w"
+            )
+            daily_payload = await market_view.get_market_daily(
+                symbol="518850.SS", limit=market_view.DEFAULT_LIMIT
+            )
+
+        self.assertEqual(weekly_payload["meta"]["period"], "1w")
+        self.assertEqual(weekly_payload["meta"]["period_label"], "周")
+        self.assertTrue(weekly_payload["meta"]["only_closed_bars"])
+        self.assertEqual(len(weekly_payload["dates"]), len(weekly))
+        # 副图每个分组都按周K 长度重算（不是日K 的尾部切片）
+        for group in ("ma", "atr", "boll", "macd", "bias", "e_bias", "volume_ma", "rsi", "trend"):
+            node = weekly_payload["indicators"][group]
+            if group == "rsi":
+                self.assertEqual(len(node["series"]), len(weekly))
+            elif group == "e_bias":
+                self.assertEqual(len(node["series"]), len(weekly))
+            elif group == "trend":
+                self.assertEqual(len(node["score"]), len(weekly))
+            else:
+                for series in node.values():
+                    self.assertEqual(len(series), len(weekly), group)
+        # 与日K 的末 N 根不同值 —— 证明确实按周期重算而非沿用日K
+        self.assertNotEqual(
+            weekly_payload["indicators"]["ma"]["20"],
+            daily_payload["indicators"]["ma"]["20"][-len(weekly):],
+        )
+        # 日K请求仍不受影响
+        self.assertEqual(daily_payload["meta"]["period"], "1d")
+        self.assertFalse(daily_payload["meta"]["only_closed_bars"])
+        self.assertEqual(len(daily_payload["dates"]), len(daily))
+
+    async def test_daily_span_always_comes_from_daily_table(self) -> None:
+        """回测面板锚点：周/月视图下 daily_start/daily_end 仍是日K跨度。"""
+        daily = sample_daily_bars(60)
+        fake_db = FakeMarketViewDb(
+            daily, period_frames={"1M": self._weekly_frame().head(3)}
+        )
+
+        with patch.object(market_view, "get_db", return_value=fake_db):
+            payload = await market_view.get_market_daily(
+                symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, period="1M"
+            )
+
+        meta = payload["meta"]
+        self.assertEqual(meta["daily_start"], "2026-01-01")
+        self.assertEqual(meta["daily_end"], (date(2026, 1, 1) + timedelta(days=59)).isoformat())
+        # 图上的日期是月K bar 的标注日，与 daily_end 不同
+        self.assertNotEqual(meta["end"], meta["daily_end"])
+
+    async def test_invalid_period_is_rejected(self) -> None:
+        fake_db = FakeMarketViewDb(sample_daily_bars(60))
+        with patch.object(market_view, "get_db", return_value=fake_db):
+            for bad in ("1m", "hour"):
+                with self.assertRaises(HTTPException) as ctx:
+                    await market_view.get_market_daily(
+                        symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, period=bad
+                    )
+                self.assertEqual(ctx.exception.status_code, 400)
+
+    async def test_intraday_overlay_skipped_for_weekly(self) -> None:
+        """周/月不合成盘中 bar：intraday=true 也只返回已收盘周期。"""
+        daily = sample_daily_bars(60)
+        fake_db = FakeMarketViewDb(daily, period_frames={"1w": self._weekly_frame()})
+        with patch.object(market_view, "get_db", return_value=fake_db):
+            payload = await market_view.get_market_daily(
+                symbol="518850.SS",
+                limit=market_view.DEFAULT_LIMIT,
+                period="1w",
+                intraday=True,
+            )
+        self.assertFalse(payload["meta"]["is_intraday"])
+        self.assertEqual(len(payload["dates"]), 30)
+
 
 class MarketViewIntradayOverlayTest(unittest.IsolatedAsyncioTestCase):
     """Overlay gating for GET /market-view/api/daily?intraday=true.

@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.instrument_display import format_symbol_display, load_instrument_name_map
+from core.bars import PERIOD_DAILY, normalize_period
 from core.calendar import market_now
 from core.display import category_path as _category_path
 from core.numfmt import number6_or_none
@@ -41,6 +42,9 @@ templates = Jinja2Templates(directory=str(_templates_dir))
 
 DEFAULT_LIMIT = 20000
 MAX_LIMIT = 50000
+
+# 周期开关的展示文案（与 core.bars 的规范周期值一一对应）。
+PERIOD_LABELS = {PERIOD_DAILY: "日", "1w": "周", "1M": "月"}
 
 
 def _config_name_map() -> dict[str, str]:
@@ -158,7 +162,11 @@ def build_market_payload(
     metadata: dict | None = None,
     trend_cfg: dict | None = None,
     rsi_period: int = DEFAULT_RSI_PERIOD,
+    *,
+    period: str = PERIOD_DAILY,
+    daily_span: dict | None = None,
 ) -> dict:
+    canonical_period = normalize_period(period)
     display_name = format_symbol_display(symbol, name)
     display_label = _display_with_category(display_name, metadata)
     meta_payload = {
@@ -168,6 +176,13 @@ def build_market_payload(
         "category_path": _category_path(metadata),
         "factor_tags": list((metadata or {}).get("factor_tags") or []),
         "region_tag": str((metadata or {}).get("region_tag") or ""),
+        # 周期元信息：前端据此切换标题与「仅完整周期」提示，并保持回测面板
+        # 日期锚定在日K（周/月视图下 meta.start/end 是周期 bar 的标注日）。
+        "period": canonical_period,
+        "period_label": PERIOD_LABELS[canonical_period],
+        "only_closed_bars": canonical_period != PERIOD_DAILY,
+        "daily_start": str((daily_span or {}).get("start") or "")[:10] or None,
+        "daily_end": str((daily_span or {}).get("end") or "")[:10] or None,
     }
     if df.empty:
         return {
@@ -197,6 +212,9 @@ def build_market_payload(
     ]
     volumes = _series(data.get("volume", pd.Series(index=data.index)))
     amounts = _series(data.get("amount", pd.Series(index=data.index)))
+    # 指标按所选周期的 OHLCV 现算（core.indicators/core.trend 与周期无关，
+    # 只吃 OHLCV DataFrame）。注意 n_short/n_mid/n_long/atr_period/er/vol_ma
+    # 都是**根数**参数：同一套数值在周/月K 上代表的是周数/月数，与日K不同口径。
     indicators = compute_market_indicators(data, trend_cfg, rsi_period)
 
     return {
@@ -266,6 +284,9 @@ async def get_market_daily(
     start_date: str = "",
     end_date: str = "",
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    # 纯默认值（非 Query(...)）：直调本函数（服务层/MCP/测试）时拿到的是字符串
+    # '1d' 而不是 Query 哨兵对象，行为与走 HTTP 时一致。
+    period: str = PERIOD_DAILY,
     trend_n_short: int | None = Query(default=None, ge=1, le=300),
     trend_n_mid: int | None = Query(default=None, ge=1, le=300),
     trend_n_long: int | None = Query(default=None, ge=1, le=500),
@@ -276,11 +297,19 @@ async def get_market_daily(
     normalized_symbol = normalize_symbol(symbol)
     if not normalized_symbol:
         raise HTTPException(status_code=400, detail="标的无效")
+    try:
+        kline_period = normalize_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    period_label = PERIOD_LABELS[kline_period]
 
     db = get_db()
-    df = db.load_market_data(normalized_symbol)
+    df = db.load_market_data(normalized_symbol, period=kline_period)
     if df.empty:
-        raise HTTPException(status_code=404, detail="未找到本地日 K 数据")
+        raise HTTPException(status_code=404, detail=f"未找到本地{period_label} K 数据")
+    # 日K跨度始终随 meta 返回：回测面板的日期默认值/上限锚定日K（回测跑日K），
+    # 周/月视图下 meta.start/end 是周期 bar 的标注日，不能拿来当回测边界。
+    daily_span = db.get_market_data_summary(normalized_symbol, price_mode="qfq", period=PERIOD_DAILY)
 
     data = df.copy()
     data["time"] = pd.to_datetime(data["time"], errors="coerce")
@@ -291,7 +320,7 @@ async def get_market_daily(
     else:
         end_ts = data["time"].max()
     if pd.isna(end_ts):
-        raise HTTPException(status_code=404, detail="日 K 日期无效")
+        raise HTTPException(status_code=404, detail=f"{period_label} K 日期无效")
 
     if start_date.strip():
         start_ts = pd.to_datetime(start_date, errors="coerce")
@@ -330,8 +359,16 @@ async def get_market_daily(
     # keeps this endpoint and the MCP symbol_detail tool on the exact same
     # code path: at/past the 9:30 open today's bar comes from the DB once
     # persisted, otherwise a synthetic bar is built from live quotes.
+    #
+    # 仅日K适用：盘中合成的一根「当日 bar」在周/月K 上要变成「本周/本月至今」，
+    # 属于另一个（尚未实现的）聚合口径；且周/月表只存已收盘周期，所以周/月视图
+    # 只呈现完整周期，最后一根是上一个已走完的周期。
     overlay = None
-    if intraday and (not end_date.strip() or end_ts.date() >= market_now().date()):
+    if (
+        kline_period == PERIOD_DAILY
+        and intraday
+        and (not end_date.strip() or end_ts.date() >= market_now().date())
+    ):
         overlay = build_intraday_overlay(normalized_symbol, df, trend_cfg)
 
     if overlay:
@@ -352,7 +389,16 @@ async def get_market_daily(
         for col in ("open", "high", "low", "close", "volume", "amount"):
             if col in combined.columns:
                 combined[col] = pd.to_numeric(combined[col], errors="coerce")
-        payload = build_market_payload(normalized_symbol, combined, name, metadata, trend_cfg, rsi_period_value)
+        payload = build_market_payload(
+            normalized_symbol,
+            combined,
+            name,
+            metadata,
+            trend_cfg,
+            rsi_period_value,
+            period=kline_period,
+            daily_span=daily_span,
+        )
         # Keep the fixed-semantics intraday trend snapshot alongside the
         # recomputed suite (fixed ATR/volume — used by API consumers
         # that need the uncontaminated signal value).
@@ -363,7 +409,16 @@ async def get_market_daily(
         payload["meta"]["intraday_ts"] = overlay["ts"]
         payload["meta"]["post_close"] = bool(overlay.get("post_close"))
     else:
-        payload = build_market_payload(normalized_symbol, data, name, metadata, trend_cfg, rsi_period_value)
+        payload = build_market_payload(
+            normalized_symbol,
+            data,
+            name,
+            metadata,
+            trend_cfg,
+            rsi_period_value,
+            period=kline_period,
+            daily_span=daily_span,
+        )
         if full_len > limit:
             _tail_payload_arrays(payload, full_len, limit)
         payload["meta"]["is_intraday"] = False

@@ -9,6 +9,7 @@ import pandas as pd
 
 from audit.app_logger import get_logger
 from core import env
+from core.bars import normalize_period
 from core.calendar import market_now
 from core.settings import TickFlowSettings
 from core.symbols import from_vendor_symbol, to_vendor_symbol
@@ -144,18 +145,26 @@ class TickFlowProvider(IDataProvider):
             }
         )
 
-    def fetch_daily_history(
+    def fetch_history(
         self,
         symbol: str,
         start: date,
         end: date,
         adjust: str,
+        period: str = "1d",
     ) -> pd.DataFrame:
+        """单标的 K 线（period: 1d/1w/1M，口径见 core.bars.normalize_period）。
+
+        周/月 bar 的标注日 = 周期内最后一个已交易日（vendor 口径）；请求窗口
+        起点落在周期中间不会截断该周期 bar（2026-09-12 实测），窗口过滤只按
+        bar 标注日做闭区间。
+        """
         if end < start:
             start, end = end, start
+        kline_period = normalize_period(period)
         client = self._get_client()
         if client is None:
-            raise RuntimeError("TICKFLOW_API_KEY is required for TickFlow Starter daily history")
+            raise RuntimeError(f"TICKFLOW_API_KEY is required for TickFlow {kline_period} history")
 
         try:
             self._throttle(
@@ -165,7 +174,7 @@ class TickFlowProvider(IDataProvider):
             request_start = start - timedelta(days=1)
             raw = client.klines.get(
                 self._to_tickflow_symbol(symbol),
-                period="1d",
+                period=kline_period,
                 start_time=self._to_milliseconds(request_start),
                 end_time=self._to_milliseconds(end, end_of_day=True),
                 count=10000,
@@ -179,28 +188,42 @@ class TickFlowProvider(IDataProvider):
             mask = (data["time"].dt.date >= start) & (data["time"].dt.date <= end)
             return data.loc[mask].reset_index(drop=True)
         except Exception as exc:
-            logger.exception("tickflow daily fetch failed for %s", symbol)
-            raise RuntimeError(f"tickflow daily fetch failed for {symbol}: {exc}") from exc
+            logger.exception("tickflow %s fetch failed for %s", kline_period, symbol)
+            # 日线措辞保持不变（既有日志/报错口径），周/月K 带上周期
+            label = "daily" if kline_period == "1d" else kline_period
+            raise RuntimeError(f"tickflow {label} fetch failed for {symbol}: {exc}") from exc
 
-    def fetch_daily_histories(
+    def fetch_daily_history(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        adjust: str,
+    ) -> pd.DataFrame:
+        return self.fetch_history(symbol, start, end, adjust, period="1d")
+
+    def fetch_histories(
         self,
         symbols: list[str],
         start: date,
         end: date,
         adjust: str,
+        period: str = "1d",
         *,
         batch_size: int = 100,
         request_interval_seconds: float = 0.0,
     ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+        """批量 K 线（日/周/月同一实现，仅 period 不同）。"""
         if end < start:
             start, end = end, start
+        kline_period = normalize_period(period)
         normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()]
         if not normalized_symbols:
             return {}, {}
 
         client = self._get_client()
         if client is None:
-            raise RuntimeError("TICKFLOW_API_KEY is required for TickFlow Starter daily history")
+            raise RuntimeError(f"TICKFLOW_API_KEY is required for TickFlow {kline_period} history")
 
         data_by_symbol: dict[str, pd.DataFrame] = {}
         errors: dict[str, str] = {}
@@ -221,7 +244,7 @@ class TickFlowProvider(IDataProvider):
                 self._throttle("daily_kline_batch", batch_min_interval)
                 raw = client.klines.batch(
                     list(tickflow_to_local.keys()),
-                    period="1d",
+                    period=kline_period,
                     start_time=self._to_milliseconds(request_start),
                     end_time=self._to_milliseconds(end, end_of_day=True),
                     count=10000,
@@ -243,12 +266,36 @@ class TickFlowProvider(IDataProvider):
                         data = data.loc[mask].reset_index(drop=True)
                     data_by_symbol[local_symbol] = data
             except Exception as exc:
-                logger.exception("tickflow daily batch fetch failed for %s", ",".join(chunk))
+                logger.exception(
+                    "tickflow %s batch fetch failed for %s",
+                    "daily" if kline_period == "1d" else kline_period,
+                    ",".join(chunk),
+                )
                 error_text = str(exc)
                 for symbol in chunk:
                     errors[symbol] = error_text
 
         return data_by_symbol, errors
+
+    def fetch_daily_histories(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+        adjust: str,
+        *,
+        batch_size: int = 100,
+        request_interval_seconds: float = 0.0,
+    ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+        return self.fetch_histories(
+            symbols,
+            start,
+            end,
+            adjust,
+            period="1d",
+            batch_size=batch_size,
+            request_interval_seconds=request_interval_seconds,
+        )
 
     def fetch_ex_factors(
         self,

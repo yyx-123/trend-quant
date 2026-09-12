@@ -56,6 +56,13 @@
   <div class="viz-panel market-chart-panel">
     <div class="market-chart-head">
       <h3 id="mvChartTitle">日 K</h3>
+      <div class="mt-seg" id="mvPeriodToggle"
+        title="K线周期：切换后主图与所有副图按该周期的K线重算。趋势值/RSI 等参数是「K线根数」，在周/月K上代表周数/月数">
+        <span class="mt-seg-label">周期</span>
+        <button type="button" data-period="1d" class="is-active">日</button>
+        <button type="button" data-period="1w">周</button>
+        <button type="button" data-period="1M">月</button>
+      </div>
       <div class="mt-seg" id="mvStopModeToggle" hidden
         title="我的持仓止损线：{{ stop_mode_title }}。止损线取硬止损与吊灯止损中较高者">
         <span class="mt-seg-label">我的止损</span>

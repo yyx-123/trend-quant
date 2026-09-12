@@ -47,6 +47,23 @@ def _pool_symbols() -> list[str]:
     return symbols
 
 
+def _sync_period_bars(service: DataService, symbols: list[str], today) -> dict:
+    """周K/月K 同步（日更任务的一部分，失败不影响日K结果）。
+
+    job_runs 里只留汇总，逐标的明细（400+ 行 × 周期数）不塞进日更 payload：
+    日更行本身已记录全量 results，再叠加一份会让 status 接口的 payload 成倍膨胀。
+    """
+    try:
+        period_payload = service.update_pool_periods(symbols, end_date=today)
+    except Exception as exc:
+        logger.exception("Period (weekly/monthly) market update failed")
+        return {"error": str(exc)}
+    return {
+        period: {key: value for key, value in info.items() if key != "results"}
+        for period, info in (period_payload.get("periods") or {}).items()
+    }
+
+
 def daily_market_update_job(
     settings: Settings,
     data_service: DataService | None = None,
@@ -97,6 +114,9 @@ def daily_market_update_job(
         # rebuild) lives in app.main's update_job — core must not
         # depend on the services layer.
         payload["symbols"] = symbols
+        # 周K/月K 随同一次盘后任务补齐（自身的成败单独记 job_runs，
+        # 不并入日K的成功/失败计数，行情表互相不拖累）。
+        payload["periods"] = _sync_period_bars(service, symbols, today)
     except Exception as exc:
         # Surface the failure in job_runs instead of vanishing into the
         # scheduler log — the status bar must not keep showing a stale success.
