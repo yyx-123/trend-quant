@@ -1,6 +1,6 @@
 """趋势相位迁移（在途合成版）—— 事件计算脚本（生产 venv 运行，只读生产库）。
 
-与 ``2026-09-13_趋势相位迁移`` 的唯一差别在周/月级状态的**生效时机**：
+与 ``2026-09-13_phase-migration`` 的唯一差别在周/月级状态的**生效时机**：
 
 - 旧口径：周/月状态在周期收盘后的第一个交易日才生效（月趋势变化只能落在
   下月 1 日前后）——信息滞后，漏掉了周期中后段的行情；
@@ -21,7 +21,7 @@ DataFrame 调用生产函数，与增量值逐点比对（容差 1e-9）。
 输出（data/ 下，schema 与旧版一致）：
 - events.csv（gitignore，可再生）/ combo_stats.csv / transition_stats.csv / summary.json
 
-运行：.venv/bin/python research/2026-09-13_趋势相位迁移_在途合成/trend_phase_live.py
+运行：.venv/bin/python research/2026-09-13_phase-migration-live-synth/trend_phase_live.py
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@
 中文字体：fonts/NotoSansCJKsc-Regular.otf（OFL 协议）。字体文件不入库，
 缺失时自动从 noto-cjk 仓库下载（需联网）。
 
-运行：scripts/temp/plot-venv/bin/python research/2026-09-12_趋势值分布/plot_trend_distribution.py
+运行：scripts/temp/plot-venv/bin/python research/2026-09-12_trend-score-distribution/plot_trend_distribution.py
 （plot-venv 若不存在：python3 -m venv scripts/temp/plot-venv &&
  scripts/temp/plot-venv/bin/pip install matplotlib）
 """

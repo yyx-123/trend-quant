@@ -9,7 +9,7 @@
 
 涨跌配色按 A 股习惯：红涨绿跌。
 
-运行：scripts/temp/plot-venv/bin/python research/2026-09-13_趋势相位迁移/plot_phase_transitions.py
+运行：scripts/temp/plot-venv/bin/python research/2026-09-13_phase-migration/plot_phase_transitions.py
 （plot-venv 若不存在：python3 -m venv scripts/temp/plot-venv &&
  scripts/temp/plot-venv/bin/pip install matplotlib）
 """

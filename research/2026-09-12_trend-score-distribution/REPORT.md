@@ -156,12 +156,12 @@ P(≥5)=22.2% vs P(≤-5)=10.0%，正趋势频率是负趋势的两倍多。这�
 
 ```bash
 # 1) 计算（用生产 venv，读生产库，输出 data/*.npy + data/stats.json）
-.venv/bin/python research/2026-09-12_趋势值分布/trend_score_distribution.py
+.venv/bin/python research/2026-09-12_trend-score-distribution/trend_score_distribution.py
 
 # 2) 绘图（隔离 venv，避免给生产环境引入 matplotlib）
 python3 -m venv scripts/temp/plot-venv   # 已存在则跳过
 scripts/temp/plot-venv/bin/pip install matplotlib
-scripts/temp/plot-venv/bin/python research/2026-09-12_趋势值分布/plot_trend_distribution.py
+scripts/temp/plot-venv/bin/python research/2026-09-12_trend-score-distribution/plot_trend_distribution.py
 ```
 
 依赖说明：计算脚本只需项目自身依赖（numpy/pandas）；绘图脚本只需

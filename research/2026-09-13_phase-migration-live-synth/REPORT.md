@@ -2,7 +2,7 @@
 
 > 日期：2026-09-13
 > 状态：已完成（数据、图、脚本均在本目录，可复现）
-> 前置研究：`research/2026-09-13_趋势相位迁移/`（边界生效口径，本研究是它的口径修正与对比）
+> 前置研究：`research/2026-09-13_phase-migration/`（边界生效口径，本研究是它的口径修正与对比）
 
 ## 1. 研究背景
 
@@ -223,10 +223,10 @@
 
 ```bash
 # 1) 计算（生产 venv，只读生产库；含精确性自检，不一致会拒绝落盘）
-.venv/bin/python research/2026-09-13_趋势相位迁移_在途合成/trend_phase_live.py
+.venv/bin/python research/2026-09-13_phase-migration-live-synth/trend_phase_live.py
 
 # 2) 绘图（隔离 venv；对比图会读取旧版研究目录的数据）
-scripts/temp/plot-venv/bin/python research/2026-09-13_趋势相位迁移_在途合成/plot_phase_live.py
+scripts/temp/plot-venv/bin/python research/2026-09-13_phase-migration-live-synth/plot_phase_live.py
 ```
 
 git 口径：与既有约定一致——`data/events.csv`（~73MB 明细）与 `fonts/`

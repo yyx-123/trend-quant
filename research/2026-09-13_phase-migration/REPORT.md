@@ -2,7 +2,7 @@
 
 > 日期：2026-09-13
 > 状态：已完成（数据、图、脚本均在本目录，可复现）
-> 前置研究：`research/2026-09-12_趋势值分布/`（趋势值分布与 ±5 阈值的数据依据）
+> 前置研究：`research/2026-09-12_trend-score-distribution/`（趋势值分布与 ±5 阈值的数据依据）
 
 ## 1. 研究背景
 
@@ -196,17 +196,17 @@
   近年结构不同；
 - 幸存者偏差（§5.2）；未计交易成本与滑点；
 - 相邻 horizon 的事件窗口互相重叠，统计量间不独立；
-- 趋势值公式参数按日K 标定后原样用于周/月K（见 `2026-09-12_趋势值分布` §6
+- 趋势值公式参数按日K 标定后原样用于周/月K（见 `2026-09-12_trend-score-distribution` §6
   与周月K方案 §13.2），换参数需重跑。
 
 ## 7. 复现
 
 ```bash
 # 1) 计算（生产 venv，只读生产库；约 1 分钟）
-.venv/bin/python research/2026-09-13_趋势相位迁移/trend_phase_transitions.py
+.venv/bin/python research/2026-09-13_phase-migration/trend_phase_transitions.py
 
 # 2) 绘图（隔离 venv；字体缺失会自动下载）
-scripts/temp/plot-venv/bin/python research/2026-09-13_趋势相位迁移/plot_phase_transitions.py
+scripts/temp/plot-venv/bin/python research/2026-09-13_phase-migration/plot_phase_transitions.py
 ```
 
 git 口径（`research/.gitignore`）：`data/events.csv`（~64MB 明细）不入库、

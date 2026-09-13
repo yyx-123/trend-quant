@@ -7,7 +7,7 @@ strategy 配置），收集全历史每根 K 线的 trend_score，输出：
 - ``data/{asset}_{period}.npy``  该组全部 trend_score（预热期 NaN 已剔除）
 - ``data/stats.json``            每组描述性统计（N/均值/方差/偏度/峰度/分位数/±5 占比）
 
-运行：.venv/bin/python research/2026-09-12_趋势值分布/trend_score_distribution.py
+运行：.venv/bin/python research/2026-09-12_trend-score-distribution/trend_score_distribution.py
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""按「进入方向」拆分 27 组合的收益（边界生效口径；不重算，读本目录 events.csv）。
+"""按「进入方向」拆分 27 组合的收益（在途合成版；不重算，读本目录 events.csv）。
 
 方向定义：状态值 正=+1 / 无=0 / 负=-1，delta = sum(to) - sum(from)：
 - delta > 0 → 升级（如 负负负→负负无、无无无→正正无：组合整体转向看多）；
@@ -13,7 +13,7 @@
 - data/combo_dir_stats.csv  to_combo × direction × 4 horizons 全套统计
 - combo_dir_split.png       27 组合 × [升级/降级 × 1月/2月] 收益热力图 + 方向频次
 
-运行：scripts/temp/plot-venv/bin/python research/2026-09-13_趋势相位迁移/dir_split.py
+运行：scripts/temp/plot-venv/bin/python research/2026-09-13_phase-migration-live-synth/dir_split.py
 （仅需 matplotlib + pandas；字体缺失会自动下载）
 """
 
@@ -133,7 +133,7 @@ def plot(events: pd.DataFrame) -> None:
     ax_n.set_xlabel("事件数（log；堆叠=升级/降级/换挡）")
     ax_n.legend(fontsize=9, loc="lower right")
     ax_n.grid(alpha=0.25, axis="x")
-    fig.suptitle("趋势相位组合：按进入方向（升级/降级/换挡）拆分 · 边界生效口径", fontsize=12)
+    fig.suptitle("趋势相位组合：按进入方向（升级/降级/换挡）拆分 · 在途合成口径", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     out = BASE_DIR / "combo_dir_split.png"
     fig.savefig(out, dpi=130)

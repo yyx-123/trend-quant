@@ -18,7 +18,7 @@
 - transition_stats.csv 按 (from,to) 聚合：迁移频次 + 各 horizon 收益统计
 - summary.json        元信息（标的数、事件总数、参数口径）
 
-运行：.venv/bin/python research/2026-09-13_趋势相位迁移/trend_phase_transitions.py
+运行：.venv/bin/python research/2026-09-13_phase-migration/trend_phase_transitions.py
 """
 
 from __future__ import annotations

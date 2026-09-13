@@ -1,6 +1,6 @@
 """趋势相位迁移（在途合成版）—— 绘图脚本（中文标签；隔离 plot-venv 运行）。
 
-读取本目录 data/*.csv 与旧版研究（../2026-09-13_趋势相位迁移）的对应文件，
+读取本目录 data/*.csv 与旧版研究（../2026-09-13_phase-migration）的对应文件，
 产出五张图：
 
 1. heatmap_transition_counts.png  27×27 迁移次数热力图（新口径）
@@ -9,7 +9,7 @@
 4. timing_shift.png               月/周分量变化的发生日分布：旧口径 vs 新口径
 5. compare_old_new.png            新旧口径对比：27 组合 1月收益散点 + 关键迁移对比
 
-运行：scripts/temp/plot-venv/bin/python research/2026-09-13_趋势相位迁移_在途合成/plot_phase_live.py
+运行：scripts/temp/plot-venv/bin/python research/2026-09-13_phase-migration-live-synth/plot_phase_live.py
 （plot-venv 若不存在：python3 -m venv scripts/temp/plot-venv &&
  scripts/temp/plot-venv/bin/pip install matplotlib pandas）
 """
@@ -32,7 +32,7 @@ from matplotlib import font_manager
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-OLD_DIR = BASE_DIR.parent / "2026-09-13_趋势相位迁移" / "data"
+OLD_DIR = BASE_DIR.parent / "2026-09-13_phase-migration" / "data"
 FONT_PATH = BASE_DIR / "fonts" / "NotoSansCJKsc-Regular.otf"
 FONT_URL = (
     "https://github.com/notofonts/noto-cjk/raw/main/"
