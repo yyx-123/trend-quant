@@ -1,0 +1,23 @@
+{
+  "model": "live_inflight（在途周/月 bar 逐日合成，日级当日生效）",
+  "symbols": 874,
+  "symbols_with_events": 831,
+  "total_events": 571148,
+  "distinct_transitions": 380,
+  "valid_symbol_days": 1438714,
+  "threshold": 5.0,
+  "horizons": {
+    "1w": 5,
+    "2w": 10,
+    "1m": 21,
+    "2m": 42
+  },
+  "date_range": [
+    "1995-04-10",
+    "2026-09-11"
+  ],
+  "selfcheck": {
+    "samples": 240,
+    "max_abs_diff": 2.0161650127192843e-12
+  }
+}
