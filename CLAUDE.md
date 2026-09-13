@@ -48,6 +48,7 @@ router modules from services/core/data.
 
 - `core/indicators.py` — the only indicator implementations (vectorized). `INDICATOR_FORMULA_VERSION`.
 - `core/trend.py` — trend score: series is canonical, snapshot = last row. `TREND_FORMULA_VERSION`.
+- `core/rolling_bars.py` — rolling-anchored weekly/monthly trend: bar k = the k-th trailing D-trading-day window ending today (weekly D=5, monthly D=22; whole series re-anchored daily, no in-period volume/TR ramp). Reuses the canonical trend formula with period-scaled windows only (weekly ATR8/ER4/vol8, monthly ATR6/ER3/vol6). Vectorized over (days × bars); equivalence with `calculate_trend_score_series` pinned by `tests/unit/test_rolling_bars.py`.
 - `core/symbols.py` — symbol normalization (6-digit → .SS/.SZ, SH→SS).
 - `data/indicator_store.py` — cache-first reads; `compute_intraday_row` for realtime overlay (exact recursion from cached state columns).
 - `services/indicator_builder.py` — full-symbol cache rebuilds, param-set registry (hash of TREND_FORMULA_VERSION + normalized params), dividend detection + history re-pull, pre-rebuild `VACUUM INTO` backups to `data/backups/`.
