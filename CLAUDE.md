@@ -52,7 +52,7 @@ router modules from services/core/data.
 - `core/symbols.py` — symbol normalization (6-digit → .SS/.SZ, SH→SS).
 - `data/indicator_store.py` — cache-first reads; `compute_intraday_row` for realtime overlay (exact recursion from cached state columns).
 - `services/indicator_builder.py` — full-symbol cache rebuilds, param-set registry (hash of TREND_FORMULA_VERSION + normalized params), dividend detection + history re-pull, pre-rebuild `VACUUM INTO` backups to `data/backups/`.
-- `data/storage/db.py` — all tables incl. `market_data_qfq/raw` (+ `_weekly`/`_monthly` vendor period bars), `market_data_qfq_*_fitted` (per-day in-progress weekly/monthly bar snapshots derived from qfq daily bars; rebuilt by the daily update — full rebuild on factor change, current-period rows on raw append), `instrument_metadata` (sole instrument store), `rule_strategies`, `job_runs`, `app_config`, `indicator_daily`, `trend_daily`, `trend_param_sets`. WAL mode.
+- `data/storage/db.py` — all tables incl. `market_data_qfq/raw` (+ `_weekly`/`_monthly` vendor period bars), `market_data_qfq_*_fitted` (per-day in-progress weekly/monthly bar snapshots derived from qfq daily bars; rebuilt by the daily update — full rebuild on factor change, current-period rows on raw append), `trend_rolling_daily` (per-day rolling-anchored weekly/monthly trend values from qfq daily bars; maintained by the daily-update hook — full rebuild on factor change, trailing rows upserted on raw append), `instrument_metadata` (sole instrument store), `rule_strategies`, `job_runs`, `app_config`, `indicator_daily`, `trend_daily`, `trend_param_sets`. WAL mode.
 
 ## Configuration
 

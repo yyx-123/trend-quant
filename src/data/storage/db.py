@@ -277,6 +277,19 @@ class Database:
                     updated_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (symbol, time)
                 );
+                -- 滚动周/月趋势值（2026-09-13）：由 qfq 日K 派生的每日滚动锚定
+                -- 周/月趋势值（core.rolling_bars.rolling_period_trend_series；
+                -- 周 D=5 ATR8/ER4/vol8，月 D=22 ATR6/ER3/vol6，回看 K=16 根 bar）。
+                -- time 为交易日；w_trend/m_trend 预热期内为 NULL（双 NULL 行不落库）。
+                -- 派生表而非真源：除权因子变化时随 qfq 日K 整段重建（service 层负责）。
+                CREATE TABLE IF NOT EXISTS trend_rolling_daily (
+                    symbol TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    w_trend REAL,
+                    m_trend REAL,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (symbol, time)
+                );
                 CREATE TABLE IF NOT EXISTS ex_factors (
                     symbol TEXT NOT NULL,
                     time TEXT NOT NULL,
@@ -1667,6 +1680,134 @@ class Database:
         if not rows:
             return pd.DataFrame()
         return self._market_rows_to_df(rows)
+
+    # ------------------------------------------------------------------
+    # 滚动周/月趋势值（trend_rolling_daily）：由 qfq 日K 派生的每日滚动锚定
+    # 周/月趋势值，计算逻辑在 core.rolling_bars，本层只负责存取。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rolling_trend_records(symbol: str, df) -> list[tuple]:
+        """趋势行 → upsert 记录：w/m 至少一个非 NaN 才成行（预热期双 NaN 行
+        不落库），单侧 NaN → NULL。time 统一 'YYYY-MM-DD HH:MM:SS' 19 字符。"""
+        if df is None or df.empty:
+            return []
+        frame = pd.DataFrame(
+            {
+                "time": pd.to_datetime(df["time"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "w_trend": pd.to_numeric(df["w_trend"], errors="coerce"),
+                "m_trend": pd.to_numeric(df["m_trend"], errors="coerce"),
+            }
+        )
+        valid = ~frame["time"].isna() & (frame["w_trend"].notna() | frame["m_trend"].notna())
+        frame = frame[valid]
+        frame = frame.astype(object).where(frame.notna(), None)
+        return [(symbol, *row) for row in frame.itertuples(index=False, name=None)]
+
+    def save_rolling_trend_many(self, items) -> dict[str, int]:
+        """一次连接批量 upsert 多标的的滚动趋势行（增量维护/回填用）。
+
+        items 为 (symbol, df) 序列，df 含 time/w_trend/m_trend 列。
+        """
+        records: list[tuple] = []
+        written: dict[str, int] = {}
+        for symbol, df in items or []:
+            symbol_records = self._rolling_trend_records(symbol, df)
+            if not symbol_records:
+                continue
+            records.extend(symbol_records)
+            written[str(symbol)] = len(symbol_records)
+        if not records:
+            return {}
+        with self._connect() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO trend_rolling_daily
+                   (symbol, time, w_trend, m_trend, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now','localtime'))""",
+                records,
+            )
+            self._bump_data_version_conn(conn, "trend_rolling_daily")
+            for symbol in written:
+                self._bump_data_version_conn(conn, f"trend_rolling_daily:{symbol}")
+        return written
+
+    def replace_rolling_trend(self, symbol: str, df) -> int:
+        """同事务整段重写一个标的的滚动趋势行（除权随 qfq 重建用）。返回写入行数。"""
+        records = self._rolling_trend_records(symbol, df)
+        with self._connect() as conn:
+            conn.execute("DELETE FROM trend_rolling_daily WHERE symbol = ?", (symbol,))
+            if records:
+                conn.executemany(
+                    """INSERT OR REPLACE INTO trend_rolling_daily
+                       (symbol, time, w_trend, m_trend, updated_at)
+                       VALUES (?, ?, ?, ?, datetime('now','localtime'))""",
+                    records,
+                )
+            self._bump_data_version_conn(conn, "trend_rolling_daily")
+            self._bump_data_version_conn(conn, f"trend_rolling_daily:{symbol}")
+        return len(records)
+
+    @staticmethod
+    def _rolling_trend_rows_to_df(rows) -> "pd.DataFrame":
+        df = pd.DataFrame([dict(r) for r in rows])
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        for col in ("w_trend", "m_trend"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")  # NULL → NaN
+        return df
+
+    def load_rolling_trend(
+        self, symbol: str, start: str | None = None, end: str | None = None
+    ) -> "pd.DataFrame":
+        """按标的读滚动趋势行（time/w_trend/m_trend），可选 [start, end] 日期闭区间。"""
+        sql = "SELECT time, w_trend, m_trend FROM trend_rolling_daily WHERE symbol = ?"
+        params: list = [symbol]
+        if start:
+            sql += " AND time >= ?"
+            params.append(f"{str(start)[:10]} 00:00:00")
+        if end:
+            sql += " AND time <= ?"
+            params.append(f"{str(end)[:10]} 23:59:59")
+        sql += " ORDER BY time"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            return pd.DataFrame()
+        return self._rolling_trend_rows_to_df(rows)
+
+    def load_rolling_trend_many(
+        self, symbols, start: str | None = None, end: str | None = None
+    ) -> "dict[str, pd.DataFrame]":
+        """多标的批量读滚动趋势行：单连接 + chunked IN 查询（与 load_market_data_many
+        同型）。无数据的 symbol 不出现在返回 dict 中。"""
+        unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
+        if not unique:
+            return {}
+        sql_extra = ""
+        params_tail: list = []
+        if start:
+            sql_extra += " AND time >= ?"
+            params_tail.append(f"{str(start)[:10]} 00:00:00")
+        if end:
+            sql_extra += " AND time <= ?"
+            params_tail.append(f"{str(end)[:10]} 23:59:59")
+        grouped: dict[str, list] = {s: [] for s in unique}
+        with self._connect() as conn:
+            for i in range(0, len(unique), 500):
+                chunk = unique[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""SELECT symbol, time, w_trend, m_trend FROM trend_rolling_daily
+                       WHERE symbol IN ({placeholders}){sql_extra}
+                       ORDER BY symbol, time""",
+                    chunk + params_tail,
+                ).fetchall()
+                for row in rows:
+                    grouped[row["symbol"]].append(row)
+        return {
+            symbol: self._rolling_trend_rows_to_df(rows)
+            for symbol, rows in grouped.items()
+            if rows
+        }
 
     def load_market_data(self, symbol: str, price_mode: str = "qfq", period: str = "1d"):
 

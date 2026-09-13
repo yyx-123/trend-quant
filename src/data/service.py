@@ -22,6 +22,7 @@ from core.bars import (
 )
 from core.calendar import is_trading_day as _calendar_is_trading_day
 from core.calendar import market_now
+from core.rolling_bars import rolling_period_trend_series, rolling_trend_cfg
 from core.settings import TickFlowSettings, load_settings
 from core.strategy_config import backfill_start_date
 from core.symbols import normalize_symbol
@@ -37,6 +38,10 @@ _symbol_locks: dict[str, threading.Lock] = {}
 # 一次请求（count=10000 装得下），所以默认直接取全历史（见
 # DataService._period_bootstrap_starts）。
 PERIOD_HISTORY_START = date(1990, 1, 1)
+
+# 滚动周/月趋势值增量维护的日K 回看窗口（交易日数）：需覆盖月口径
+# 16 根 bar × 22 交易日 = 352 的上界，取 450 留缓冲。
+ROLLING_TREND_LOOKBACK_DAYS = 450
 
 
 class DataProviderError(RuntimeError):
@@ -455,6 +460,41 @@ class DataService:
                 out[period] = db.save_fitted_period_bars(symbol, fitted, period)
         return out
 
+    @staticmethod
+    def _rolling_trend_frame(daily: pd.DataFrame) -> pd.DataFrame:
+        """qfq 日K → (time, w_trend, m_trend) 帧；预热期双 NaN 行由 DB 层拦截不落库。"""
+        w = rolling_period_trend_series(daily, rolling_trend_cfg(PERIOD_WEEKLY), period=PERIOD_WEEKLY)
+        m = rolling_period_trend_series(daily, rolling_trend_cfg(PERIOD_MONTHLY), period=PERIOD_MONTHLY)
+        return pd.DataFrame({"w_trend": w, "m_trend": m}).reset_index()
+
+    def refresh_rolling_trend(
+        self, symbol: str, *, full: bool = False, since: date | None = None, db=None
+    ) -> dict:
+        """维护滚动周/月趋势值表（trend_rolling_daily，由 qfq 日K 派生）。
+
+        full=True 或表中无存量：整段重建（除权因子变化 / qfq 自愈重写后历史
+        值全部可能过时）；否则取 since 往前 ROLLING_TREND_LOOKBACK_DAYS 个
+        交易日的日K 重算，只 upsert time >= since 的行——趋势值是 PIT 确定性
+        函数（回看界 16×22 个交易日），重叠区值与全量重算逐点一致。
+        返回 {symbol, rows}。
+        """
+        db = db or get_db()
+        symbol = str(symbol or "").strip().upper()
+        qfq = db.load_market_data(symbol, price_mode="qfq", period=PERIOD_DAILY)
+        if qfq.empty:
+            return {"symbol": symbol, "rows": 0}
+        if full or since is None or db.load_rolling_trend(symbol).empty:
+            frame = self._rolling_trend_frame(qfq)
+            return {"symbol": symbol, "rows": db.replace_rolling_trend(symbol, frame)}
+        since_ts = pd.Timestamp(since)
+        times = pd.to_datetime(qfq["time"], errors="coerce")
+        pos = int((times < since_ts).sum())  # 首个 time >= since 的位置
+        source = qfq.iloc[max(0, pos - ROLLING_TREND_LOOKBACK_DAYS):]
+        frame = self._rolling_trend_frame(source)
+        frame = frame[pd.to_datetime(frame["time"], errors="coerce") >= since_ts]
+        written = db.save_rolling_trend_many([(symbol, frame)])
+        return {"symbol": symbol, "rows": written.get(symbol, 0)}
+
     def is_trading_day(self, day: date) -> bool:
         # Use the project-level calendar which combines weekday
         # checks with known A-share holiday exclusions.
@@ -547,6 +587,18 @@ class DataService:
                     self.refresh_fitted_period_bars(symbol, since=fetch_start, db=db)
             except Exception:
                 logger.exception("fitted period bars refresh failed for %s", symbol)
+
+        # 滚动周/月趋势值维护（trend_rolling_daily，由 qfq 日K 派生）：
+        # 与拟合表同一触发口径——除权/自愈 → 整段重建；日K 增量 → 只补
+        # since 起的新行（PIT 确定性，重叠区值不变）。失败不拖垮日更主结果。
+        if remat_status == "ok":
+            try:
+                if factors_changed or qfq_behind:
+                    self.refresh_rolling_trend(symbol, full=True, db=db)
+                elif raw_updated:
+                    self.refresh_rolling_trend(symbol, since=fetch_start, db=db)
+            except Exception:
+                logger.exception("rolling trend refresh failed for %s", symbol)
 
         return {
             "symbol": symbol,
