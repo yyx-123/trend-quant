@@ -3,4 +3,5 @@
 # - fonts/ 绘图字体：绘图脚本运行时自动下载
 */data/*.npy
 */data/events.csv
+*/data/series/
 */fonts/

@@ -1,0 +1,51 @@
+{
+  "model": "rolling_anchor（滚动锚定周/月K：第 k 根 bar=截至当日倒数第 k 个 D 交易日窗口，整条序列每日重新锚定；周 D=5 atr8/vol_ma8/er4，月 D=22 atr6/vol_ma6/er3，MA/EMA 3/5/8 与 tanh/权重不动；日级与 v2 相同）",
+  "version": "v3",
+  "previous_versions": {
+    "v1": "research/2026-09-13_phase-migration（边界生效口径）",
+    "v2": "research/2026-09-13_phase-migration-live-synth（在途合成口径）"
+  },
+  "rolling_params": {
+    "bar_days": {
+      "1w": 5,
+      "1M": 22
+    },
+    "trend_overrides": {
+      "1w": {
+        "atr_period": 8,
+        "vol_ma_period": 8,
+        "er_period": 4
+      },
+      "1M": {
+        "atr_period": 6,
+        "vol_ma_period": 6,
+        "er_period": 3
+      }
+    },
+    "warmup_trading_days": {
+      "1w": 50,
+      "1M": 220
+    }
+  },
+  "symbols": 874,
+  "symbols_with_events": 855,
+  "total_events": 676407,
+  "distinct_transitions": 393,
+  "valid_symbol_days": 1476797,
+  "threshold": 5.0,
+  "horizons": {
+    "1w": 5,
+    "2w": 10,
+    "1m": 21,
+    "2m": 42
+  },
+  "date_range": [
+    "1994-06-15",
+    "2026-09-11"
+  ],
+  "selfcheck": {
+    "symbols": 60,
+    "samples": 120,
+    "max_abs_diff": 5.3290705182007514e-14
+  }
+}

@@ -23,3 +23,9 @@
 - `2026-09-13_phase-migration-live-synth` —— 上一研究的口径修正：周/月趋势
   改为逐日实时计算（在途 bar 用日K 合成，与生产函数逐点等价），
   量化「信号提前量」并重新评估反转效应。
+- `2026-09-13_rolling-trend-calibration` —— 滚动锚定周/月趋势值（core/rolling_bars）
+  的全市场标定：六组分布与 ±5 分位、tanh 饱和率/量能/ER 中间量诊断、
+  月 er_period ∈ {3,4,6} 对比，给出阈值与 ER 窗口建议。
+- `2026-09-13_phase-migration-rolling` —— 相位迁移 v3：周/月状态改用滚动锚定口径
+  （周 ATR8/ER4、月 ATR6/ER3），月分量变化的月内分布接近期望均匀；
+  v1→v2→v3 三版对比显示旗舰反转路径收益单调衰减（计时 artifact 被消除）。
