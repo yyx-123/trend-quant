@@ -72,6 +72,9 @@ class TestPeriodTableResolution:
             "market_data_raw_weekly",
             "market_data_qfq_monthly",
             "market_data_raw_monthly",
+            # 拟合周/月K（2026-09-13）：由 qfq 日K 派生的每日在途快照表
+            "market_data_qfq_weekly_fitted",
+            "market_data_qfq_monthly_fitted",
         }
 
     def test_version_name_includes_period(self, test_db) -> None:

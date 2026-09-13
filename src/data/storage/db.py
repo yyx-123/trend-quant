@@ -242,6 +242,41 @@ class Database:
                     updated_at TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (symbol, time)
                 );
+                -- 拟合周/月K（2026-09-13）：由 qfq 日K 派生的「每日在途 bar 快照」——
+                -- time 为交易日，行内容是「截至当日收盘、当日所在周/月的在途 bar」
+                -- （open=周期首日、high/low=累计极值、close=当日、volume/amount 累计），
+                -- 供回测/研究按 (symbol, time) 取「当日真实可见」的周/月K，杜绝前视。
+                -- 派生表而非真源：除权因子变化时随 qfq 日K 整段重建（service 层负责；
+                -- 价格水位随新因子平移，收益与趋势值不受影响——与 qfq 日K 同一性质）。
+                -- period_start = 该周期的日历起点（周一/月初），免消费方重算 ISO 周。
+                CREATE TABLE IF NOT EXISTS market_data_qfq_weekly_fitted (
+                    symbol TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    period_start TEXT,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    provider TEXT,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (symbol, time)
+                );
+                CREATE TABLE IF NOT EXISTS market_data_qfq_monthly_fitted (
+                    symbol TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    period_start TEXT,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    provider TEXT,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (symbol, time)
+                );
                 CREATE TABLE IF NOT EXISTS ex_factors (
                     symbol TEXT NOT NULL,
                     time TEXT NOT NULL,
@@ -1509,6 +1544,129 @@ class Database:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
+
+    # ------------------------------------------------------------------
+    # 拟合周/月K（market_data_qfq_*_fitted）：由 qfq 日K 派生的每日在途快照，
+    # 聚合逻辑在 core.bars.fitted_period_rows，本层只负责存取。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fitted_table(period: str) -> str:
+        canonical = normalize_period(period)
+        if canonical == "1d":
+            raise ValueError("fitted tables exist only for weekly/monthly periods")
+        return f"market_data_qfq_{'weekly' if canonical == '1w' else 'monthly'}_fitted"
+
+    @staticmethod
+    def _fitted_records(symbol: str, df) -> tuple[list[tuple], int]:
+        """拟合行 → upsert 记录（向量化；非正价格行拦截，与 _market_records 同防御）。"""
+        if df is None or df.empty:
+            return [], 0
+        frame = pd.DataFrame(
+            {
+                "time": pd.to_datetime(df["time"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "period_start": df["period_start"].astype(str) if "period_start" in df.columns else None,
+            }
+        )
+        for col in ("open", "high", "low", "close", "volume", "amount"):
+            frame[col] = pd.to_numeric(df[col], errors="coerce") if col in df.columns else None
+        valid = ~frame["time"].isna() & ~(
+            frame[["open", "high", "low", "close"]].astype("Float64") <= 0
+        ).any(axis=1)
+        dropped = int((~valid).sum())
+        frame = frame[valid]
+        frame = frame.astype(object).where(frame.notna(), None)
+        records = [
+            (symbol, *row, "local_fitted")
+            for row in frame.itertuples(index=False, name=None)
+        ]
+        return records, dropped
+
+    def save_fitted_period_bars(self, symbol: str, df, period: str) -> int:
+        """upsert 拟合周期行（同事务）。返回写入行数。"""
+        table = self._fitted_table(period)
+        records, dropped = self._fitted_records(symbol, df)
+        if dropped:
+            _logger.warning("Dropped %d invalid rows for %s (%s)", dropped, symbol, table)
+        if not records:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                f"""INSERT OR REPLACE INTO {table}
+                   (symbol, time, period_start, open, high, low, close, volume, amount, provider, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
+                records,
+            )
+            self._bump_data_version_conn(conn, table)
+            self._bump_data_version_conn(conn, f"{table}:{symbol}")
+        return len(records)
+
+    def save_fitted_period_bars_many(self, items, period: str) -> dict[str, int]:
+        """一次连接批量 upsert 多标的的拟合周期行（回填用，与 save_market_data_many 对称）。"""
+        table = self._fitted_table(period)
+        records: list[tuple] = []
+        written: dict[str, int] = {}
+        for symbol, df in items or []:
+            symbol_records, _ = self._fitted_records(symbol, df)
+            if not symbol_records:
+                continue
+            records.extend(symbol_records)
+            written[str(symbol)] = len(symbol_records)
+        if not records:
+            return {}
+        with self._connect() as conn:
+            conn.executemany(
+                f"""INSERT OR REPLACE INTO {table}
+                   (symbol, time, period_start, open, high, low, close, volume, amount, provider, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
+                records,
+            )
+            self._bump_data_version_conn(conn, table)
+            for symbol in written:
+                self._bump_data_version_conn(conn, f"{table}:{symbol}")
+        return written
+
+    def replace_fitted_period_bars(self, symbol: str, df, period: str) -> int:
+        """同事务整段重写一个标的的拟合周期行（除权随 qfq 重建用）。返回写入行数。"""
+        table = self._fitted_table(period)
+        records, dropped = self._fitted_records(symbol, df)
+        if dropped:
+            _logger.warning("Dropped %d invalid rows for %s (%s)", dropped, symbol, table)
+        with self._connect() as conn:
+            conn.execute(f"DELETE FROM {table} WHERE symbol = ?", (symbol,))
+            if records:
+                conn.executemany(
+                    f"""INSERT OR REPLACE INTO {table}
+                       (symbol, time, period_start, open, high, low, close, volume, amount, provider, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
+                    records,
+                )
+            self._bump_data_version_conn(conn, table)
+            self._bump_data_version_conn(conn, f"{table}:{symbol}")
+        return len(records)
+
+    def load_fitted_period_bars(
+        self, symbol: str, period: str, start: str | None = None, end: str | None = None
+    ) -> "pd.DataFrame":
+        """按标的读拟合周期行（含 period_start 列），可选 [start, end] 日期闭区间。"""
+        table = self._fitted_table(period)
+        sql = (
+            f"SELECT time, period_start, open, high, low, close, volume, amount, symbol, provider"
+            f" FROM {table} WHERE symbol = ?"
+        )
+        params: list = [symbol]
+        if start:
+            sql += " AND time >= ?"
+            params.append(f"{str(start)[:10]} 00:00:00")
+        if end:
+            sql += " AND time <= ?"
+            params.append(f"{str(end)[:10]} 23:59:59")
+        sql += " ORDER BY time"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            return pd.DataFrame()
+        return self._market_rows_to_df(rows)
 
     def load_market_data(self, symbol: str, price_mode: str = "qfq", period: str = "1d"):
 

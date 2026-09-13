@@ -148,3 +148,54 @@ def date_span(df: pd.DataFrame) -> tuple[str | None, str | None]:
     if series.empty:
         return None, None
     return series.min().date().isoformat(), series.max().date().isoformat()
+
+
+# 拟合周期表（market_data_qfq_*_fitted）的输出列，DB 层与测试共用此顺序。
+FITTED_COLUMNS = [
+    "time", "period_start", "open", "high", "low", "close", "volume", "amount",
+]
+
+
+def fitted_period_rows(daily_df: pd.DataFrame, period: str) -> pd.DataFrame:
+    """逐交易日拟合的周/月K（在途 bar 的每日快照）。
+
+    对日K 里的每个交易日 t，输出「截至 t 收盘、t 所在周/月的在途 bar」：
+    open=周期内首个交易日 open、high/low=周期内累计极值、close=t 收盘、
+    volume/amount=周期内累计。即 t 当天真实可见的周/月K——回测/研究在
+    (symbol, date) 上取到的信息不会晚于 date 当日收盘，杜绝前视。
+
+    周期分组：周=ISO 周（周一起），月=自然月；period_start 为周一/月初的
+    日历日（停牌日无日K 则无输出行；上市首周/首月的半截周期如实保留，
+    正是 PIT 语义）。仅周/月周期可用，日K 入参抛 ValueError。
+    """
+    canonical = normalize_period(period)
+    if canonical == PERIOD_DAILY:
+        raise ValueError("fitted rows are only defined for weekly/monthly periods")
+    if daily_df is None or daily_df.empty:
+        return pd.DataFrame(columns=FITTED_COLUMNS)
+
+    df = daily_df.copy()
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame(columns=FITTED_COLUMNS)
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    freq = "W-SUN" if canonical == PERIOD_WEEKLY else "M"
+    key = df["time"].dt.to_period(freq)
+    group = df.groupby(key, sort=True)
+    out = pd.DataFrame(
+        {
+            "time": df["time"],
+            "period_start": key.dt.start_time.dt.strftime("%Y-%m-%d"),
+            "open": group["open"].transform("first"),
+            "high": group["high"].cummax(),
+            "low": group["low"].cummin(),
+            "close": df["close"],
+            "volume": group["volume"].cumsum(),
+            "amount": group["amount"].cumsum() if "amount" in df.columns else float("nan"),
+        }
+    )
+    return out[FITTED_COLUMNS].reset_index(drop=True)

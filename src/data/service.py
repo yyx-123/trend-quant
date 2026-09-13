@@ -17,6 +17,7 @@ from core.bars import (
     PERIOD_WEEKLY,
     closed_bars,
     date_span,
+    fitted_period_rows,
     normalize_period,
 )
 from core.calendar import is_trading_day as _calendar_is_trading_day
@@ -422,6 +423,38 @@ class DataService:
         rows = self.market_store.replace_history(symbol, qfq)
         return {"symbol": symbol, "status": "ok", "rows": int(rows)}
 
+    def refresh_fitted_period_bars(
+        self, symbol: str, *, full: bool = False, since: date | None = None, db=None
+    ) -> dict:
+        """维护拟合周/月K 表（market_data_qfq_*_fitted，由 qfq 日K 派生）。
+
+        full=True：整段重建（除权因子变化 / qfq 自愈重写后，历史拟合行全部
+        可能过时）；否则只重建 since 所在周/月覆盖的拟合行——日更常态下即
+        当周 ≤5 行 + 当月 ≤23 行（拟合行 t 只依赖 ≤t 的日K，更早的行不受
+        新 bar 影响）。返回 {symbol, "1w": 行数, "1M": 行数}。
+        """
+        db = db or get_db()
+        symbol = str(symbol or "").strip().upper()
+        qfq = db.load_market_data(symbol, price_mode="qfq", period=PERIOD_DAILY)
+        out = {"symbol": symbol}
+        for period in (PERIOD_WEEKLY, PERIOD_MONTHLY):
+            source = qfq
+            if not full and since is not None and not qfq.empty:
+                # 只取受影响周期的日K：since 所在周期的日历起点
+                since_ts = pd.Timestamp(since)
+                floor = (
+                    since_ts.to_period("W-SUN").start_time
+                    if period == PERIOD_WEEKLY
+                    else since_ts.to_period("M").start_time
+                )
+                source = qfq[pd.to_datetime(qfq["time"], errors="coerce") >= floor]
+            fitted = fitted_period_rows(source, period)
+            if full:
+                out[period] = db.replace_fitted_period_bars(symbol, fitted, period)
+            else:
+                out[period] = db.save_fitted_period_bars(symbol, fitted, period)
+        return out
+
     def is_trading_day(self, day: date) -> bool:
         # Use the project-level calendar which combines weekday
         # checks with known A-share holiday exclusions.
@@ -502,6 +535,18 @@ class DataService:
             remat_status = remat.get("status")
             if remat_status == "ok" and factors_changed:
                 status = "updated"
+
+        # 拟合周/月K 维护（market_data_qfq_*_fitted，由 qfq 日K 派生）：
+        # 除权变化 / qfq 自愈重写 → 整段重建；仅日K 增量 → 只重建新 bar
+        # 所在周期覆盖的拟合行。派生表失败不拖垮日更主结果。
+        if remat_status == "ok":
+            try:
+                if factors_changed or qfq_behind:
+                    self.refresh_fitted_period_bars(symbol, full=True, db=db)
+                elif raw_updated:
+                    self.refresh_fitted_period_bars(symbol, since=fetch_start, db=db)
+            except Exception:
+                logger.exception("fitted period bars refresh failed for %s", symbol)
 
         return {
             "symbol": symbol,
