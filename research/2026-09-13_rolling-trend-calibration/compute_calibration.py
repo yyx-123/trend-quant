@@ -11,7 +11,9 @@
 
 - ``series/{symbol}.npz``       每标的 (dates, d, w, m) 日频序列（预热期 NaN 保留）
 - ``{asset}_{period}.npy``      六组池化样本（周/月为滚动口径、日频采样）
-- ``stats.json``                六组描述性统计（schema 对齐前序研究 + ±5 分位）
+- ``stats.json``                六组描述性统计（schema 对齐前序研究 + ±5 分位；
+                                滚动周/月四组另含 ±9 口径——2026-09-14 起周/月三态
+                                阈值采纳 ±9）
 - ``saturation.json``           抽样诊断：|norm_slope|/|norm_bias|>95 饱和率、
                                 volume_factor / ER 分布；含等价性自检
 - ``er_variants.json``          月尺度 er_period ∈ {3,4,6} 对比
@@ -57,8 +59,12 @@ SAMPLE_DAYS = 40
 ER_VARIANTS = (3, 4, 6)  # 月尺度；3 = rolling_trend_cfg("1M") 现行值
 
 
-def _describe(values: np.ndarray) -> dict:
-    """与 2026-09-12 研究同口径的描述统计，新增 ±5 在分布中的分位。"""
+def _describe(values: np.ndarray, extra_thresholds: tuple[float, ...] = ()) -> dict:
+    """与 2026-09-12 研究同口径的描述统计，新增 ±5 在分布中的分位。
+
+    ``extra_thresholds`` 追加对称阈值 t 的五项实测口径（本研究仅滚动周/月
+    四组用 t=9：2026-09-14 起滚动周/月三态阈值采纳 ±9，日组不加）。
+    """
     n = int(values.size)
     mean = float(np.mean(values))
     std = float(np.std(values))
@@ -69,7 +75,7 @@ def _describe(values: np.ndarray) -> dict:
     skew = m3 / m2**1.5 if m2 > 0 else 0.0
     kurt = m4 / m2**2 - 3.0 if m2 > 0 else 0.0
     pct = np.percentile(values, [0.5, 1, 5, 10, 25, 50, 75, 90, 95, 99, 99.5])
-    return {
+    info = {
         "n": n,
         "mean": mean,
         "std": std,
@@ -86,13 +92,21 @@ def _describe(values: np.ndarray) -> dict:
         # ±5 卡在本分布的分位（P(X ≤ t)，连续分布下 pctile_at_5 ≈ 1 − pct_ge_5）
         "pctile_rank_at_neg5": float(np.mean(values <= -5.0)),
         "pctile_rank_at_pos5": float(np.mean(values <= 5.0)),
-        "percentiles": {
-            "p0.5": float(pct[0]), "p1": float(pct[1]), "p5": float(pct[2]),
-            "p10": float(pct[3]), "p25": float(pct[4]), "p50": float(pct[5]),
-            "p75": float(pct[6]), "p90": float(pct[7]), "p95": float(pct[8]),
-            "p99": float(pct[9]), "p99.5": float(pct[10]),
-        },
     }
+    for t in extra_thresholds:
+        tag = f"{t:g}"
+        info[f"pct_ge_{tag}"] = float(np.mean(values >= t))
+        info[f"pct_le_-{tag}"] = float(np.mean(values <= -t))
+        info[f"pct_abs_lt_{tag}"] = float(np.mean(np.abs(values) < t))
+        info[f"pctile_rank_at_neg{tag}"] = float(np.mean(values <= -t))
+        info[f"pctile_rank_at_pos{tag}"] = float(np.mean(values <= t))
+    info["percentiles"] = {
+        "p0.5": float(pct[0]), "p1": float(pct[1]), "p5": float(pct[2]),
+        "p10": float(pct[3]), "p25": float(pct[4]), "p50": float(pct[5]),
+        "p75": float(pct[6]), "p90": float(pct[7]), "p95": float(pct[8]),
+        "p99": float(pct[9]), "p99.5": float(pct[10]),
+    }
+    return info
 
 
 def _align_to(series: pd.Series, t_idx: pd.Index) -> np.ndarray:
@@ -207,20 +221,30 @@ def main() -> int:
     # ---- (b) 六组分布统计 ----
     stats: dict[str, dict] = {}
     for key in groups:
+        period = key.rsplit("_", 1)[1]
         values = np.concatenate(groups[key]) if groups[key] else np.empty(0)
         np.save(OUT_DIR / f"{key}.npy", values)
-        info = _describe(values) if values.size else {"n": 0}
+        # 滚动周/月四组追加 ±9 实测（2026-09-14 起周/月三态阈值采纳 ±9）；日组不动
+        info = (
+            _describe(values, extra_thresholds=(9.0,) if period in ("weekly", "monthly") else ())
+            if values.size else {"n": 0}
+        )
         info["symbols_with_data"] = group_symbols[key]
         lo, hi = group_dates[key]
         info["date_min"] = str(lo)[:10] if lo is not None else None
         info["date_max"] = str(hi)[:10] if hi is not None else None
         stats[key] = info
         if values.size:
-            print(f"[{key}] N={info['n']} 标的数={info['symbols_with_data']} "
-                  f"mean={info['mean']:.3f} std={info['std']:.3f} "
-                  f"|x|<5={info['pct_abs_lt_5'] * 100:.1f}% "
-                  f"q(+5)={info['pctile_rank_at_pos5'] * 100:.1f}% "
-                  f"q(-5)={info['pctile_rank_at_neg5'] * 100:.1f}%", flush=True)
+            line = (f"[{key}] N={info['n']} 标的数={info['symbols_with_data']} "
+                    f"mean={info['mean']:.3f} std={info['std']:.3f} "
+                    f"|x|<5={info['pct_abs_lt_5'] * 100:.1f}% "
+                    f"q(+5)={info['pctile_rank_at_pos5'] * 100:.1f}% "
+                    f"q(-5)={info['pctile_rank_at_neg5'] * 100:.1f}%")
+            if "pct_abs_lt_9" in info:
+                line += (f" | |x|<9={info['pct_abs_lt_9'] * 100:.1f}% "
+                         f"q(+9)={info['pctile_rank_at_pos9'] * 100:.1f}% "
+                         f"q(-9)={info['pctile_rank_at_neg9'] * 100:.1f}%")
+            print(line, flush=True)
 
     with open(OUT_DIR / "stats.json", "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
