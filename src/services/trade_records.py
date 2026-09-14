@@ -28,6 +28,12 @@ from services.manual_trade import compute_manual_trade
 
 logger = get_logger(__name__)
 
+# 持仓 mini 日K图默认窗口（根）：最近 20 根；买入日更早时左扩到买入日那一根，
+# 保证「买点」始终画得出来，最多 MINI_CHART_MAX_BARS 根（窗口过宽则蜡烛挤成
+# 一条线，且响应体膨胀；超出时前端退化为一条买入价横线）。
+MINI_CHART_BARS = 20
+MINI_CHART_MAX_BARS = 120
+
 __all__ = [
     "TradeAuthError",
     "TradePermissionError",
@@ -174,7 +180,86 @@ def _base_item(row: dict, name_map: dict[str, str]) -> dict:
     }
 
 
-def _open_item(row: dict, result: dict, name_map: dict[str, str]) -> dict:
+def _mini_chart_payload(
+    df: pd.DataFrame | None,
+    buy_date: str,
+    buy_price: float,
+    intraday_bar: dict | None,
+) -> dict | None:
+    """持仓行 mini 日K图数据（随列表一次下发，前端不再逐标的拉行情）。
+
+    窗口 = 最近 ``MINI_CHART_BARS`` 根K线；买入日更早时左扩到买入日那一根
+    （保证买点落在窗口内），最多 ``MINI_CHART_MAX_BARS`` 根。
+    ``intraday_bar`` 为 ``compute_manual_trade`` 已归一化的盘中合成K线
+    （``date/open/high/low/close``），晚于最后一根 EOD 时作为最后一根追加，
+    与盘中口径的最新价/止损一致。
+
+    返回 ``{dates, candles, buy}``：``candles`` 为 ECharts K线
+    ``[[open, close, low, high], ...]``，``buy.index`` 为买点在窗口内的下标
+    （买入日超出窗口时为 ``None``，前端退化为买入价横线）。
+    """
+    if df is None or df.empty:
+        return None
+    frame = df.loc[:, ["time", "open", "high", "low", "close"]].copy()
+    frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+    for col in ("open", "high", "low", "close"):
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    frame = frame.dropna(subset=["time", "open", "high", "low", "close"])
+    if frame.empty:
+        return None
+    last_day = frame["time"].dt.normalize().max()
+    if intraday_bar is not None:
+        bar_day = pd.Timestamp(intraday_bar["date"]).normalize()
+        if bar_day > last_day:
+            frame = pd.concat(
+                [
+                    frame,
+                    pd.DataFrame(
+                        [
+                            {
+                                "time": bar_day,
+                                "open": float(intraday_bar["open"]),
+                                "high": float(intraday_bar["high"]),
+                                "low": float(intraday_bar["low"]),
+                                "close": float(intraday_bar["close"]),
+                            }
+                        ]
+                    ),
+                ],
+                ignore_index=True,
+            )
+    buy_ts = pd.Timestamp(buy_date).normalize()
+    buy_count = int((frame["time"].dt.normalize() < buy_ts).sum())  # 买入日之前的K线根数
+    start = min(max(0, len(frame) - MINI_CHART_BARS), buy_count)
+    if len(frame) - start > MINI_CHART_MAX_BARS:
+        start = len(frame) - MINI_CHART_MAX_BARS
+    window = frame.iloc[start:].reset_index(drop=True)
+    buy_index = buy_count - start
+    return {
+        "dates": [str(t.date()) for t in window["time"]],
+        "candles": [
+            [
+                round(float(r.open), 4),
+                round(float(r.close), 4),
+                round(float(r.low), 4),
+                round(float(r.high), 4),
+            ]
+            for r in window.itertuples()
+        ],
+        "buy": {
+            "date": str(buy_ts.date()),
+            "price": round(float(buy_price), 4),
+            "index": buy_index if 0 <= buy_index < len(window) else None,
+        },
+    }
+
+
+def _open_item(
+    row: dict,
+    result: dict,
+    name_map: dict[str, str],
+    mini_chart: dict | None = None,
+) -> dict:
     shares = float(row["shares"])
     latest = float(result["stops"]["latest_price"])
     buy_price = float(row["buy_price"])
@@ -193,10 +278,18 @@ def _open_item(row: dict, result: dict, name_map: dict[str, str]) -> dict:
             "holding": result["holding"],
         }
     )
+    if mini_chart is not None:
+        item["mini_chart"] = mini_chart
     return item
 
 
-def _closed_item(row: dict, result: dict, name_map: dict[str, str]) -> dict:
+def _closed_item(
+    row: dict,
+    result: dict,
+    name_map: dict[str, str],
+    latest_price: float | None = None,
+    latest_date: str | None = None,
+) -> dict:
     shares = float(row["shares"])
     buy_price = float(row["buy_price"])
     sell_price = float(row["sell_price"])
@@ -211,7 +304,35 @@ def _closed_item(row: dict, result: dict, name_map: dict[str, str]) -> dict:
             "holding": result["holding"],
         }
     )
+    # 清仓后距今：现价（盘中报价优先，否则最新EOD收盘）相对清仓价的涨跌幅。
+    # 与持仓行的现价同源，便于对照「卖飞 / 躲过下跌」。
+    item["latest_price"] = latest_price
+    item["latest_date"] = latest_date
+    item["since_close_pct"] = (
+        round((latest_price / sell_price - 1) * 100, 2)
+        if latest_price is not None and sell_price > 0
+        else None
+    )
     return item
+
+
+def _latest_price(df: pd.DataFrame | None, intraday_bar: dict | None) -> tuple[float | None, str | None]:
+    """标的当前价 = 盘中合成K线收盘（原始 ``time`` 键口径）优先，否则最新EOD收盘。
+
+    已清仓交易的价格不按清仓日截断 —— 这里要的是「今天」的价格。
+    """
+    if intraday_bar is not None:
+        close = safe_float(intraday_bar.get("close"))
+        bar_time = intraday_bar.get("time") or intraday_bar.get("date")
+        if close is not None and bar_time is not None:
+            return round(float(close), 4), str(pd.Timestamp(bar_time).date())
+    if df is None or df.empty:
+        return None, None
+    close = safe_float(df["close"].iloc[-1])
+    if close is None:
+        return None, None
+    bar_time = pd.to_datetime(df["time"].iloc[-1], errors="coerce")
+    return round(float(close), 4), (str(bar_time.date()) if pd.notna(bar_time) else None)
 
 
 def list_trades(
@@ -230,27 +351,28 @@ def list_trades(
     rows = db.list_manual_trades(user["id"])
     name_map = load_instrument_name_map()  # DB 不可用时返回 {}（单测环境）
 
+    # 全量日K按 symbol 去重预取：持仓（算指标 + mini 图）与清仓（算当前价 +
+    # 截止日指标）共用，同一标的整个请求只读一次。
+    dfs: dict = {}
+    for row in rows:
+        if row["symbol"] not in dfs:
+            df = db.load_market_data(row["symbol"])
+            if not df.empty:
+                dfs[row["symbol"]] = df
+
     # 同 symbol 实时报价请求级去重 + 批量预取：整个列表只发一次批量报价请求，
     # 避免逐标的单调打满 tickflow 实时行情 10/min 限流导致接口分钟级卡顿。
-    # open_dfs 保留给下方 compute_manual_trade 复用（df 参数），同一标的的
-    # 全量行情整个请求只读一次。
+    # 已清仓标的也一并取价（「清仓后距今」列需要现价），仍是同一次批量请求。
     prefetched: dict[str, dict | None] = {}
-    open_dfs: dict = {}
     if intraday:
-        for row in rows:
-            if row["status"] != "open" or row["symbol"] in prefetched or row["symbol"] in open_dfs:
-                continue
-            df = db.load_market_data(row["symbol"])
-            if df.empty:
-                prefetched[row["symbol"]] = None
-            else:
-                open_dfs[row["symbol"]] = df
-        prefetched.update(sl.fetch_intraday_bars(open_dfs))
+        prefetched = sl.fetch_intraday_bars(dfs)
 
     open_items: list[dict] = []
     closed_items: list[dict] = []
     for row in rows:
         item = _base_item(row, name_map)
+        df = dfs.get(row["symbol"])
+        bar = prefetched.get(row["symbol"]) if intraday else None
         try:
             if row["status"] == "open":
                 result = compute_manual_trade(
@@ -259,14 +381,27 @@ def list_trades(
                     row["buy_price"],
                     db=db,
                     intraday=intraday,
-                    intraday_bar=(
-                        prefetched.get(row["symbol"]) if intraday else sl.UNSET_INTRADAY_BAR
-                    ),
+                    intraday_bar=bar if intraday else sl.UNSET_INTRADAY_BAR,
                     stop_mode=stop_mode,
-                    df=open_dfs.get(row["symbol"]),
+                    df=df,
                     name_map=name_map,
+                    # 已落库记录：价格是既成事实，不做买入日区间回放校验
+                    validate_price=False,
                 )
-                open_items.append(_open_item(row, result, name_map))
+                open_items.append(
+                    _open_item(
+                        row,
+                        result,
+                        name_map,
+                        mini_chart=_mini_chart_payload(
+                            df,
+                            row["buy_date"],
+                            row["buy_price"],
+                            # 用止损结果里已归一化的盘中合成K线（与止损口径同源）
+                            result["stops"].get("intraday_bar"),
+                        ),
+                    )
+                )
             else:
                 result = compute_manual_trade(
                     row["symbol"],
@@ -276,9 +411,14 @@ def list_trades(
                     intraday=False,
                     end_date=row["sell_date"],
                     stop_mode=stop_mode,
+                    df=df,
                     name_map=name_map,
+                    validate_price=False,
                 )
-                closed_items.append(_closed_item(row, result, name_map))
+                latest_price, latest_date = _latest_price(df, bar)
+                closed_items.append(
+                    _closed_item(row, result, name_map, latest_price, latest_date)
+                )
         except Exception as exc:
             logger.warning("trade %s metric compute failed: %s", row["id"], exc)
             item["error"] = str(exc)
@@ -431,6 +571,7 @@ def symbol_annotations(user: dict, symbol: str, db=None) -> dict:
                         intraday=True,
                         intraday_bar=intraday_bar,
                         stop_mode=mode,
+                        validate_price=False,
                     )
                     stops[mode] = {
                         k: result["stops"].get(k) for k in _ANNOTATION_STOP_FIELDS

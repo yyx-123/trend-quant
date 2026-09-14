@@ -142,6 +142,7 @@ def compute_stop_loss(
     df: pd.DataFrame | None = None,
     atr_series: pd.Series | None = None,
     metadata_map: dict | None = None,
+    validate_price: bool = True,
 ) -> dict:
     """计算给定买入的硬止损价和吊灯止损价。
 
@@ -163,6 +164,8 @@ def compute_stop_loss(
     调用方传入后不再重复 ``db.load_market_data``）。
     ``atr_series`` / ``metadata_map`` 为批量路径（compute_stop_loss_batch）
     的预取注入：传入后跳过 ``get_series`` 与逐标的 metadata 查询。
+    ``validate_price=False`` 跳过「买入价必须落在买入日区间」的输入校验，
+    供已落库记录的回放（复权口径变化后不再重判历史成交价）。
 
     Raises:
         StopLossError: 标的无效、无数据或 ATR 异常。
@@ -252,8 +255,12 @@ def compute_stop_loss(
 
     # 买入价合理性校验：必须落在买入日当根K线的最高/最低价之间。
     # 买入日为非交易日（无当根K线）时跳过 —— 历史行为允许非交易日买入。
+    # ``validate_price=False`` 供**已落库记录**的回放使用：日K是前复权口径，
+    # 除权后重新物化会把历史价格整体缩放，录入时合法、当前口径下越界的价格会让
+    # 整行指标（含 mini 图）消失；已落库的价格是既成事实，只做输入校验、不做
+    # 回放校验（录入 / 试算 / MCP 计算仍走默认 True）。
     day_bars = df[df["time"].dt.normalize() == buy_ts]
-    if not day_bars.empty:
+    if validate_price and not day_bars.empty:
         day_low = safe_float(pd.to_numeric(day_bars["low"], errors="coerce").iloc[0], 0.0)
         day_high = safe_float(pd.to_numeric(day_bars["high"], errors="coerce").iloc[0], 0.0)
         eps = max(1e-4, abs(day_high) * 1e-6)

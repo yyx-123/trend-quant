@@ -3024,6 +3024,7 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   color: var(--text-soft);
   font-size: 12px;
   font-weight: 800;
+  white-space: nowrap;
   cursor: pointer;
   transition: background 0.15s, color 0.15s, box-shadow 0.15s;
 }
@@ -3034,6 +3035,36 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
   color: #fff;
   box-shadow: 0 4px 10px rgba(13, 122, 113, 0.28);
+}
+/* 时间范围：预设分段 + 自定义起止日期（仅选中「自定义」时展开） */
+.mt-records-range {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.mt-range-custom {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(20, 41, 51, 0.05);
+}
+.mt-range-custom[hidden] {
+  display: none;
+}
+.mt-range-custom input {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+.mt-range-sep {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 /* ── 手工交易：紧凑交易卡片列表 ───────────────────────────── */
 /* overflow-x 用 clip 而非 auto：clip 不创建滚动容器，
@@ -3101,6 +3132,77 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   margin-left: 2px;
   font-size: 10px;
   line-height: 1;
+}
+/* 带悬停说明的表头（非排序列，如「日K」「清仓后距今」） */
+.mt-trade-table th.mt-th-tip {
+  cursor: help;
+  text-decoration: underline dotted rgba(102, 118, 128, 0.55);
+  text-underline-offset: 3px;
+}
+/* 持仓行 mini 日K图（买点 + 止损线），尺寸即 ECharts 画布尺寸 */
+.mt-cell-mini {
+  padding: 4px 8px;
+}
+.mt-mini {
+  width: 180px;
+  height: 54px;
+  margin: 0 auto;
+}
+.mt-mini-empty {
+  display: inline-block;
+  color: var(--muted);
+  line-height: 54px;
+}
+/* 清仓统计卡片：跟在清仓区头部下方，与止损卡片同一套 .mt-stat 视觉。
+   9 张卡固定挤在一行（不换行），字号随列宽收缩，信息密度优先 */
+.mt-closed-stats {
+  margin-bottom: 16px;
+}
+.mt-closed-stats[hidden] {
+  display: none;
+}
+.mt-stop-grid.mt-closed-stats {
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 10px;
+}
+.mt-closed-stats .mt-stat {
+  padding: 12px 12px 10px;
+}
+.mt-closed-stats .mt-stat-value {
+  font-size: 17px;
+}
+.mt-closed-stats .mt-stat-primary .mt-stat-value {
+  font-size: 19px;
+}
+.mt-closed-stats .mt-stat-note {
+  font-size: 11px;
+}
+/* ── 手工交易：已清仓盈亏热力图 (treemap) ──────────────────── */
+.mt-heat {
+  margin-bottom: 16px;
+  padding: 14px 16px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-soft);
+}
+.mt-heat[hidden] {
+  display: none;
+}
+.mt-heat-head {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.mt-heat-head h4 {
+  margin: 0;
+  font-size: 14px;
+}
+.mt-heat-chart {
+  position: relative;
+  width: 100%;
+  height: 420px;
 }
 .mt-trade-name {
   color: var(--text);
@@ -3857,46 +3959,70 @@ button.index-view-btn { min-height:0; box-shadow:none; cursor:pointer; font-fami
   }
 
   /* 窄屏隐藏次要列（按列序号，日后调整列顺序时需同步此处）。
-     持仓表保留：标的 / 现价 / 仓位占比 / 涨跌幅 / 盈亏 / 硬止损价 / 吊灯止损价 / 风险 / 操作。
+     持仓表保留：标的 / 日K / 现价 / 仓位占比 / 涨跌幅 / 盈亏 / 硬止损价 / 吊灯止损价 / 风险 / 操作。
      td[colspan] 是错误行的整行提示单元格，不参与隐藏，避免误藏错误信息；
      被隐藏列的表头排序入口在手机上不可点，属既定取舍。 */
   #mtTradeList .mt-trade-table th:nth-child(2),
-  #mtTradeList .mt-trade-table th:nth-child(3),
   #mtTradeList .mt-trade-table th:nth-child(4),
-  #mtTradeList .mt-trade-table th:nth-child(8),
+  #mtTradeList .mt-trade-table th:nth-child(5),
   #mtTradeList .mt-trade-table th:nth-child(9),
-  #mtTradeList .mt-trade-table th:nth-child(11),
+  #mtTradeList .mt-trade-table th:nth-child(10),
   #mtTradeList .mt-trade-table th:nth-child(12),
-  #mtTradeList .mt-trade-table th:nth-child(16),
+  #mtTradeList .mt-trade-table th:nth-child(13),
+  #mtTradeList .mt-trade-table th:nth-child(17),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(2),
-  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(3),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(4),
-  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(8),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(5),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(9),
-  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(11),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(10),
   #mtTradeList .mt-trade-table td:not([colspan]):nth-child(12),
-  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(16) {
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(13),
+  #mtTradeList .mt-trade-table td:not([colspan]):nth-child(17) {
     display: none;
   }
 
-  /* 清仓表保留：标的 / 买入日期 / 卖出日期 / 收益 / 收益率 */
+  /* 清仓表保留：标的 / 买入日期 / 卖出日期 / 收益 / 收益率 / 清仓后距今 */
   #mtClosedList .mt-trade-table th:nth-child(2),
   #mtClosedList .mt-trade-table th:nth-child(5),
   #mtClosedList .mt-trade-table th:nth-child(6),
   #mtClosedList .mt-trade-table th:nth-child(7),
   #mtClosedList .mt-trade-table th:nth-child(8),
-  #mtClosedList .mt-trade-table th:nth-child(11),
   #mtClosedList .mt-trade-table th:nth-child(12),
   #mtClosedList .mt-trade-table th:nth-child(13),
+  #mtClosedList .mt-trade-table th:nth-child(14),
   #mtClosedList .mt-trade-table td:not([colspan]):nth-child(2),
   #mtClosedList .mt-trade-table td:not([colspan]):nth-child(5),
   #mtClosedList .mt-trade-table td:not([colspan]):nth-child(6),
   #mtClosedList .mt-trade-table td:not([colspan]):nth-child(7),
   #mtClosedList .mt-trade-table td:not([colspan]):nth-child(8),
-  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(11),
   #mtClosedList .mt-trade-table td:not([colspan]):nth-child(12),
-  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(13) {
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(13),
+  #mtClosedList .mt-trade-table td:not([colspan]):nth-child(14) {
     display: none;
+  }
+
+  /* mini 日K图：窄屏收窄（ECharts 按容器像素初始化，尺寸变化由 resize 兜底） */
+  .mt-mini {
+    width: 150px;
+    height: 48px;
+  }
+
+  .mt-mini-empty {
+    line-height: 48px;
+  }
+
+  /* 清仓统计：手机端 9 张卡挤一行会碎成不可读，改回自动换行 */
+  .manual-trade-page .mt-stop-grid.mt-closed-stats {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+
+  /* 热力图：窄屏降高，避免单屏内看不到表格 */
+  .mt-heat {
+    padding: 10px 10px 6px;
+  }
+
+  .mt-heat-chart {
+    height: 300px;
   }
 }
 /* ── 登录墙（2026-08）────────────────────────────────────── */

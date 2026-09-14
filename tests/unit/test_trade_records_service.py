@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from core.strategy_config import DEFAULT_STRATEGY_CONFIG
@@ -281,6 +282,156 @@ class TestListTrades:
         by_id = {t["id"]: t for t in out["trades"]}
         assert "error" not in by_id[ok["id"]]
         assert "error" in by_id[bad["id"]]
+
+    def test_stored_record_out_of_day_range_still_computes(self, env) -> None:
+        """已落库记录的买入价越界（除权后前复权历史被重新缩放）不再判失败。
+
+        场景：录入时价格合法，之后标的除权 → 前复权历史整体缩放 → 旧成交价
+        落到当日区间之外。此时回放仍应给出指标与 mini 图（价格是既成事实），
+        否则整行指标/止损/mini 图一起消失。录入路径的校验不受影响
+        （见 TestCreateTrade.test_price_out_of_day_range_rejected）。
+        """
+        db, bars, alice, *_ = env
+        d, p = _day(bars, -4)
+        # 直接落库（绕过录入校验），模拟「除权后当前口径下越界」的历史记录
+        trade = db.create_manual_trade(alice["id"], "510300.SS", d, round(p * 1.05, 4), 100)
+        out = tr.list_trades(_u(db, "alice"), db=db)
+        item = out["trades"][0]
+        assert item["id"] == trade["id"]
+        assert "error" not in item
+        assert item["position_value"] > 0
+        assert item["mini_chart"]["buy"]["price"] == round(p * 1.05, 4)
+
+
+class TestMiniChart:
+    """持仓行 mini 日K图数据（近 20 根 + 买点下标，随列表一次下发）。"""
+
+    def test_window_is_last_20_bars(self, env) -> None:
+        db, bars, *_ = env
+        d, p = _day(bars, -3)
+        tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
+                        buy_price=p, shares=1000, db=db)
+        item = tr.list_trades(_u(db, "alice"), db=db)["trades"][0]
+        mini = item["mini_chart"]
+        assert len(mini["dates"]) == len(mini["candles"]) == 20
+        assert mini["dates"][-1] == str(bars.iloc[-1]["time"])[:10]
+        # 买在倒数第 3 根：40 根里第 38 根，落在 20 根窗口的第 18 根（下标 17）
+        assert mini["buy"]["index"] == 17
+        assert mini["buy"]["price"] == p
+        row = bars.iloc[-1]
+        assert mini["candles"][-1] == [
+            round(float(row["open"]), 4), round(float(row["close"]), 4),
+            round(float(row["low"]), 4), round(float(row["high"]), 4),
+        ]
+
+    def test_window_extends_left_to_include_buy_bar(self, env) -> None:
+        """买入日早于近 20 根时窗口左扩到买入那一根，保证买点画得出来。"""
+        db, bars, *_ = env
+        d, p = _day(bars, -25)
+        tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
+                        buy_price=p, shares=1000, db=db)
+        mini = tr.list_trades(_u(db, "alice"), db=db)["trades"][0]["mini_chart"]
+        assert len(mini["dates"]) == 25
+        assert mini["dates"][0] == str(bars.iloc[-25]["time"])[:10]
+        assert mini["buy"]["index"] == 0
+
+    def test_last_bar_is_intraday_synthetic(self, env, monkeypatch) -> None:
+        """盘中：最后一根为实时报价合成的当日K线，与最新价/止损同口径。"""
+        db, bars, *_ = env
+        d, p = _day(bars, -3)
+        tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d,
+                        buy_price=p, shares=1000, db=db)
+        monkeypatch.setattr(
+            sl, "fetch_intraday_bars",
+            lambda dfs: {
+                s: {"time": pd.Timestamp("2025-03-03 10:30:00"), "open": 10.0,
+                    "high": 11.0, "low": 9.9, "close": 10.5, "volume": 0.0, "amount": 0.0}
+                for s in dfs
+            },
+        )
+        item = tr.list_trades(_u(db, "alice"), db=db)["trades"][0]
+        mini = item["mini_chart"]
+        assert mini["dates"][-1] == "2025-03-03"
+        assert mini["candles"][-1] == [10.0, 10.5, 9.9, 11.0]
+        assert item["latest_price"] == 10.5
+
+
+class TestClosedSinceClose:
+    """已清仓行「清仓后距今」：现价 / 清仓价 − 1（现价不按清仓日截断）。"""
+
+    def _close_at(self, db, bars, sell_idx: int = -2) -> tuple[dict, float]:
+        bd, bp = _day(bars, -6)
+        sd, sp = _day(bars, sell_idx)
+        trade = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=bd,
+                                buy_price=bp, shares=1000, db=db)
+        tr.close_trade(_u(db, "alice"), trade_id=trade["id"],
+                       sell_date=sd, sell_price=sp, db=db)
+        return trade, sp
+
+    def test_latest_price_is_not_truncated_at_sell_date(self, env) -> None:
+        db, bars, *_ = env
+        _, sp = self._close_at(db, bars)
+        item = tr.list_trades(_u(db, "alice"), db=db)["trades"][0]
+        last_close = round(float(bars.iloc[-1]["close"]), 4)
+        assert item["latest_price"] == last_close
+        assert item["latest_date"] == str(bars.iloc[-1]["time"])[:10]
+        assert item["since_close_pct"] == pytest.approx(
+            round((last_close / sp - 1) * 100, 2)
+        )
+
+    def test_intraday_quote_price_used_when_available(self, env, monkeypatch) -> None:
+        """盘中：现价同样走批量报价合成的当日价（与持仓行同源）。"""
+        db, bars, *_ = env
+        _, sp = self._close_at(db, bars)
+        monkeypatch.setattr(
+            sl, "fetch_intraday_bars",
+            lambda dfs: {
+                s: {"time": pd.Timestamp("2025-03-03 14:00:00"), "open": 11.0,
+                    "high": 11.6, "low": 10.9, "close": 11.4, "volume": 0.0, "amount": 0.0}
+                for s in dfs
+            },
+        )
+        item = tr.list_trades(_u(db, "alice"), db=db)["trades"][0]
+        assert item["latest_price"] == 11.4
+        assert item["latest_date"] == "2025-03-03"
+        assert item["since_close_pct"] == pytest.approx(round((11.4 / sp - 1) * 100, 2))
+
+    def test_batch_prefetch_covers_closed_symbols(self, env, monkeypatch) -> None:
+        """批量报价预取同时覆盖已清仓标的，且仍然只发一次请求。"""
+        db, bars, *_ = env
+        from conftest import make_bull_bars
+
+        bars2 = make_bull_bars(40)
+        db.save_market_data("510050.SS", bars2, price_mode="qfq")
+        d1, p1 = _day(bars, -6)
+        d2, p2 = _day(bars2, -6)
+        closed = tr.create_trade(_u(db, "alice"), symbol="510300", buy_date=d1,
+                                 buy_price=p1, shares=100, db=db)
+        sd, sp = _day(bars, -2)
+        tr.close_trade(_u(db, "alice"), trade_id=closed["id"],
+                       sell_date=sd, sell_price=sp, db=db)
+        tr.create_trade(_u(db, "alice"), symbol="510050", buy_date=d2,
+                        buy_price=p2, shares=100, db=db)
+
+        calls: list[list[str]] = []
+
+        def fake_batch(dfs):
+            calls.append(sorted(dfs))
+            return dict.fromkeys(dfs, None)
+
+        monkeypatch.setattr(sl, "fetch_intraday_bars", fake_batch)
+
+        out = tr.list_trades(_u(db, "alice"), db=db)
+        assert len(out["trades"]) == 2
+        assert calls == [["510050.SS", "510300.SS"]]
+
+    def test_closed_latest_price_is_none_without_data(self, env) -> None:
+        """无行情数据的已清仓标的：现价/涨跌幅为 None（前端显示 —），不拖垮列表。"""
+        db, bars, alice, *_ = env
+        d, p = _day(bars, -3)
+        db.create_manual_trade(alice["id"], "999999.SS", d, 1.0, 100)
+        out = tr.list_trades(_u(db, "alice"), db=db)
+        assert out["trades"][0]["error"]
 
 
 class TestSymbolAnnotations:

@@ -64,6 +64,7 @@ def compute_manual_trade(
     risk_budget: float | None = None,
     df: pd.DataFrame | None = None,
     name_map: dict | None = None,
+    validate_price: bool = True,
 ) -> dict:
     """止损价 + 持仓指标的一站式计算（手工交易页面的后端）。
 
@@ -80,6 +81,9 @@ def compute_manual_trade(
     intraday，所有指标按截止日口径。``stop_mode`` 透传给止损计算
     （"tight" 紧止损 / None|"loose" 松止损）。``risk_budget`` 非空时
     附带按硬止损价推算的最大可买入份数（``position_sizing`` 字段）。
+    ``validate_price=False`` 供已落库记录回放：跳过「买入价落在买入日区间」
+    的输入校验（复权口径变化后不再重判历史成交价），见
+    ``services.stop_loss.compute_stop_loss``。
     ``df`` 预加载的日K / ``name_map`` 预加载的名称表（交易记录列表
     按 symbol 去重后传入，避免同一标的全量行情读两遍、每笔持仓重建
     一次全表 name map）。
@@ -103,6 +107,7 @@ def compute_manual_trade(
         intraday_bar=intraday_bar,
         stop_mode=stop_mode,
         df=df,
+        validate_price=validate_price,
     )
     symbol = stops["symbol"]
     buy_ts = pd.Timestamp(buy_date)
