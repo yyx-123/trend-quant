@@ -75,6 +75,18 @@ db.load_rolling_trend_many(["510300.SS", "600036.SS"])              # 批量
 
 返回 DataFrame `time, w_trend, m_trend`（time 为 pd.Timestamp，NULL → NaN）。
 
+前端消费（2026-09-14）：标的查看页 `/market-view` 的 TREND 副图在**日K视图**
+下把周/月滚动趋势值作为两条参照线画出（`indicators.trend_rolling.weekly/monthly`，
+按交易日对齐 dates，缺日补 null），与当期趋势值（按数值区间着色）以颜色 + 线宽
+区分（日 2.2 / 周 2.6 / 月 3.0）；趋势值 MA5/MA10 默认不画。周/月K 视图不带出
+——那里日期轴是周期 bar 标注日，副图趋势值本身已按该周期 K 线重算。
+
+看板消费（2026-09-14）：标的大盘看板（`/subject-market` 与 MCP `dashboard`
+工具）的每个标的/类目行新增 `trend_periods`——日/周/月三维度的趋势值 + 三态
+相位（周/月阈值 ±9）+ 相位持续天数，周/月取值即来自本表（`build_period_phase_index`
+按 600 自然日窗口读入、按层级成交额加权聚合）。口径与实现见
+`docs/26-09-14-trend-periods/`。
+
 ## 5. 与研究目录的关系
 
 - `research/2026-09-13_rolling-trend-calibration/` — 滚动口径的参数标定

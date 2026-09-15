@@ -205,3 +205,89 @@ class TestPeriodIndicators:
         payload = resp.json()
         assert payload["meta"]["is_intraday"] is False
         assert len(payload["dates"]) == 2
+
+
+class TestRollingTrendSeries:
+    """TREND 副图的滚动周/月趋势值（trend_rolling_daily）：日K视图带出并对齐日期轴。
+
+    周/月视图不带出——它锚定在交易日上，而周/月视图的日期轴是周期 bar 标注日，
+    副图趋势值本身已按该周期 K 线重算（见 routers/market_view.get_market_daily）。
+    """
+
+    def test_daily_payload_aligns_rolling_series_to_dates(self, client, test_db) -> None:
+        _seed_daily(test_db, rows=30)
+        rows = [
+            {"time": pd.Timestamp(day), "w_trend": w, "m_trend": m}
+            for day, w, m in (
+                ("2026-01-20", 12.5, -3.5),
+                ("2026-01-21", pd.NA, -4.0),  # 单侧预热：w 为 NULL
+                ("2026-01-22", 15.0, 2.0),
+            )
+        ]
+        test_db.save_rolling_trend_many([("510300.SS", pd.DataFrame(rows))])
+
+        resp = client.get("/market-view/api/daily", params={"symbol": "510300.SS"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        node = payload["indicators"]["trend_rolling"]
+        dates = payload["dates"]
+        assert len(node["weekly"]) == len(dates)
+        assert len(node["monthly"]) == len(dates)
+
+        by_day = dict(zip(dates, zip(node["weekly"], node["monthly"])))
+        assert by_day["2026-01-20"] == (12.5, -3.5)
+        assert by_day["2026-01-21"] == (None, -4.0)
+        assert by_day["2026-01-22"] == (15.0, 2.0)
+        # 表里没有的日期（如 2026-01-19 之前）补 None 而不是错位
+        assert by_day["2026-01-19"] == (None, None)
+
+    def test_weekly_view_has_no_rolling_series(self, client, test_db) -> None:
+        _seed_daily(test_db, rows=30)
+        _seed_period(test_db, "1w", [("2026-01-09", 4.0), ("2026-01-16", 4.1)])
+        test_db.save_rolling_trend_many(
+            [
+                (
+                    "510300.SS",
+                    pd.DataFrame(
+                        [{"time": pd.Timestamp("2026-01-16"), "w_trend": 9.0, "m_trend": 8.0}]
+                    ),
+                )
+            ]
+        )
+
+        resp = client.get(
+            "/market-view/api/daily", params={"symbol": "510300.SS", "period": "1w"}
+        )
+        assert resp.status_code == 200
+        assert "trend_rolling" not in resp.json()["indicators"]
+
+    def test_rolling_series_truncated_with_limit(self, client, test_db) -> None:
+        """按 limit 截尾展示窗口时，滚动序列跟着截尾（否则与 dates 错位）。"""
+        _seed_daily(test_db, rows=30)
+        # _seed_daily 从 2026-01-05 起 30 个自然日 → 末三天
+        tail_days = [
+            (date(2026, 1, 5) + timedelta(days=idx)).isoformat() for idx in (27, 28, 29)
+        ]
+        test_db.save_rolling_trend_many(
+            [
+                (
+                    "510300.SS",
+                    pd.DataFrame(
+                        [
+                            {"time": pd.Timestamp(day), "w_trend": 1.0, "m_trend": 2.0}
+                            for day in tail_days
+                        ]
+                    ),
+                )
+            ]
+        )
+
+        resp = client.get(
+            "/market-view/api/daily", params={"symbol": "510300.SS", "limit": 3}
+        )
+        assert resp.status_code == 200
+        payload = resp.json()
+        node = payload["indicators"]["trend_rolling"]
+        assert payload["dates"] == tail_days
+        assert node["weekly"] == [1.0, 1.0, 1.0]
+        assert node["monthly"] == [2.0, 2.0, 2.0]

@@ -51,6 +51,7 @@
   const debugInfoEl = document.getElementById('mvDebugInfo');
   const debugPreviewEl = document.getElementById('mvDebugPreview');
   const trendControlsEl = document.getElementById('mvTrendControls');
+  const trendRollingHintEl = document.getElementById('mvTrendRollingHint');
   const trendShortEl = document.getElementById('mvTrendShort');
   const trendMidEl = document.getElementById('mvTrendMid');
   const trendLongEl = document.getElementById('mvTrendLong');
@@ -746,11 +747,39 @@
     }, true);
   }
 
+  // 滚动周/月趋势值（payload.indicators.trend_rolling，后端只在日K视图带出）：
+  // 与当期趋势值（按数值区间着色）用不同颜色 + 线宽区分，线宽按「日最细 →
+  // 月最粗」分档但每档只差 0.4，避免粗细喧宾夺主。
+  const ROLLING_TREND_SERIES = Object.freeze([
+    { key: 'weekly', name: '周', color: '#2563eb', width: 2.6 },
+    { key: 'monthly', name: '月', color: '#7c3aed', width: 3 },
+  ]);
+
+  function rollingTrendSeries(rolling) {
+    return ROLLING_TREND_SERIES
+      // 预热期整段为 null（短历史标的）时不占图例：不画空线
+      .filter((item) => Array.isArray(rolling?.[item.key]) && rolling[item.key].some((v) => v != null))
+      .map((item) => ({
+        name: item.name,
+        type: 'line',
+        data: rolling[item.key],
+        symbol: 'none',
+        smooth: true,
+        lineStyle: { width: item.width, color: item.color },
+        itemStyle: { color: item.color },
+      }));
+  }
+
   function renderTrend(payload, zoom) {
     if (!trendChart) return;
     const dates = payload.dates || [];
     const trend = payload.indicators?.trend || {};
     const scores = trend.score || [];
+    const rollingSeries = rollingTrendSeries(payload.indicators?.trend_rolling);
+    // 当期趋势值图例名随周期走（日K→「日」、周K→「周」、月K→「月」）：
+    // 它与周/月K 视图里按该周期 K 线算出的趋势值是同一个东西，写死「日」会误导。
+    const periodLabel = String(payload.meta?.period_label || '日');
+    if (trendRollingHintEl) trendRollingHintEl.hidden = rollingSeries.length === 0;
     trendChart.setOption({
       animation: false,
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
@@ -769,9 +798,10 @@
         },
       },
       legend: {
-        data: ['Trend', 'Trend MA5', 'Trend MA10'],
+        data: [periodLabel, ...rollingSeries.map((s) => s.name), 'MA5', 'MA10'],
         top: 2,
-        selected: { 'Trend MA10': false },
+        // 趋势值 MA5/MA10 是参照线，默认都不画（图例可点开）
+        selected: { MA5: false, MA10: false },
       },
       grid: { left: 62, right: 28, top: 36, bottom: 42 },
       dataZoom: buildDataZoom(zoom.start, zoom.end),
@@ -800,14 +830,19 @@
         axisLabel: { formatter: (v) => num(v, 0) },
         splitLine: { lineStyle: { color: 'rgba(102, 118, 128, 0.16)', width: 1 } },
       },
+      // 当期趋势值必须是 series[0]：上面的 visualMap 以 seriesIndex 0 给它按
+      // 数值着色，周/月滚动线要排在其后（后画的覆盖在上层）。
       series: [
         {
-          name: 'Trend',
+          name: periodLabel,
           type: 'line',
           data: scores.map((v, idx) => [dates[idx], v]),
           symbol: 'none',
           smooth: true,
-          lineStyle: { width: 2.6 },
+          lineStyle: { width: 2.2 },
+          // 线色由 visualMap 按数值分段给（红/绿），这里只定图例图标色：
+          // 不给就成了默认调色板的蓝，与「周」的图例图标撞色。
+          itemStyle: { color: '#475569' },
           markLine: {
             silent: true,
             symbol: 'none',
@@ -819,8 +854,9 @@
             ],
           },
         },
-        { name: 'Trend MA5', type: 'line', data: trend.ma?.['5'] || [], symbol: 'none', smooth: true, lineStyle: { width: 1.15, color: '#7c3aed' }, itemStyle: { color: '#7c3aed' } },
-        { name: 'Trend MA10', type: 'line', data: trend.ma?.['10'] || [], symbol: 'none', smooth: true, lineStyle: { width: 1.15, color: '#c7834c' }, itemStyle: { color: '#c7834c' } },
+        ...rollingSeries,
+        { name: 'MA5', type: 'line', data: trend.ma?.['5'] || [], symbol: 'none', smooth: true, lineStyle: { width: 1.15, color: '#94a3b8' }, itemStyle: { color: '#94a3b8' } },
+        { name: 'MA10', type: 'line', data: trend.ma?.['10'] || [], symbol: 'none', smooth: true, lineStyle: { width: 1.15, color: '#c7834c' }, itemStyle: { color: '#c7834c' } },
       ],
     }, true);
   }

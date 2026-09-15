@@ -144,6 +144,25 @@ def _date_only(value: object) -> str:
     return ts.date().isoformat()
 
 
+def _align_rolling_trend(rolling: pd.DataFrame | None, dates: list[str]) -> dict | None:
+    """把 trend_rolling_daily 的滚动周/月趋势值对齐到展示日期轴。
+
+    表是逐交易日的（``data.storage.db.load_rolling_trend``），日期轴来自当前
+    视图的 K 线：日K 视图下两者一一对应，没有滚动行的日期（预热期、盘中合成
+    bar）补 None。两侧全为 None（预热期）时返回 None —— 前端据此不画线。
+    """
+    if rolling is None or rolling.empty or not dates:
+        return None
+    day_keys = rolling["time"].dt.strftime("%Y-%m-%d")
+    weekly_map = dict(zip(day_keys, rolling["w_trend"]))
+    monthly_map = dict(zip(day_keys, rolling["m_trend"]))
+    weekly = [_num(weekly_map.get(day)) for day in dates]
+    monthly = [_num(monthly_map.get(day)) for day in dates]
+    if all(value is None for value in weekly) and all(value is None for value in monthly):
+        return None
+    return {"weekly": weekly, "monthly": monthly}
+
+
 def _validate_trend_config(cfg: dict) -> None:
     n_short = int(cfg.get("n_short", 3))
     n_mid = int(cfg.get("n_mid", 5))
@@ -165,6 +184,7 @@ def build_market_payload(
     *,
     period: str = PERIOD_DAILY,
     daily_span: dict | None = None,
+    rolling_trend: pd.DataFrame | None = None,
 ) -> dict:
     canonical_period = normalize_period(period)
     display_name = format_symbol_display(symbol, name)
@@ -216,6 +236,11 @@ def build_market_payload(
     # 只吃 OHLCV DataFrame）。注意 n_short/n_mid/n_long/atr_period/er/vol_ma
     # 都是**根数**参数：同一套数值在周/月K 上代表的是周数/月数，与日K不同口径。
     indicators = compute_market_indicators(data, trend_cfg, rsi_period)
+    # 滚动周/月趋势值（日K口径的跨周期参照）：只挂在 indicators 下，
+    # 展示数组按 limit 截尾时随 _tail_indicator_node 一起截。
+    rolling = _align_rolling_trend(rolling_trend, dates)
+    if rolling is not None:
+        indicators["trend_rolling"] = rolling
 
     return {
         "symbol": symbol,
@@ -354,6 +379,16 @@ async def get_market_daily(
     # limit 截尾。
     full_len = len(data)
 
+    # 滚动周/月趋势值（trend_rolling_daily，逐交易日的日K口径派生值）：仅日K
+    # 视图带出——它锚定在交易日上，而周/月视图的日期轴是周期 bar 标注日，
+    # 副图趋势值本身已按该周期 K 线重算，再叠一层滚动口径只会混淆。
+    # 窗口与展示区间一致（区间外无需带出），盘中合成 bar 无对应行 → None。
+    rolling_trend = (
+        db.load_rolling_trend(normalized_symbol, start=start_ts, end=end_ts)
+        if kline_period == PERIOD_DAILY
+        else None
+    )
+
     # --- Intraday overlay（先合成，指标只对 combined 算一遍，P2-18）---------
     # Shared implementation (data.intraday_service.build_intraday_overlay)
     # keeps this endpoint and the MCP symbol_detail tool on the exact same
@@ -398,6 +433,7 @@ async def get_market_daily(
             rsi_period_value,
             period=kline_period,
             daily_span=daily_span,
+            rolling_trend=rolling_trend,
         )
         # Keep the fixed-semantics intraday trend snapshot alongside the
         # recomputed suite (fixed ATR/volume — used by API consumers
@@ -418,6 +454,7 @@ async def get_market_daily(
             rsi_period_value,
             period=kline_period,
             daily_span=daily_span,
+            rolling_trend=rolling_trend,
         )
         if full_len > limit:
             _tail_payload_arrays(payload, full_len, limit)

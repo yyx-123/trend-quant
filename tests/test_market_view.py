@@ -153,6 +153,53 @@ class MarketViewIndicatorTest(unittest.TestCase):
         self.assertEqual(payload["meta"]["category_path"], "Broad-Large Cap-CSI300")
         self.assertIn("Broad-Large Cap-CSI300", payload["display_label"])
 
+    def test_build_market_payload_aligns_rolling_trend_by_date(self) -> None:
+        """滚动周/月趋势值按交易日对齐到展示日期轴，缺日补 None。"""
+        df = sample_daily_bars(80)
+        tail = pd.to_datetime(df["time"]).tail(30)
+        rolling = pd.DataFrame(
+            {
+                "time": tail.reset_index(drop=True),
+                "w_trend": [float(idx) for idx in range(len(tail))],
+                "m_trend": [-float(idx) for idx in range(len(tail))],
+            }
+        )
+
+        payload = build_market_payload("510300.SS", df, rolling_trend=rolling)
+        node = payload["indicators"]["trend_rolling"]
+
+        self.assertEqual(len(node["weekly"]), len(df))
+        self.assertEqual(len(node["monthly"]), len(df))
+        # 表里没有的日期（前 50 天）补 None，不是错位或丢长度
+        self.assertTrue(all(value is None for value in node["weekly"][:50]))
+        self.assertEqual(node["weekly"][50:], [float(idx) for idx in range(30)])
+        self.assertEqual(node["monthly"][-1], -29.0)
+
+    def test_build_market_payload_omits_rolling_trend_when_absent(self) -> None:
+        """无滚动行 / 整段预热期（全 None）时不带出节点，前端据此不画线。"""
+        df = sample_daily_bars(80)
+        empty = pd.DataFrame(columns=["time", "w_trend", "m_trend"])
+        warmup = pd.DataFrame(
+            {
+                "time": pd.to_datetime(df["time"]).tail(20).reset_index(drop=True),
+                "w_trend": [float("nan")] * 20,
+                "m_trend": [float("nan")] * 20,
+            }
+        )
+
+        self.assertNotIn(
+            "trend_rolling", build_market_payload("510300.SS", df)["indicators"]
+        )
+        self.assertNotIn(
+            "trend_rolling",
+            build_market_payload("510300.SS", df, rolling_trend=empty)["indicators"],
+        )
+        self.assertNotIn(
+            "trend_rolling",
+            build_market_payload("510300.SS", df, rolling_trend=warmup)["indicators"],
+        )
+
+
 class FakeMarketViewDb:
     def __init__(
         self,
@@ -160,15 +207,26 @@ class FakeMarketViewDb:
         symbols: list[str] | None = None,
         metadata_map: dict[str, dict] | None = None,
         period_frames: dict[str, pd.DataFrame] | None = None,
+        rolling_trend: pd.DataFrame | None = None,
     ) -> None:
         self.df = df
         self.symbols = symbols or ["518850.SS"]
         self.metadata_map = metadata_map or {}
         # 周期 → 该周期的行情（周期切换测试用）；缺省时任何周期都返回 df
         self.period_frames = period_frames or {}
+        # trend_rolling_daily 内容（缺省为空表 = 该标的没有滚动周/月趋势值）
+        self.rolling_trend = (
+            rolling_trend if rolling_trend is not None
+            else pd.DataFrame(columns=["time", "w_trend", "m_trend"])
+        )
+        self.rolling_calls: list[tuple] = []
 
     def load_market_data(self, symbol: str, price_mode: str = "qfq", period: str = "1d") -> pd.DataFrame:
         return self.period_frames.get(period, self.df).copy()
+
+    def load_rolling_trend(self, symbol: str, start=None, end=None) -> pd.DataFrame:
+        self.rolling_calls.append((symbol, start, end))
+        return self.rolling_trend.copy()
 
     def get_market_data_summary(
         self, symbol: str, price_mode: str = "qfq", period: str = "1d"
@@ -201,6 +259,10 @@ class MarketViewApiTest(unittest.IsolatedAsyncioTestCase):
             payload = await market_view.get_market_daily(
                 symbol="518850.SS",
                 limit=market_view.DEFAULT_LIMIT,
+                # 显式关掉盘中合成：本用例断言的是本地全历史长度，不该受
+                # 「是否拿到实时报价」影响（.env 有 TICKFLOW_API_KEY 时
+                # 线上报价会让日期轴多一根）。
+                intraday=False,
             )
 
         self.assertEqual(payload["meta"]["rows"], len(df))
@@ -242,6 +304,71 @@ class MarketViewApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["indicators"]["rsi"]["period"], 7)
         self.assertEqual(len(payload["indicators"]["rsi"]["series"]), len(df))
 
+    async def test_daily_api_carries_rolling_weekly_monthly_trend(self) -> None:
+        df = sample_daily_bars(120)
+        tail = pd.to_datetime(df["time"]).tail(40)
+        rolling = pd.DataFrame(
+            {
+                "time": tail.reset_index(drop=True),
+                "w_trend": [1.5] * len(tail),
+                "m_trend": [-2.5] * len(tail),
+            }
+        )
+        fake_db = FakeMarketViewDb(df, rolling_trend=rolling)
+
+        with patch.object(market_view, "get_db", return_value=fake_db):
+            payload = await market_view.get_market_daily(
+                symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, intraday=False
+            )
+
+        node = payload["indicators"]["trend_rolling"]
+        self.assertEqual(len(node["weekly"]), len(df))
+        self.assertTrue(all(value is None for value in node["weekly"][:80]))
+        self.assertEqual(node["weekly"][-1], 1.5)
+        self.assertEqual(node["monthly"][-1], -2.5)
+        # 只读展示区间（不整表捞）
+        symbol, start, end = fake_db.rolling_calls[-1]
+        self.assertEqual(symbol, "518850.SS")
+        self.assertEqual(str(start)[:10], payload["dates"][0])
+        self.assertEqual(str(end)[:10], payload["dates"][-1])
+
+    async def test_rolling_trend_is_daily_view_only(self) -> None:
+        """滚动周/月趋势值锚定在交易日上，周/月视图不带出（副图趋势按该周期重算）。"""
+        daily = sample_daily_bars(120)
+        weekly = pd.DataFrame(
+            [
+                {
+                    "time": day,
+                    "open": 4.0,
+                    "high": 4.1,
+                    "low": 3.9,
+                    "close": 4.05,
+                    "volume": 5_000_000,
+                    "amount": 20_000_000,
+                }
+                for day in ("2026-01-09", "2026-01-16")
+            ]
+        )
+        rolling = pd.DataFrame(
+            {
+                "time": pd.to_datetime(daily["time"]).tail(40).reset_index(drop=True),
+                "w_trend": [1.0] * 40,
+                "m_trend": [1.0] * 40,
+            }
+        )
+        fake_db = FakeMarketViewDb(daily, period_frames={"1w": weekly}, rolling_trend=rolling)
+
+        with patch.object(market_view, "get_db", return_value=fake_db):
+            weekly_payload = await market_view.get_market_daily(
+                symbol="518850.SS",
+                limit=market_view.DEFAULT_LIMIT,
+                period="1w",
+                intraday=False,
+            )
+
+        self.assertNotIn("trend_rolling", weekly_payload["indicators"])
+        self.assertEqual(fake_db.rolling_calls, [])
+
 class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
     """周期切换：主图取该周期的 bar，副图指标按该周期 K 线重算。
 
@@ -275,10 +402,10 @@ class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(market_view, "get_db", return_value=fake_db):
             weekly_payload = await market_view.get_market_daily(
-                symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, period="1w"
+                symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, period="1w", intraday=False
             )
             daily_payload = await market_view.get_market_daily(
-                symbol="518850.SS", limit=market_view.DEFAULT_LIMIT
+                symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, intraday=False
             )
 
         self.assertEqual(weekly_payload["meta"]["period"], "1w")

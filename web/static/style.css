@@ -793,6 +793,13 @@ button:disabled {
   font-size: 11px;
   pointer-events: none;
 }
+/* 标题胶囊内的口径补充（如 TREND 副图的滚动周/月趋势值）：紧跟在标题之后，
+   字重与字距降一级，避免抢标题。 */
+.market-subchart-hint {
+  margin-left: 6px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
 .market-table-head {
   display: flex;
   flex-wrap: wrap;
