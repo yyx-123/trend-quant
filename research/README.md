@@ -33,3 +33,7 @@
 - `2026-09-14_phase-migration-th9` —— 相位迁移 v4：同 v3 滚动口径，三态阈值
   调整为日 ±5 / 周·月 ±9（依据 rolling-trend-calibration 的分布标定）。
   周/月分量噪声事件清零，「日级与周/月反向」结构保持且增强。**当前优先口径**。
+- `2026-09-14_portfolio-construction` —— 组合层研究「选谁/买多少/调仓」：
+  主报告 `REPORT.md`（信号密度、选股边际+beta 伪装检验、组合引擎实测——
+  持仓数是唯一稳健杠杆，选股≈随机）；补充报告 `REPORT_buckets.md`
+  （固定 horizon 分桶、ETF 新鲜度衰减、breadth 市场状态 ex-ante 条件）。

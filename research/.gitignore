@@ -5,3 +5,11 @@
 */data/events.csv
 */data/series/
 */fonts/
+*/data/*.parquet
+*/data/events*.csv
+# 2026-09-14_portfolio-construction：可再生的大体积明细/日志不入库
+*/data/entry_quality_state.csv
+*/data/entry_quality_event.csv
+*/data/selection_edge_daily.csv
+*/data/*_out.txt
+*/data/compare_event.txt
