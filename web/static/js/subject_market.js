@@ -566,15 +566,13 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
       parts.push(`<rect x="${(cx - bodyW / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${height.toFixed(1)}" fill="${color}"/>`);
     });
     if (!parts.length) return '<span class="spark-empty">—</span>';
-    // 金叉/死叉标注：与 detect_macd_phase 同口径——sign = DIF-DEA，
-    // 由负/零转正当根为金叉，由正/零转负当根为死叉。窗口内逐根扫描，
-    // 多次交叉全部标注。candles 有剔根时按尾部对齐 dif/dea。
+    // 金叉/死叉标注：交叉下标用共享 helper（TQ.macdCrossIndices，与后端
+    // detect_macd_phase 同口径）；candles 有剔根时 dif/dea 按尾部对齐截取，
+    // 窗口内多次交叉全部标注。
     if (Array.isArray(dif) && Array.isArray(dea)) {
-      const offset = Math.max(dif.length, dea.length) - n;
-      const signAt = (i) => {
-        const d = dif[offset + i], e = dea[offset + i];
-        return Number.isFinite(d) && Number.isFinite(e) ? d - e : NaN;
-      };
+      const winDif = dif.slice(Math.max(0, dif.length - n));
+      const winDea = dea.slice(Math.max(0, dea.length - n));
+      const crosses = TQ.macdCrossIndices(winDif, winDea);
       // ⬆/⬇ 式描边箭头：竖线杆 + 两根斜线箭头羽，白色描边底衬 + 彩色主线
       // 双层绘制，压在蜡烛上也清晰。全部用 stroke 绘制并配合
       // vector-effect:non-scaling-stroke，在 mini 图的非均匀缩放下保持锐利。
@@ -591,22 +589,22 @@ const sparkline = (points, dates, upperPoints = [], lowerPoints = []) => {
         const lines = `<line x1="${x0}" y1="${y0}" x2="${x0}" y2="${stemEnd}"/><line x1="${x0}" y1="${y0}" x2="${xl}" y2="${headY}"/><line x1="${x0}" y1="${y0}" x2="${xr}" y2="${headY}"/>`;
         return `<g class="kspark-arrow-halo">${lines}</g><g class="kspark-arrow ${cls}">${lines}</g>`;
       };
-      for (let i = 1; i < n; i += 1) {
-        const prev = signAt(i - 1), curr = signAt(i);
-        if (!Number.isFinite(prev) || !Number.isFinite(curr) || curr === 0) continue;
+      const mark = (i, dir, cls) => {
         const k = candles[i];
-        if (!Number.isFinite(k?.h) || !Number.isFinite(k?.l)) continue;
+        if (!Number.isFinite(k?.h) || !Number.isFinite(k?.l)) return;
         const cx = (i + 0.5) * step;
-        if (prev <= 0 && curr > 0) {
+        if (dir === 'up') {
           // 金叉：橙色 ⬆，尖端指向该根K线低点（留 gap 间距）；贴底时上移保证完整可见。
           const tipY = Math.min(y(k.l) + gap, 100 - stemLen - 0.5);
-          parts.push(arrow(cx, tipY, 'up', 'kspark-cross-golden'));
-        } else if (prev >= 0 && curr < 0) {
+          parts.push(arrow(cx, tipY, 'up', cls));
+        } else {
           // 死叉：黑色 ⬇，尖端指向该根K线高点（留 gap 间距）；贴顶时下移保证完整可见。
           const tipY = Math.max(y(k.h) - gap, stemLen + 0.5);
-          parts.push(arrow(cx, tipY, 'down', 'kspark-cross-dead'));
+          parts.push(arrow(cx, tipY, 'down', cls));
         }
-      }
+      };
+      crosses.golden.forEach((i) => mark(i, 'up', 'kspark-cross-golden'));
+      crosses.death.forEach((i) => mark(i, 'down', 'kspark-cross-dead'));
     }
     const maPoints = (Array.isArray(ma5) ? ma5 : [])
       .map((value, i) => Number.isFinite(value) ? `${((i + 0.5) * step).toFixed(1)},${y(value).toFixed(1)}` : '')

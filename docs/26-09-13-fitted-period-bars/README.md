@@ -1,7 +1,11 @@
 # 拟合周/月K（每日在途 bar 快照）
 
 > 日期：2026-09-13
-> 状态：已上线（表结构 + 日更维护 + 全量回填）
+> 状态：**已停写保表（2026-09-16）**。上线后消费场景（回测 PIT 取数）从未落地，
+> 在途 bar 展示由 vendor 周/月K 当期 bar（docs/26-09-12-周月K §14/§15）承接，
+> 趋势值由 trend_rolling_daily 承接。日更钩子已摘除，表与历史数据保留，
+> 手工回填：scripts/backfill_fitted_period_bars.py 或
+> `DataService.refresh_fitted_period_bars`。
 > 需求来源：回测/研究在任意交易日 t 只能依赖「t 及以前可见」的信息。
 > vendor 的已收盘周/月K 在周期结束后才知道；要在 t 日引用周/月级别信息，
 > 必须用「截至 t 的在途周/月 bar」。本功能把它物化落库，按 (symbol, time) 直接取用。

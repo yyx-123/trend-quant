@@ -932,8 +932,8 @@
   }
 
   function macdCrossSignals(dates, dif, dea) {
-    // Detect DIF/DEA crosses; golden (金叉) = DIF crosses up through DEA,
-    // death (死叉) = DIF crosses down. Arrows sit close to the cross point.
+    // 交叉下标用共享 helper（TQ.macdCrossIndices，与 detect_macd_phase 同口径）；
+    // 这里只把交叉点映射成 ECharts 散点：价取两线中点，金叉/死叉各留一档 pad。
     const d = dif || [];
     const e = dea || [];
     const fin = (v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
@@ -945,23 +945,15 @@
     const span = Math.max(...vals) - Math.min(...vals);
     const pad = span > 0 ? span * 0.04 : Math.max(Math.abs(vals[0]) * 0.04, 1e-4);
 
-    const golden = [];
-    const death = [];
-    for (let i = 1; i < d.length; i += 1) {
-      if (!fin(d[i - 1]) || !fin(e[i - 1]) || !fin(d[i]) || !fin(e[i])) continue;
-      const dPrev = Number(d[i - 1]);
-      const ePrev = Number(e[i - 1]);
-      const dCur = Number(d[i]);
-      const eCur = Number(e[i]);
-      const date = dates[i];
-      const cross = (dCur + eCur) / 2;  // 交叉点近似取两线中点
-      if (dPrev <= ePrev && dCur > eCur) {
-        golden.push([date, cross - pad]);
-      } else if (dPrev >= ePrev && dCur < eCur) {
-        death.push([date, cross + pad]);
-      }
-    }
-    return { golden, death };
+    const crosses = TQ.macdCrossIndices(d, e);
+    const point = (i, dir) => {
+      const cross = (Number(d[i]) + Number(e[i])) / 2;  // 交叉点近似取两线中点
+      return [dates[i], cross + dir * pad];
+    };
+    return {
+      golden: crosses.golden.map((i) => point(i, -1)),
+      death: crosses.death.map((i) => point(i, 1)),
+    };
   }
 
   function macdSignalSeries(name, data, color, rotate) {

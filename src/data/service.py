@@ -20,6 +20,7 @@ from core.bars import (
     fitted_period_rows,
     is_period_bar_provisional,
     normalize_period,
+    period_key,
     period_start,
 )
 from core.calendar import is_trading_day as _calendar_is_trading_day
@@ -131,14 +132,6 @@ def _non_retryable_provider_error(errors: dict[str, str]) -> str | None:
     return None
 
 
-def _period_key(day: date, period: str) -> tuple[int, ...]:
-    """周期标识（周=ISO 年周，月=年月）——与 core.bars 的口径一致。"""
-    if normalize_period(period) == PERIOD_WEEKLY:
-        iso = day.isocalendar()
-        return (int(iso[0]), int(iso[1]))
-    return (day.year, day.month)
-
-
 def _period_fetch_start(after: date, period: str, not_before: date) -> date:
     """晚于 *after* 这根已收盘 bar 的抓取起点 = 下一个周期的第一天。
 
@@ -150,10 +143,10 @@ def _period_fetch_start(after: date, period: str, not_before: date) -> date:
     ``not_before``（用户给的起点或全历史起点）是硬下限，不会被往回挪。
     """
     probe = max(after, not_before - timedelta(days=1)) + timedelta(days=1)
-    key = _period_key(after, period)
+    key = period_key(after, period)
     # 上界 40 天足以跨过 ISO 周/自然月（月最长 31 天）
     for _ in range(40):
-        if _period_key(probe, period) != key:
+        if period_key(probe, period) != key:
             break
         probe += timedelta(days=1)
     return max(probe, not_before)
@@ -443,10 +436,14 @@ class DataService:
     ) -> dict:
         """维护拟合周/月K 表（market_data_qfq_*_fitted，由 qfq 日K 派生）。
 
+        **已停写保表（2026-09-16）**：不再挂日更钩子——该表自上线起无任何
+        生产消费方（在途 bar 展示已由 vendor 周/月K 当期 bar 承接，趋势值由
+        trend_rolling_daily 承接），历史数据保留供未来回测 PIT 场景使用，
+        需要时手工调用本方法或 scripts/backfill_fitted_period_bars.py 回填。
+
         full=True：整段重建（除权因子变化 / qfq 自愈重写后，历史拟合行全部
-        可能过时）；否则只重建 since 所在周/月覆盖的拟合行——日更常态下即
-        当周 ≤5 行 + 当月 ≤23 行（拟合行 t 只依赖 ≤t 的日K，更早的行不受
-        新 bar 影响）。返回 {symbol, "1w": 行数, "1M": 行数}。
+        可能过时）；否则只重建 since 所在周/月覆盖的拟合行。返回
+        {symbol, "1w": 行数, "1M": 行数}。
         """
         db = db or get_db()
         symbol = str(symbol or "").strip().upper()
@@ -586,20 +583,11 @@ class DataService:
             if remat_status == "ok" and factors_changed:
                 status = "updated"
 
-        # 拟合周/月K 维护（market_data_qfq_*_fitted，由 qfq 日K 派生）：
-        # 除权变化 / qfq 自愈重写 → 整段重建；仅日K 增量 → 只重建新 bar
-        # 所在周期覆盖的拟合行。派生表失败不拖垮日更主结果。
-        if remat_status == "ok":
-            try:
-                if factors_changed or qfq_behind:
-                    self.refresh_fitted_period_bars(symbol, full=True, db=db)
-                elif raw_updated:
-                    self.refresh_fitted_period_bars(symbol, since=fetch_start, db=db)
-            except Exception:
-                logger.exception("fitted period bars refresh failed for %s", symbol)
+        # 拟合周/月K（*_fitted）已于 2026-09-16 停写保表：零生产消费方，
+        # 不再随日更维护，方法保留供手工回填（refresh_fitted_period_bars）。
 
         # 滚动周/月趋势值维护（trend_rolling_daily，由 qfq 日K 派生）：
-        # 与拟合表同一触发口径——除权/自愈 → 整段重建；日K 增量 → 只补
+        # 除权/自愈 → 整段重建；日K 增量 → 只补
         # since 起的新行（PIT 确定性，重叠区值不变）。失败不拖垮日更主结果。
         if remat_status == "ok":
             try:
@@ -1506,7 +1494,7 @@ class DataService:
         summary = db.get_market_data_summary(symbol, price_mode="qfq", period=canonical)
         local_end = self._summary_date(summary, "end")
         reference = now or market_now().date()
-        if local_end is not None and _period_key(local_end, canonical) == _period_key(
+        if local_end is not None and period_key(local_end, canonical) == period_key(
             reference, canonical
         ):
             return {"status": "ready", "local_end": local_end.isoformat()}

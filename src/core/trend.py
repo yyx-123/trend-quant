@@ -316,6 +316,12 @@ def _detect_trend_phase(
     - 趋势启动 (start): trend_score >= 5  AND  trend_ma5 >= 0
     - 趋势结束 (end):   trend_score <= -5 AND  trend_ma5 <= 0
 
+    阈值 ±5 与 ``core.trend_phase.PHASE_THRESHOLDS["daily"]`` 数值同源
+    （2026-09-12 趋势值分布研究背书），但语义不同：这里是 MA5 门控的
+    两态「启动/结束」检测（看板 trend_phase 字段），trend_phase 模块是
+    无门控的三态（positive/none/negative）相位。两者勿合并，改动任一侧
+    阈值时请显式区分。
+
     Returns a dict with keys:
       phase: "start" | "end" | None
       days:  int (the transition bar is day 1)

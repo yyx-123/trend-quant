@@ -5,7 +5,7 @@ Canonical rules:
 - Already-suffixed symbols are uppercased and passed through, with the
   legacy ``.SH`` suffix normalized to ``.SS``
 
-The frontend JS mirror in instruments.html is an input-preview only;
+The frontend JS mirror in web/static/js/instruments.js is an input-preview only;
 the server is authoritative.
 """
 

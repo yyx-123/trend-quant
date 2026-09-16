@@ -14,7 +14,9 @@
  *   subject_market 两份已漂移实现，以 manual_trade 文案口径为准统一
  *   （硬止损卡含触发当日最低/收盘明细）。
  * - 其余去重：localIso/localToday、fmtAmount、fetchDayCandle、
- *   cycleSort/stableSorted（排序三件套）。
+ *   cycleSort/stableSorted（排序三件套）、macdCrossIndices（MACD 金叉/死叉
+ *   检测，原 market_view 与 subject_market 各一份，与后端 detect_macd_phase
+ *   同口径）。
  *
  * 命名空间：全部挂在 window.TQ；另为调用点众多的通用函数提供 window 级
  * 别名（esc/postJson/redirectToLogin/fmtPrice/fmtPct/pctClass/withTip/
@@ -333,6 +335,32 @@
     return { sync, request };
   }
 
+  // MACD 金叉/死叉检测：与后端 core.indicators.detect_macd_phase 同口径——
+  // sign = DIF - DEA，由负/零转正当根为金叉，由正/零转负当根为死叉。
+  // 返回 { golden: [...], death: [...] }，元素为交叉发生的数组下标；渲染
+  // （ECharts 散点 / SVG 箭头）由各调用方负责。
+  function macdCrossIndices(dif, dea) {
+    const d = Array.isArray(dif) ? dif : [];
+    const e = Array.isArray(dea) ? dea : [];
+    const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+    const signAt = (i) => {
+      const dv = num(d[i]);
+      const ev = num(e[i]);
+      return Number.isFinite(dv) && Number.isFinite(ev) ? dv - ev : NaN;
+    };
+    const golden = [];
+    const death = [];
+    const n = Math.min(d.length, e.length);
+    for (let i = 1; i < n; i += 1) {
+      const prev = signAt(i - 1);
+      const curr = signAt(i);
+      if (!Number.isFinite(prev) || !Number.isFinite(curr) || curr === 0) continue;
+      if (prev <= 0 && curr > 0) golden.push(i);
+      else if (prev >= 0 && curr < 0) death.push(i);
+    }
+    return { golden, death };
+  }
+
   // ── 导出 ──────────────────────────────────────────────
   window.TQ = {
     esc: esc,
@@ -360,6 +388,7 @@
     setActiveSideNav: setActiveSideNav,
     renderSideNav: renderSideNav,
     createSectionSync: createSectionSync,
+    macdCrossIndices: macdCrossIndices,
   };
   // window 级别名：各页删除本地重复实现后，原有无限定调用点直接解析到全局
   var aliases = {

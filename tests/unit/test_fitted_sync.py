@@ -1,8 +1,11 @@
-"""拟合周/月K 的 service 维护路径（ensure_daily_history 钩子）。
+"""拟合周/月K 的 service 维护路径。
 
-- 日K 增量（raw_updated）→ 只重建新 bar 所在周期覆盖的拟合行；
-- 除权因子变化 / qfq 自愈重写 → 该标的拟合表整段重建；
-- 拟合刷新失败不拖垮日更主结果。
+停写保表（2026-09-16）：表自上线起零生产消费方，日更钩子已摘除
+（ensure_daily_history 不再调用 refresh_fitted_period_bars），方法与
+历史数据保留供手工回填/未来回测 PIT 场景。本文件钉死两件事：
+
+- refresh_fitted_period_bars 方法本身仍可用（full/since/空表语义）；
+- ensure_daily_history 不再触发任何 fitted 写入。
 """
 
 from __future__ import annotations
@@ -13,7 +16,6 @@ from unittest.mock import MagicMock
 import pandas as pd
 
 import data.service as data_service
-from core.bars import fitted_period_rows
 from data.storage.market_store import MarketStore
 
 
@@ -104,8 +106,10 @@ class TestRefreshFitted:
         assert out == {"symbol": "NOPE.SS", "1w": 0, "1M": 0}
 
 
-class TestDailyUpdateHook:
-    def test_raw_update_triggers_incremental_refresh(self, monkeypatch, test_db) -> None:
+class TestDailyUpdateHookRemoved:
+    """停写保表：日更不再维护 fitted 表（2026-09-16 摘除钩子）。"""
+
+    def test_raw_update_does_not_write_fitted(self, monkeypatch, test_db) -> None:
         # 存量日K 到 09-10；provider 给出 09-11 的新 bar
         old_daily = _daily(
             [("2026-09-07", 10.0, 100.0), ("2026-09-10", 11.0, 200.0)]
@@ -116,60 +120,29 @@ class TestDailyUpdateHook:
         service = _make_service(monkeypatch, provider, test_db)
         _seed_symbol(service, test_db, "AAA.SS", old_daily)
         monkeypatch.setattr(service, "sync_ex_factors", lambda symbols, db=None: ({}, []))
+        monkeypatch.setattr(service, "refresh_fitted_period_bars", MagicMock())
 
         result = service.ensure_daily_history("AAA.SS", date(2026, 1, 1), date(2026, 9, 11))
-        assert result["status"] == "updated"
-        weekly = test_db.load_fitted_period_bars("AAA.SS", "1w")
-        # 增量路径：重建当周全部拟合行（含新 bar 的 09-11），末行累计了整周
-        assert [t.strftime("%Y-%m-%d") for t in weekly["time"]] == [
-            "2026-09-07", "2026-09-10", "2026-09-11",
-        ]
-        assert weekly.iloc[-1]["volume"] == 600.0
-        assert weekly.iloc[-1]["period_start"] == "2026-09-07"
-        monthly = test_db.load_fitted_period_bars("AAA.SS", "1M")
-        assert [t.strftime("%Y-%m-%d") for t in monthly["time"]] == [
-            "2026-09-07", "2026-09-10", "2026-09-11",
-        ]
 
-    def test_factor_change_triggers_full_rebuild(self, monkeypatch, test_db) -> None:
+        assert result["status"] == "updated"  # 日更本身照常
+        service.refresh_fitted_period_bars.assert_not_called()
+        assert test_db.load_fitted_period_bars("AAA.SS", "1w").empty
+
+    def test_factor_change_does_not_rebuild_fitted(self, monkeypatch, test_db) -> None:
         daily = _daily(
             [("2026-09-07", 10.0, 100.0), ("2026-09-08", 11.0, 200.0)]
         )
         service = _make_service(monkeypatch, _FakeProvider(), test_db)
         _seed_symbol(service, test_db, "AAA.SS", daily)
+        # 既有历史数据保留（停写 ≠ 清表）
         service.refresh_fitted_period_bars("AAA.SS", full=True)
+        assert len(test_db.load_fitted_period_bars("AAA.SS", "1w")) == 2
+        monkeypatch.setattr(service, "refresh_fitted_period_bars", MagicMock())
 
-        # 除权：rematerialize 把 qfq 整段改写（价格减半），钩子必须整段重建
-        def _remat(symbol, factors=None, *, db=None):
-            scaled = daily.copy()
-            for col in ("open", "high", "low", "close"):
-                scaled[col] = scaled[col] / 2
-            test_db.save_market_data(symbol, scaled, price_mode="qfq")
-            return {"symbol": symbol, "status": "ok", "rows": len(scaled)}
-
-        monkeypatch.setattr(service, "rematerialize_qfq", _remat)
         result = service.ensure_daily_history(
             "AAA.SS", date(2026, 1, 1), date(2026, 9, 8),
             factors=[], factors_changed=True,
         )
-        assert result["factors_changed"] is True
-        weekly = test_db.load_fitted_period_bars("AAA.SS", "1w")
-        assert len(weekly) == 2
-        assert weekly.iloc[0]["close"] == 5.0  # 重建后的新水位
-        assert weekly.iloc[1]["close"] == 5.5
 
-    def test_refresh_failure_does_not_break_daily_update(self, monkeypatch, test_db) -> None:
-        old_daily = _daily([("2026-09-10", 11.0, 200.0)])
-        provider = _FakeProvider(
-            {("AAA.SS", "none"): _daily([("2026-09-11", 12.0, 300.0)])}
-        )
-        service = _make_service(monkeypatch, provider, test_db)
-        _seed_symbol(service, test_db, "AAA.SS", old_daily)
-        monkeypatch.setattr(service, "sync_ex_factors", lambda symbols, db=None: ({}, []))
-        monkeypatch.setattr(
-            service, "refresh_fitted_period_bars",
-            MagicMock(side_effect=RuntimeError("boom")),
-        )
-        result = service.ensure_daily_history("AAA.SS", date(2026, 1, 1), date(2026, 9, 11))
-        assert result["status"] == "updated"  # 拟合失败不影响日更结果
-        service.refresh_fitted_period_bars.assert_called()
+        assert result["factors_changed"] is True
+        service.refresh_fitted_period_bars.assert_not_called()

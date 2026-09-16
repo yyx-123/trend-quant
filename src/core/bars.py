@@ -60,8 +60,8 @@ def normalize_period(period: str | None) -> str:
     return canonical
 
 
-def _period_key(day: date, period: str) -> tuple[int, ...]:
-    """周期标识：周=ISO(年,周)，月=(年,月)。"""
+def period_key(day: date, period: str) -> tuple[int, ...]:
+    """周期标识：周=ISO(年,周)，月=(年,月)。周期语义只定义在本模块。"""
     if period == PERIOD_WEEKLY:
         iso = day.isocalendar()
         return (int(iso[0]), int(iso[1]))
@@ -100,8 +100,8 @@ def is_period_bar_closed(bar_day: date, period: str, *, now=None) -> bool:
     if bar_day > today:
         return False
 
-    bar_key = _period_key(bar_day, canonical)
-    today_key = _period_key(today, canonical)
+    bar_key = period_key(bar_day, canonical)
+    today_key = period_key(today, canonical)
     if bar_key < today_key:
         return True
     if bar_key > today_key:

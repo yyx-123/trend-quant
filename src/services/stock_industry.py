@@ -17,6 +17,7 @@ import unicodedata
 
 from audit.app_logger import get_logger
 from core import env as _env
+from core.display import category_path_from_parts
 from core.symbols import from_vendor_symbol, to_vendor_symbol
 from data.storage.db import Database, get_db, record_job_run_safely
 
@@ -144,8 +145,8 @@ def reclassify_pending_stocks(db: Database | None = None) -> dict:
         if not resolved["hit"]:
             still_unclassified.append(symbol)
             continue
-        path = "-".join(
-            [resolved["category_l1"], resolved["category_l2"], resolved["category_l3"]]
+        path = category_path_from_parts(
+            resolved["category_l1"], resolved["category_l2"], resolved["category_l3"]
         )
         if path not in valid_paths:
             deferred += 1
