@@ -14,6 +14,23 @@ from datetime import date, timedelta
 
 import pandas as pd
 import pytest
+from app.routers import market_view
+
+
+@pytest.fixture(autouse=True)
+def _no_network_period_fetch(monkeypatch):
+    """本文件的 API 测试一律不联网。
+
+    查看接口现在会为周/月做「按需补当期 bar」自愈，若不封住，种子数据的末根
+    停在往期就会真的去打 vendor（慢且不确定）。需要断言自愈行为的用例，在用例
+    体内再次 monkeypatch 覆盖本 fixture 即可（后写生效）。
+    """
+
+    class _Noop:
+        def ensure_period_history(self, *args, **kwargs):
+            return {"status": "ready"}
+
+    monkeypatch.setattr(market_view, "get_data_service", lambda: _Noop())
 
 
 def _seed_daily(test_db, symbol: str = "510300.SS", rows: int = 120) -> None:
@@ -65,7 +82,7 @@ class TestPeriodParameter:
         meta = resp.json()["meta"]
         assert meta["period"] == "1d"
         assert meta["period_label"] == "日"
-        assert meta["only_closed_bars"] is False
+        assert meta["last_bar_provisional"] is False
 
     @pytest.mark.parametrize("period,label", [("1d", "日"), ("1w", "周"), ("1M", "月")])
     def test_returns_requested_period_bars(self, client, test_db, period, label) -> None:
@@ -83,8 +100,9 @@ class TestPeriodParameter:
         meta = payload["meta"]
         assert meta["period"] == period
         assert meta["period_label"] == label
-        # 周/月视图只呈现已收盘周期（当期不在库内，由落库环节保证）
-        assert meta["only_closed_bars"] is (period != "1d")
+        # 当期（未收盘）bar 会入库：此处种子数据的末根是 2026-01 的往期 bar，
+        # 故不算进行中；日K恒 False
+        assert meta["last_bar_provisional"] is False
         # 回测面板锚点始终是日K跨度，与所选周期无关
         assert meta["daily_start"] == "2026-01-05"
         assert meta["daily_end"] == daily_end
@@ -291,3 +309,97 @@ class TestRollingTrendSeries:
         assert payload["dates"] == tail_days
         assert node["weekly"] == [1.0, 1.0, 1.0]
         assert node["monthly"] == [2.0, 2.0, 2.0]
+
+
+class TestViewPathSelfHealsCurrentBar:
+    """查看页契约：任意标的切到周/月都能看到**当期** K 线及按它算的指标。
+
+    全池任务覆盖不到「不在标的池 / 刚加入 / 缺席补数」的标的，查看接口必须自己
+    兜住 —— 否则用户在页面上只会看到 404 或一根停在往期的 bar。
+    """
+
+    def test_endpoint_fetches_missing_period_on_demand(self, client, test_db, monkeypatch) -> None:
+        """库里完全没有该周期数据时，查看接口按需补这一只，而不是 404。"""
+        _seed_daily(test_db)
+        weekly = pd.DataFrame(
+            [
+                {
+                    "time": "2026-05-08",
+                    "open": 5.0, "high": 5.1, "low": 4.9, "close": 5.05,
+                    "volume": 1000.0, "amount": 5000.0,
+                }
+            ]
+        )
+        calls: list[tuple] = []
+
+        class _Service:
+            def ensure_period_history(self, symbol, period, *, db=None, now=None):
+                calls.append((symbol, period))
+                test_db.save_market_data(symbol, weekly, price_mode="qfq", period=period)
+                test_db.save_market_data(symbol, weekly, price_mode="raw", period=period)
+                return {"status": "fetched"}
+
+        monkeypatch.setattr(market_view, "get_data_service", lambda: _Service())
+        resp = client.get(
+            "/market-view/api/daily", params={"symbol": "510300.SS", "period": "1w"}
+        )
+        assert resp.status_code == 200, resp.json()
+        payload = resp.json()
+        assert calls == [("510300.SS", "1w")]
+        assert payload["dates"] == ["2026-05-08"]
+        # 指标按补回来的当期 K 线现算（不是空图）
+        assert len(payload["indicators"]["ma"]["20"]) == 1
+        assert len(payload["indicators"]["trend"]["score"]) == 1
+
+    def test_endpoint_still_404s_when_symbol_truly_has_no_data(
+        self, client, test_db, monkeypatch
+    ) -> None:
+        """补不到就如实 404（例如代码写错/退市），不能把错误伪装成空图。"""
+        _seed_daily(test_db)
+
+        class _Service:
+            def ensure_period_history(self, symbol, period, *, db=None, now=None):
+                return {"status": "fetched"}  # 声称抓了但库里仍没有
+
+        monkeypatch.setattr(market_view, "get_data_service", lambda: _Service())
+        resp = client.get(
+            "/market-view/api/daily", params={"symbol": "510300.SS", "period": "1M"}
+        )
+        assert resp.status_code == 404
+        assert "月" in resp.json()["detail"]
+
+    def test_daily_view_does_not_trigger_on_demand_fetch(
+        self, client, test_db, monkeypatch
+    ) -> None:
+        """日K不走自愈：日 bar 只由 16:30 写入，别拿查看流量去打接口。"""
+        _seed_daily(test_db)
+        calls: list[tuple] = []
+
+        class _Service:
+            def ensure_period_history(self, *a, **k):
+                calls.append((a, k))
+                return {"status": "not_applicable"}
+
+        monkeypatch.setattr(market_view, "get_data_service", lambda: _Service())
+        resp = client.get("/market-view/api/daily", params={"symbol": "510300.SS"})
+        assert resp.status_code == 200
+        assert resp.json()["meta"]["period"] == "1d"
+        assert calls == []
+
+    def test_self_heal_failure_does_not_break_the_view(
+        self, client, test_db, monkeypatch
+    ) -> None:
+        """自愈过程抛错时仍按库内数据出图（不能因为补数失败而白屏）。"""
+        _seed_daily(test_db)
+        _seed_period(test_db, "1w", [("2026-05-08", 5.0)])
+
+        class _Service:
+            def ensure_period_history(self, *a, **k):
+                raise RuntimeError("vendor down")
+
+        monkeypatch.setattr(market_view, "get_data_service", lambda: _Service())
+        resp = client.get(
+            "/market-view/api/daily", params={"symbol": "510300.SS", "period": "1w"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["dates"] == ["2026-05-08"]

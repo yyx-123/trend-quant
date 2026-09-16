@@ -35,7 +35,7 @@ from app.routers import (
 )
 from audit.app_logger import get_logger, setup_logging
 from core import env
-from core.jobs import daily_market_update_job
+from core.jobs import daily_market_update_job, intraday_period_refresh_job
 from core.scheduler import SchedulerManager
 from core.settings import load_settings
 
@@ -149,6 +149,7 @@ async def lifespan(app: FastAPI):
 
     # 防止定时触发与启动补偿并发重入（同一进程只允许一个更新任务）。
     _update_job_lock = threading.Lock()
+    _intraday_period_lock = threading.Lock()
 
     def update_job(force: bool = False) -> None:
         if not _update_job_lock.acquire(blocking=False):
@@ -166,6 +167,21 @@ async def lifespan(app: FastAPI):
         result = snapshot_runner.ensure_running(trigger="schedule")
         if result.get("status") != "skipped":
             logger.info("Intraday snapshot scheduled trigger: %s", result.get("status"))
+
+    def intraday_period_job() -> None:
+        """周/月K 当期 bar 的盘中刷新入口（5 分钟档位）。
+
+        独立单飞锁：一轮全池刷新约 18 个批请求、约 40s，5 分钟档位本不会重叠，
+        但手动触发/启动补跑可能与定时撞上，故仍显式防重入。时段与交易日守卫在
+        ``intraday_period_refresh_job`` 内部（盘外零请求）。
+        """
+        if not _intraday_period_lock.acquire(blocking=False):
+            logger.info("Intraday period refresh already running; skipping duplicate trigger")
+            return
+        try:
+            intraday_period_refresh_job(settings)
+        finally:
+            _intraday_period_lock.release()
 
     def industry_sync_job() -> None:
         """申万行业分类月度同步（TickFlow universes）+ 待分类回补。
@@ -268,6 +284,7 @@ async def lifespan(app: FastAPI):
             intraday_snapshot_job=intraday_snapshot_job,
             industry_sync_job=industry_sync_job,
             backup_job=backup_job,
+            intraday_period_job=intraday_period_job,
         )
         threading.Thread(target=_daily_update_catchup, daemon=True).start()
 

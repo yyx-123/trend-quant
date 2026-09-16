@@ -1,4 +1,4 @@
-"""core/bars.py 周期口径：别名规范化 + 「未走完的周期不落库」判定。
+"""core/bars.py 周期口径：别名规范化、周期完整性判定、落库过滤。
 
 关键回归点：vendor 的周/月 bar 标注日是该标的在本周期内最后一个有成交的
 日子，停牌会让标注日落在周期中间（万科A 2015-12 月 bar 标 12-18、招行
@@ -17,10 +17,13 @@ from core.bars import (
     PERIOD_DAILY,
     PERIOD_MONTHLY,
     PERIOD_WEEKLY,
+    bars_through_today,
     closed_bars,
     date_span,
     is_period_bar_closed,
+    is_period_bar_provisional,
     normalize_period,
+    period_start,
 )
 
 
@@ -151,6 +154,68 @@ class TestClosedBars:
         frame = self._frame(["2026-08-31", "2026-09-11"])
         closed_bars(frame, PERIOD_MONTHLY, now=now)
         assert len(frame) == 2
+
+
+class TestBarsThroughToday:
+    """落库口径：**保留进行中的当期 bar**，只丢未来日期。
+
+    周/月当期 bar 由 vendor 给「本周期至今」的实时聚合值（实测与本地日K 聚合
+    逐列相等），入库并每天滚动刷新，信号才不必等周期收盘。
+    """
+
+    @staticmethod
+    def _frame(days: list[str]) -> pd.DataFrame:
+        return TestClosedBars._frame(days)
+
+    def test_keeps_provisional_bar(self) -> None:
+        now = datetime(2026, 9, 12, 17, 30)
+        frame = self._frame(["2026-07-31", "2026-08-31", "2026-09-11"])
+        kept = bars_through_today(frame, PERIOD_MONTHLY, now=now)
+        assert [str(day)[:10] for day in kept["time"]] == ["2026-07-31", "2026-08-31", "2026-09-11"]
+        # 与 closed_bars 的差别就是当期那一根
+        assert len(closed_bars(frame, PERIOD_MONTHLY, now=now)) == 2
+
+    def test_drops_future_dates(self) -> None:
+        now = datetime(2026, 9, 12, 17, 30)
+        frame = self._frame(["2026-08-31", "2026-09-11", "2026-09-30", "2026-10-31"])
+        kept = bars_through_today(frame, PERIOD_MONTHLY, now=now)
+        assert [str(day)[:10] for day in kept["time"]] == ["2026-08-31", "2026-09-11"]
+
+    def test_daily_and_missing_column_passthrough(self) -> None:
+        frame = self._frame(["2026-09-10", "2026-09-11"])
+        assert bars_through_today(frame, "1d") is frame
+        stripped = frame.drop(columns=["time"])
+        assert bars_through_today(stripped, PERIOD_WEEKLY).shape[0] == 2
+
+    def test_input_not_mutated(self) -> None:
+        now = datetime(2026, 9, 12, 17, 30)
+        frame = self._frame(["2026-08-31", "2026-09-11"])
+        bars_through_today(frame, PERIOD_MONTHLY, now=now)
+        assert len(frame) == 2
+
+
+class TestProvisionalHelpers:
+    def test_is_period_bar_provisional(self) -> None:
+        now = datetime(2026, 9, 12, 17, 30)
+        # 9 月尚未走完 → 9 月 bar 是进行中的；8 月已走完
+        assert is_period_bar_provisional(date(2026, 9, 11), PERIOD_MONTHLY, now=now) is True
+        assert is_period_bar_provisional(date(2026, 8, 31), PERIOD_MONTHLY, now=now) is False
+        # 日K恒不是「进行中」：日 bar 只在收盘后落库
+        assert is_period_bar_provisional(date(2026, 9, 11), "1d", now=now) is False
+
+    def test_period_start(self) -> None:
+        # 周 = ISO 周一
+        assert period_start(date(2026, 9, 11), PERIOD_WEEKLY) == date(2026, 9, 7)  # 周五
+        assert period_start(date(2026, 9, 13), PERIOD_WEEKLY) == date(2026, 9, 7)  # 周日
+        assert period_start(date(2026, 9, 14), PERIOD_WEEKLY) == date(2026, 9, 14)  # 周一
+        # 月 = 1 号
+        assert period_start(date(2026, 9, 11), PERIOD_MONTHLY) == date(2026, 9, 1)
+        assert period_start(date(2026, 9, 30), PERIOD_MONTHLY) == date(2026, 9, 1)
+
+    def test_period_start_is_idempotent_on_boundary(self) -> None:
+        """整数个周期：周期首日再取周期首日 = 自身（刷新窗口不会越滚越前）。"""
+        for day, period in ((date(2026, 9, 7), PERIOD_WEEKLY), (date(2026, 9, 1), PERIOD_MONTHLY)):
+            assert period_start(period_start(day, period), period) == period_start(day, period)
 
 
 def test_date_span_unchanged() -> None:

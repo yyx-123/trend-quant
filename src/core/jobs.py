@@ -1,7 +1,11 @@
 """Scheduled jobs for the application.
 
-Currently only the daily market data update (16:30 on trading days),
-migrated from the retired signal engine's ``run_daily_update``.
+- ``daily_market_update_job``: the 16:30 post-close update (daily K + the
+  weekly/monthly sync), migrated from the retired signal engine's
+  ``run_daily_update``;
+- ``intraday_period_refresh_job``: every 5 minutes during the session, refresh
+  ONLY the weekly/monthly in-progress bars (daily K is deliberately untouched —
+  it stays EOD-only, with the view-only intraday overlay for charts).
 """
 
 from __future__ import annotations
@@ -9,8 +13,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from audit.app_logger import get_logger
+from core.bars import PERIOD_MONTHLY, PERIOD_WEEKLY
 from core.benchmarks import benchmark_market_symbols
-from core.calendar import is_trading_day, market_now
+from core.calendar import is_realtime_available, is_trading_day, market_now
 from core.ops_sentinel import clear_sentinel, write_sentinel
 from core.settings import Settings
 from core.strategy_config import get_strategy_config
@@ -62,6 +67,60 @@ def _sync_period_bars(service: DataService, symbols: list[str], today) -> dict:
         period: {key: value for key, value in info.items() if key != "results"}
         for period, info in (period_payload.get("periods") or {}).items()
     }
+
+
+def intraday_period_refresh_job(
+    settings: Settings,
+    data_service: DataService | None = None,
+) -> dict:
+    """盘中每 5 分钟刷新周/月K 的当期（未收盘）bar —— **日K刻意不动**。
+
+    为什么只刷周/月：周/月的当期 bar 是「本周期至今」的滚动值，盘后一天才更新
+    一次意味着盘中看到的周/月线最多滞后一个交易日；而日K的盘中新鲜度走的是
+    另一条路（``data.intraday_service`` 的 view-only 合成 bar），日K库仍只由
+    16:30 的日更写入收盘数据 —— 这条硬约束不因本任务改变。
+
+    与 16:30 那轮的分工：
+    - 本任务 ``sync_factors=False``（因子盘中几乎不变，不白打请求）、不记
+      ``job_runs``（一天约 48 轮，记了只是噪声）；
+    - 16:30 那轮照旧带因子同步与 job_runs，并把当期 bar 收成定值。
+
+    时段门控用 ``is_realtime_available``（交易日 + 9:30~15:00，含午休——午休时
+    报价仍反映上午收盘状态）；非交易时段直接跳过，不产生任何请求。
+    """
+    if not is_realtime_available():
+        return {"status": "skipped_outside_session"}
+
+    today = market_now().date()
+    try:
+        symbols = _pool_symbols()
+        service = data_service or get_data_service()
+        payload = service.update_pool_periods(
+            symbols,
+            (PERIOD_WEEKLY, PERIOD_MONTHLY),
+            end_date=today,
+            sync_factors=False,
+            job_type="",  # 不污染 job_runs
+        )
+    except Exception as exc:
+        # 盘中刷新失败不写哨兵：下一轮（5 分钟后）会自愈，不值得报警；
+        # 16:30 那轮才是权威，失败才需要外显。
+        logger.exception("Intraday weekly/monthly refresh failed")
+        return {"status": "error", "error": str(exc)}
+
+    summary = {
+        period: {
+            "updated": info.get("updated"),
+            "up_to_date": info.get("up_to_date"),
+            "failed": info.get("failed"),
+        }
+        for period, info in (payload.get("periods") or {}).items()
+    }
+    if payload.get("failed"):
+        logger.warning("Intraday weekly/monthly refresh had failures: %s", summary)
+    else:
+        logger.info("Intraday weekly/monthly refresh done: %s", summary)
+    return {"status": payload.get("status"), "periods": summary, **{"ts": payload.get("ts")}}
 
 
 def daily_market_update_job(

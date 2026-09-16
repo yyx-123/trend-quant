@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"[{period}] 计划 {info['planned']} / 更新 {info['updated']} / 已最新 {info['up_to_date']}"
             f" / 失败 {info['failed']}；写入 {info['rows_written']} 行，"
-            f"丢弃未收盘 bar {info['dropped_open_period']} 根，整段重取 {info['full_refetch']} 只"
+            f"丢弃未来日期 bar {info['dropped_future_bars']} 根，整段重取 {info['full_refetch']} 只"
         )
         coverage = info.get("coverage") or {}
         print(f"[{period}] 覆盖区间：{coverage.get('start')} ~ {coverage.get('end')}")

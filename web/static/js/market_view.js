@@ -67,7 +67,6 @@
   let volumeChart = null;
   let rsiChart = null;
   let macdChart = null;
-  let biasChart = null;
   let eBiasChart = null;
   let heatChart = null;
   let charts = [];
@@ -77,9 +76,8 @@
     volumeChart = echarts.init(document.getElementById('mvVolumeChart'));
     rsiChart = echarts.init(document.getElementById('mvRsiChart'));
     macdChart = echarts.init(document.getElementById('mvMacdChart'));
-    biasChart = echarts.init(document.getElementById('mvBiasChart'));
     eBiasChart = echarts.init(document.getElementById('mvEBiasChart'));
-    charts = [priceChart, trendChart, volumeChart, rsiChart, biasChart, eBiasChart, macdChart];
+    charts = [priceChart, trendChart, volumeChart, rsiChart, eBiasChart, macdChart];
     for (const chart of charts) chart.group = 'market-view-time';
     echarts.connect('market-view-time');
     // 止损线悬停说明：写入图上方 DOM 信息条（ECharts label 会被 grid 边缘裁剪，改用图外展示）
@@ -1030,27 +1028,6 @@
     }, true);
   }
 
-  function renderBias(payload, zoom) {
-    if (!biasChart) return;
-    const dates = payload.dates || [];
-    const bias = payload.indicators?.bias || {};
-    biasChart.setOption({
-      animation: false,
-      axisPointer: { link: [{ xAxisIndex: 'all' }] },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' }, valueFormatter: (v) => `${num(v, 2)}%` },
-      legend: { data: ['BIAS6', 'BIAS12', 'BIAS24'], top: 2 },
-      grid: { left: 62, right: 28, top: 36, bottom: 42 },
-      dataZoom: buildDataZoom(zoom.start, zoom.end),
-      xAxis: { type: 'category', data: dates, boundaryGap: false },
-      yAxis: { type: 'value', scale: true, axisLabel: { formatter: (v) => `${num(v, 1)}%` } },
-      series: [
-        { name: 'BIAS6', type: 'line', data: bias['6'] || [], symbol: 'none', smooth: true, lineStyle: { width: 1.2, color: '#7c3aed' }, itemStyle: { color: '#7c3aed' } },
-        { name: 'BIAS12', type: 'line', data: bias['12'] || [], symbol: 'none', smooth: true, lineStyle: { width: 1.2, color: '#0d7a71' }, itemStyle: { color: '#0d7a71' } },
-        { name: 'BIAS24', type: 'line', data: bias['24'] || [], symbol: 'none', smooth: true, lineStyle: { width: 1.2, color: '#c7834c' }, itemStyle: { color: '#c7834c' } },
-      ],
-    }, true);
-  }
-
   // E-BIAS 参考线配色按阈值语义固定（与 RSI 子图 70/50/30 同族配色），
   // 未知阈值兜底为灰。阈值为广发策略行业指数口径，未在本 ETF 池标定 ——
   // 仅作看图辅助，不是已验证的信号线（说明文字见模板 .market-subchart-note）。
@@ -1637,10 +1614,10 @@
     const intradayLabel = afterClose ? '收盘估算' : '盘中实时';
     const periodLabel = payload.meta?.period_label || '日';
     chartTitleEl.innerHTML = `${esc(payload.display_label || payload.display_name || payload.symbol || '')} ${periodLabel} K${payload.meta?.is_intraday ? ` <span class="intraday-badge"><span class="intraday-dot" style="animation:intraday-pulse 1.6s ease-in-out infinite"></span>${intradayLabel}</span>` : ''}`;
-    // 周/月表只存已收盘周期：末根是「上一个走完的周期」，当期（本周/本月至今）
-    // 不在库内，如实标注避免误读为最新走势。
-    const closedHint = payload.meta?.only_closed_bars
-      ? ` · 仅完整周期（末根为${periodLabel}线收盘日，当期未收盘不显示）`
+    // 周/月的当期 bar 是「本周期至今」的滚动值（每天被覆盖刷新），入库是为了
+    // 让信号不必等周期收盘；但末根因此不是定值，如实标注避免当成完整周期读。
+    const closedHint = payload.meta?.last_bar_provisional
+      ? ` · 末根为进行中的${periodLabel}线（本${periodLabel}至今，未收盘）`
       : '';
     rangeMetaEl.textContent = `${payload.meta?.start || '-'} ~ ${payload.meta?.end || '-'} | ${Number(payload.meta?.rows || 0)} 根${payload.meta?.is_intraday ? ` · 含${intradayLabel}数据` : ''}${closedHint}`;
     // 我的止损档位开关：仅当当前标的存在带止损数据的未平仓持仓时显示
@@ -1649,7 +1626,6 @@
     renderTrend(payload, zoom);
     renderVolume(payload, zoom);
     renderRsi(payload, zoom);
-    renderBias(payload, zoom);
     renderEBias(payload, zoom);
     renderMacd(payload, zoom);
     setTimeout(() => { if (charts.length) charts.forEach((chart) => chart.resize()); }, 0);

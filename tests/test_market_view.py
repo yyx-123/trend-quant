@@ -370,6 +370,21 @@ class MarketViewApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_db.rolling_calls, [])
 
 class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
+    """周/月周期取数 + 指标重算。
+
+    这些用例直调路由函数（不经 HTTP），因此必须显式封住「按需补当期 bar」的
+    自愈入口 —— 否则种子数据的末根落在往期时会走到真实 service，进而读真实库/
+    真打 vendor（曾经靠生产库里恰好有该标的而侥幸通过）。
+    """
+
+    @staticmethod
+    def _block_self_heal():
+        class _Noop:
+            def ensure_period_history(self, *args, **kwargs):
+                return {"status": "ready"}
+
+        return patch.object(market_view, "get_data_service", lambda: _Noop())
+
     """周期切换：主图取该周期的 bar，副图指标按该周期 K 线重算。
 
     指标不读 indicator_daily 缓存，而是吃 build_market_payload 传入的 OHLCV，
@@ -400,7 +415,7 @@ class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
         weekly = self._weekly_frame()
         fake_db = FakeMarketViewDb(daily, period_frames={"1w": weekly})
 
-        with patch.object(market_view, "get_db", return_value=fake_db):
+        with patch.object(market_view, "get_db", return_value=fake_db), self._block_self_heal():
             weekly_payload = await market_view.get_market_daily(
                 symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, period="1w", intraday=False
             )
@@ -410,7 +425,7 @@ class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(weekly_payload["meta"]["period"], "1w")
         self.assertEqual(weekly_payload["meta"]["period_label"], "周")
-        self.assertTrue(weekly_payload["meta"]["only_closed_bars"])
+        self.assertFalse(weekly_payload["meta"]["last_bar_provisional"])  # 种子末根为往期 bar
         self.assertEqual(len(weekly_payload["dates"]), len(weekly))
         # 副图每个分组都按周K 长度重算（不是日K 的尾部切片）
         for group in ("ma", "atr", "boll", "macd", "bias", "e_bias", "volume_ma", "rsi", "trend"):
@@ -431,7 +446,7 @@ class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
         )
         # 日K请求仍不受影响
         self.assertEqual(daily_payload["meta"]["period"], "1d")
-        self.assertFalse(daily_payload["meta"]["only_closed_bars"])
+        self.assertFalse(daily_payload["meta"]["last_bar_provisional"])
         self.assertEqual(len(daily_payload["dates"]), len(daily))
 
     async def test_daily_span_always_comes_from_daily_table(self) -> None:
@@ -441,7 +456,7 @@ class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
             daily, period_frames={"1M": self._weekly_frame().head(3)}
         )
 
-        with patch.object(market_view, "get_db", return_value=fake_db):
+        with patch.object(market_view, "get_db", return_value=fake_db), self._block_self_heal():
             payload = await market_view.get_market_daily(
                 symbol="518850.SS", limit=market_view.DEFAULT_LIMIT, period="1M"
             )
@@ -466,7 +481,7 @@ class MarketViewPeriodSwitchTest(unittest.IsolatedAsyncioTestCase):
         """周/月不合成盘中 bar：intraday=true 也只返回已收盘周期。"""
         daily = sample_daily_bars(60)
         fake_db = FakeMarketViewDb(daily, period_frames={"1w": self._weekly_frame()})
-        with patch.object(market_view, "get_db", return_value=fake_db):
+        with patch.object(market_view, "get_db", return_value=fake_db), self._block_self_heal():
             payload = await market_view.get_market_daily(
                 symbol="518850.SS",
                 limit=market_view.DEFAULT_LIMIT,

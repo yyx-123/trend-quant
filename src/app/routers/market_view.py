@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import date
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -8,12 +9,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.instrument_display import format_symbol_display, load_instrument_name_map
-from core.bars import PERIOD_DAILY, normalize_period
+from core.bars import PERIOD_DAILY, is_period_bar_provisional, normalize_period
 from core.calendar import market_now
 from core.display import category_path as _category_path
 from core.numfmt import number6_or_none
 from core.symbols import normalize_symbol
 from data.intraday_service import build_intraday_overlay
+from data.service import get_data_service
 from data.storage.db import get_db
 from services import auth
 from services import trade_records as tr
@@ -182,7 +184,10 @@ def build_market_payload(
         # 日期锚定在日K（周/月视图下 meta.start/end 是周期 bar 的标注日）。
         "period": canonical_period,
         "period_label": PERIOD_LABELS[canonical_period],
-        "only_closed_bars": canonical_period != PERIOD_DAILY,
+        # 当期（未收盘）的周/月 bar 会入库并每天滚动刷新，故末根可能是「进行中」
+        # 的半截 bar。这里如实上报，前端据此提示，避免被当成完整周期读。
+        # 日K恒 False：日 bar 只在收盘后落库，盘中合成行走 overlay 不入库。
+        "last_bar_provisional": False,
         "daily_start": str((daily_span or {}).get("start") or "")[:10] or None,
         "daily_end": str((daily_span or {}).get("end") or "")[:10] or None,
     }
@@ -311,6 +316,15 @@ async def get_market_daily(
     period_label = PERIOD_LABELS[kline_period]
 
     db = get_db()
+    # 周/月视图：先确保这一只的当期 bar 在库（缺失/停在往期时按需补，带节流）。
+    # 查看页的契约是「任意标的、切到周/月都能看到当期 K 线及按它算的指标」，
+    # 全池任务覆盖不到非标的池/刚加入/缺席补数的标的，故查看路径自愈。
+    if kline_period != PERIOD_DAILY:
+        try:
+            get_data_service().ensure_period_history(normalized_symbol, kline_period, db=db)
+        except Exception:
+            # 自愈失败不阻断查看：下面照常读库，空则按 404 如实报「未找到」。
+            logger.exception("ensure %s history failed for %s", kline_period, normalized_symbol)
     df = db.load_market_data(normalized_symbol, period=kline_period)
     if df.empty:
         raise HTTPException(status_code=404, detail=f"未找到本地{period_label} K 数据")
@@ -451,5 +465,13 @@ async def get_market_daily(
     payload["meta"]["requested_start"] = _date_only(start_ts)
     payload["meta"]["requested_end"] = _date_only(end_ts)
     payload["meta"]["limit"] = int(limit)
+    # 末根是否「进行中、未收盘」——周/月当期 bar 未走完时每天被覆盖刷新，
+    # 其 OHLCV 不是定值；日K恒 False。
+    last_bar = payload["dates"][-1] if payload["dates"] else None
+    payload["meta"]["last_bar_provisional"] = bool(
+        last_bar
+        and kline_period != PERIOD_DAILY
+        and is_period_bar_provisional(date.fromisoformat(last_bar), kline_period)
+    )
 
     return payload

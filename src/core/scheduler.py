@@ -36,6 +36,7 @@ class SchedulerManager:
         intraday_snapshot_job: Callable[[], None] | None = None,
         industry_sync_job: Callable[[], None] | None = None,
         backup_job: Callable[[], None] | None = None,
+        intraday_period_job: Callable[[], None] | None = None,
     ) -> None:
         if self.scheduler is not None:
             return
@@ -89,6 +90,20 @@ class SchedulerManager:
                     intraday_snapshot_job,
                     trigger=CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute),
                     id=f"intraday_snapshot_{idx}",
+                    replace_existing=True,
+                    misfire_grace_time=60,
+                    coalesce=True,
+                )
+
+        if intraday_period_job is not None:
+            # 周/月K 当期 bar 的盘中刷新：与看板快照同一批 5 分钟档位（日K不在
+            # 此列，它只在 16:30 由日更写入）。任务内部以 is_realtime_available
+            # 兜底（节假日/盘外直接跳过），单例运行器防重入。
+            for idx, (hour, minute) in enumerate(INTRADAY_SNAPSHOT_CRONS):
+                scheduler.add_job(
+                    intraday_period_job,
+                    trigger=CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute),
+                    id=f"intraday_period_{idx}",
                     replace_existing=True,
                     misfire_grace_time=60,
                     coalesce=True,

@@ -126,18 +126,76 @@ def closed_bars(df: pd.DataFrame, period: str, *, now=None) -> pd.DataFrame:
 
     入参/出参均为标准 OHLCV DataFrame（含 time 列）；返回新对象，不修改入参。
     """
+    return _filter_bars(df, period, drop_provisional=True, now=now)
+
+
+def bars_through_today(df: pd.DataFrame, period: str, *, now=None) -> pd.DataFrame:
+    """只丢弃「未来日期」的 bar —— **保留进行中的当期 bar**（周/月K 专用）。
+
+    与 ``closed_bars`` 的差别就是当期那一根：本函数把它留下。这是周/月K 的
+    落库口径 —— 当期 bar 由 vendor 提供「本周期至今」的实时聚合值（已实测：
+    月中旬拿到的月 bar == 用本地日K 把本月已过交易日聚合的结果，逐列相等），
+    所以不必自己拟合；它每天收盘后随日更重取覆盖，直到本周期走完变成不可变
+    的历史。详见 docs/26-09-12-周月K/ §14。
+
+    消费方须知：库里周/月表的**末根可能是未收盘的当期 bar**，用
+    ``is_period_bar_provisional(bar_day, period)`` 判定；做回测/信号定档时
+    自行决定是否排除它。
+    """
+    return _filter_bars(df, period, drop_provisional=False, now=now)
+
+
+def _filter_bars(
+    df: pd.DataFrame, period: str, *, drop_provisional: bool, now=None
+) -> pd.DataFrame:
     canonical = normalize_period(period)
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
     if canonical == PERIOD_DAILY or "time" not in df.columns:
         return df
 
+    moment = now or market_now()
+    today = moment.date()
     days = pd.to_datetime(df["time"], errors="coerce")
-    keep = [
-        not pd.isna(day) and is_period_bar_closed(day.date(), canonical, now=now)
-        for day in days
-    ]
+    keep: list[bool] = []
+    for day in days:
+        if pd.isna(day):
+            keep.append(False)
+            continue
+        bar_day = day.date()
+        if bar_day > today:
+            keep.append(False)  # 未来日期永不落库
+            continue
+        if drop_provisional:
+            keep.append(is_period_bar_closed(bar_day, canonical, now=moment))
+        else:
+            keep.append(True)
     return df.loc[keep].reset_index(drop=True)
+
+
+def is_period_bar_provisional(bar_day: date, period: str, *, now=None) -> bool:
+    """该 bar 是否「进行中、尚未收盘」（= 未收盘）。日K恒 False。
+
+    周/月表末根用这个判定是否还在滚动更新中；当期 bar 的 OHLCV 每天都会变，
+    不可当历史定值消费。
+    """
+    if normalize_period(period) == PERIOD_DAILY:
+        return False
+    if not isinstance(bar_day, date):
+        return False
+    return not is_period_bar_closed(bar_day, period, now=now)
+
+
+def period_start(day: date, period: str) -> date:
+    """``day`` 所属周期的**日历首日**（周=ISO 周一，月=当月 1 号）。
+
+    用于「重取当期 bar」的抓取窗口起点：末根是进行中的 bar 时必须从本周期
+    开头重抓，否则增量窗口会把它跳过（见 service._period_fetch_plan）。
+    """
+    canonical = normalize_period(period)
+    if canonical == PERIOD_WEEKLY:
+        return day - timedelta(days=day.weekday())
+    return day.replace(day=1)
 
 
 def date_span(df: pd.DataFrame) -> tuple[str | None, str | None]:

@@ -15,10 +15,12 @@ from core.bars import (
     PERIOD_DAILY,
     PERIOD_MONTHLY,
     PERIOD_WEEKLY,
-    closed_bars,
+    bars_through_today,
     date_span,
     fitted_period_rows,
+    is_period_bar_provisional,
     normalize_period,
+    period_start,
 )
 from core.calendar import is_trading_day as _calendar_is_trading_day
 from core.calendar import market_now
@@ -67,6 +69,14 @@ _QUOTE_CACHE_TTL_SECONDS = max(
 )
 _quote_cache: dict[str, tuple[float, dict]] = {}
 _quote_cache_lock = threading.Lock()
+
+# 「按需补当期 bar」的尝试节流（见 ensure_period_history）。有些标的确实没有当期
+# bar（停牌/退市/已不在标的池），不节流就会每次打开页面都白打一轮网络；10 分钟
+# 内同一 (周期, 标的) 只尝试一次。与报价缓存同一思路：进程级、短 TTL、只影响
+# 失败重试频率，不影响正确性。
+_ONDEMAND_PERIOD_TTL_SECONDS = 600.0
+_ondemand_period_attempts: dict[str, float] = {}
+_ondemand_period_lock = threading.Lock()
 
 
 def _quote_cache_get(symbol: str) -> dict | None:
@@ -1056,12 +1066,21 @@ class DataService:
     # ------------------------------------------------------------------
     # 周K/月K（vendor 直接提供，非本地物化）
     # ------------------------------------------------------------------
-    # 与日K的架构差异（为什么周/月没有 raw→qfq 本地物化）：
+    # 与日K的第一处差异（为什么周/月没有 raw→qfq 本地物化）：
     # 周/月 bar 内可能横跨除权日，bar 的 OHLC 各日用的因子不同，无法由
     # 「raw 周期 bar × 单一因子」还原，所以 qfq 周期表直接取 vendor 前复权
-    # 结果、在除权变化时整段重取；raw 周期表仍是追加型不可变历史。
-    # 只有已收盘周期入库（core.bars.closed_bars），因此两张表都不会出现
-    # 「进行中的周/月」这种半截 bar。
+    # 结果、在除权变化时整段重取。
+    #
+    # 与日K的第二处差异（有意为之）：**当期（未收盘）的周/月 bar 也入库**，
+    # 并随每日盘后任务滚动重取覆盖，直到本周期走完。
+    #   - vendor 直接给「本周期至今」的实时聚合值。实测 2026-09-12 取到的
+    #     月 bar（标 2026-09-11）与本地日K把 9/1~9/11 聚合的结果逐列相等
+    #     （open 4.683 / high 4.705 / low 4.532 / close 4.579 / volume 64073051）
+    #     → 不需要自己拟合；周 bar 同理（volume = 该周已过交易日之和）。
+    #   - 但它是**未定值**：当期 bar 的 OHLCV 每天都在变，不是追加型不可变
+    #     历史。早期版本按「只存已收盘周期」实现，代价是月线信号滞后近一个月。
+    #   - 消费方判据：core.bars.is_period_bar_provisional(bar_day, period)。
+    # 日K不适用这套逻辑：日 bar 仍只在收盘后由日更写入，盘中合成行永不落库。
 
     @staticmethod
     def _period_store(period: str, price_mode: str) -> MarketStore:
@@ -1069,15 +1088,15 @@ class DataService:
 
     @staticmethod
     def _prepare_period_frame(df: pd.DataFrame, period: str) -> tuple[pd.DataFrame, int]:
-        """过滤未收盘周期 → (待落库 frame, 丢弃根数)。
+        """过滤未来日期 → (待落库 frame, 丢弃根数)。**保留进行中的当期 bar**。
 
-        落库是 upsert 而非整表重写：除权触发的整段重取会覆盖历史行，而落库
-        失败（网络中断）时不会把已有历史删成空表。
+        落库是 upsert 而非整表重写：当期 bar 的滚动刷新与除权触发的整段重取都
+        靠覆盖同一主键行完成，而落库失败（网络中断）时不会把已有历史删成空表。
         """
         if df is None or df.empty:
             return pd.DataFrame(), 0
-        closed = closed_bars(df, period)
-        return closed, int(len(df) - len(closed))
+        kept = bars_through_today(df, period)
+        return kept, int(len(df) - len(kept))
 
     @staticmethod
     def _summary_date(summary: dict | None, field: str):
@@ -1144,10 +1163,20 @@ class DataService:
         if refresh or incomplete:
             start, full = full_start, True
         else:
-            incremental = [_period_fetch_start(day, period, full_start) for day in local_ends]
-            # 两侧取较早者：多抓一根已收盘 bar 只是重复 upsert，不会出错；
-            # 取较晚者则会漏掉落后一侧的缺口。
-            start = min(incremental) if incremental else full_start
+            # 增量窗口：常规是「末根之后的下一个周期」，但**末根还是进行中的
+            # 当期 bar 时要从本周期开头重抓** —— 它的 OHLCV 每天在变，必须整根
+            # 覆盖刷新；用 _period_fetch_start（下周期首日）会把它跳过，信号就
+            # 永远停在旧值上。
+            provisional = [
+                day for day in local_ends if is_period_bar_provisional(day, period)
+            ]
+            if provisional:
+                start = max(min(period_start(day, period) for day in provisional), full_start)
+            else:
+                incremental = [_period_fetch_start(day, period, full_start) for day in local_ends]
+                # 两侧取较早者：多抓一根已收盘 bar 只是重复 upsert，不会出错；
+                # 取较晚者则会漏掉落后一侧的缺口。
+                start = min(incremental) if incremental else full_start
             full = False
         if start > end_date:
             status = "bootstrap" if incomplete else "up_to_date"
@@ -1276,7 +1305,7 @@ class DataService:
                         "fetch_start": item["start"].isoformat(),
                         "full": item["full"],
                         "rows": {mode: int(saved.get(mode, {}).get(symbol, 0)) for mode in ("raw", "qfq")},
-                        "dropped_open_period": dropped.get(symbol, 0),
+                        "dropped_future_bars": dropped.get(symbol, 0),
                     }
                     qfq_summary = db.get_market_data_summary(symbol, price_mode="qfq", period=period)
                     row["local_start"] = str(qfq_summary.get("start") or "")[:10] or None
@@ -1313,12 +1342,16 @@ class DataService:
         retry_interval_seconds: float = 5.0,
         progress_callback: Callable[[dict], None] | None = None,
         job_type: str = "period_update",
+        sync_factors: bool = True,
     ) -> dict:
-        """周K/月K 日更（或整段补数：传 start_date）。
+        """周K/月K 同步（日更 / 整段补数 / 盘中刷新）。
 
-        - 增量：只抓存量末根之后的 bar，落库时丢弃未收盘周期；
+        - 增量：只抓存量末根之后的 bar；末根是进行中的当期 bar 时重取本周期；
         - 除权变化：该标的 qfq 整段重取（raw 仍增量，除权不改写非复权价）；
         - 首次入库：按 _period_bootstrap_starts 的起点整段抓取。
+
+        ``sync_factors=False`` 供盘中 5 分钟刷新用：因子在交易时段内几乎不会变，
+        每轮多打约 ceil(N/50) 次请求纯属浪费；真变了也由 16:30 那轮兜住。
         """
         db = db or get_db()
         today = market_now().date()
@@ -1342,13 +1375,14 @@ class DataService:
 
         bootstrap = self._period_bootstrap_starts(unique, start_date)
         changed: set[str] = set()
-        try:
-            _factors_map, changed_symbols = self.sync_ex_factors(unique, db=db)
-            changed = set(changed_symbols)
-            if changed:
-                logger.info("ex-factor changes detected for %d symbols: 周/月K 将整段重取", len(changed))
-        except Exception:
-            logger.exception("ex-factor pre-sync for period update failed; using stored factors")
+        if sync_factors:
+            try:
+                _factors_map, changed_symbols = self.sync_ex_factors(unique, db=db)
+                changed = set(changed_symbols)
+                if changed:
+                    logger.info("ex-factor changes detected for %d symbols: 周/月K 将整段重取", len(changed))
+            except Exception:
+                logger.exception("ex-factor pre-sync for period update failed; using stored factors")
 
         failed_symbols: list[str] = []
         for period in canonical:
@@ -1396,15 +1430,32 @@ class DataService:
                 "rows_written": sum(
                     int(row["rows"].get(mode) or 0) for row in rows for mode in ("raw", "qfq")
                 ),
-                "dropped_open_period": sum(int(row["dropped_open_period"]) for row in rows),
+                "dropped_future_bars": sum(int(row["dropped_future_bars"]) for row in rows),
                 "full_refetch": sum(1 for row in rows if row["full"]),
+                # 库内覆盖区间：plan 侧覆盖「本轮无需抓取」的标的（否则全部已最新
+                # 时会是 None~None），row 侧是本轮**落库后**重读的实际区间（否则
+                # 刚写入的当期 bar 要等下一轮才体现在覆盖里）。
                 "coverage": {
                     "start": min(
-                        (plan["local_start"] for plan in plans if plan.get("local_start")),
+                        (
+                            value
+                            for value in (
+                                [plan.get("local_start") for plan in plans]
+                                + [row.get("local_start") for row in rows]
+                            )
+                            if value
+                        ),
                         default=None,
                     ),
                     "end": max(
-                        (plan["local_end"] for plan in plans if plan.get("local_end")),
+                        (
+                            value
+                            for value in (
+                                [plan.get("local_end") for plan in plans]
+                                + [row.get("local_end") for row in rows]
+                            )
+                            if value
+                        ),
                         default=None,
                     ),
                 },
@@ -1428,6 +1479,74 @@ class DataService:
                 failed_symbols[:20],
             )
         return payload
+
+    def ensure_period_history(
+        self, symbol: str, period: str, *, db=None, now: date | None = None
+    ) -> dict:
+        """确保 (标的, 周期) 看得到**当期** bar；缺失就按需补这一只。
+
+        查看页要保证「打开任意标的、切到周/月，都能看到当前周/月 K 线」，
+        而全池任务覆盖不到三种标的：①不在标的池（无 instrument_metadata 或
+        enabled=0）；②刚加入、还没到下一次 16:30；③停机/补数缺席久了。这三种
+        在页面上原本直接 404。这里做查看路径的自愈：库里没有该周期数据、或末根
+        还停在往期时，单标的抓一次（2 个批请求），抓完调用方重新读库即可。
+
+        日K不在此列 —— 日 bar 只由 16:30 日更写入，查询命中不了「当期」是正常的
+        （盘中当天的走势走 view-only 合成 bar）。
+
+        带 10 分钟节流（``_ONDEMAND_PERIOD_TTL_SECONDS``）：确实没有当期 bar 的
+        标的（停牌/退市）不会被每次翻页反复重试。
+        """
+        canonical = normalize_period(period)
+        if canonical == PERIOD_DAILY:
+            return {"status": "not_applicable"}
+        db = db or get_db()
+        symbol = str(symbol or "").strip().upper()
+
+        summary = db.get_market_data_summary(symbol, price_mode="qfq", period=canonical)
+        local_end = self._summary_date(summary, "end")
+        reference = now or market_now().date()
+        if local_end is not None and _period_key(local_end, canonical) == _period_key(
+            reference, canonical
+        ):
+            return {"status": "ready", "local_end": local_end.isoformat()}
+
+        key = f"{canonical}:{symbol}"
+        moment = time.monotonic()
+        with _ondemand_period_lock:
+            last_attempt = _ondemand_period_attempts.get(key)
+            if last_attempt is not None and (moment - last_attempt) < _ONDEMAND_PERIOD_TTL_SECONDS:
+                return {
+                    "status": "throttled",
+                    "local_end": local_end.isoformat() if local_end else None,
+                }
+            _ondemand_period_attempts[key] = moment
+
+        try:
+            payload = self.update_pool_periods(
+                [symbol],
+                (canonical,),
+                sync_factors=False,  # 单标的按需补：周/月 qfq 直接取 vendor，无需因子
+                job_type="",         # 不污染 job_runs（这是查看路径的副产物）
+            )
+        except Exception as exc:
+            logger.exception("on-demand %s history fetch failed for %s", canonical, symbol)
+            return {"status": "failed", "error": str(exc)}
+
+        info = (payload.get("periods") or {}).get(canonical) or {}
+        logger.info(
+            "on-demand %s history for %s: updated=%s rows_written=%s (local_end was %s)",
+            canonical,
+            symbol,
+            info.get("updated"),
+            info.get("rows_written"),
+            local_end.isoformat() if local_end else None,
+        )
+        return {
+            "status": "fetched",
+            "updated": info.get("updated"),
+            "rows_written": info.get("rows_written"),
+        }
 
     def close(self) -> None:
         for provider in self.providers.values():

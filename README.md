@@ -5,7 +5,7 @@
 FastAPI + SQLite 的单机应用：日 K 行情驱动的趋势看板、单标的分析、配置化规则回测，以及对外提供数据的 MCP 服务。
 
 - **标的看板**（`/subject-market`）：全标的池三级分类趋势看板（趋势值、MA5、强度百分位、相位），EOD + 盘中实时两套视图；
-- **标的查看**（`/market-view`）：单标的 K 线 + 全套指标（MA/ATR/RSI/MACD/BOLL/BIAS/趋势值），支持盘中实时叠加；
+- **标的查看**（`/market-view`）：单标的 K 线 + 全套指标（MA/ATR/RSI/MACD/BOLL/E-BIAS/趋势值），支持盘中实时叠加；
 - **策略管理**（`/rule-backtest`）：配置化规则策略（JSON 条件树）的创建与单标的回测，多策略对比；
 - **标的管理**（`/instruments`）：标的增改、分类编辑、历史行情回填；
 - **MCP 服务**（`/mcp/sse`）：7 个工具（dashboard / symbol_detail / calc_stop_loss / calc_stop_loss_batch / list_instruments / add_trade / open_positions），MCP 层为纯接口层，取数/计算/聚合全部收口在 `src/services/`；通道级 Bearer token 鉴权（`TREND_MCP_TOKENS=token=用户名`，写工具身份来自 token 映射，不再传密码）；看板工具 dashboard 按时段自动路由口径（交易时段直读每 5 分钟一轮的定时快照——与网页端看板同一份数据、最旧约 5 分钟；其余时段取 EOD 日K，响应带 `data_mode` 标记，可用 `mode` 参数强制口径），支持 `detail="lite"` 瘦身（响应约 1/10 体积），calc_stop_loss_batch 一次批量试算（统一批量行情/日K/ATR）；

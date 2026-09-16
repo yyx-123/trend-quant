@@ -250,8 +250,12 @@ class TestUpdatePoolPeriods:
         # 历史行未被改写（窗口已排除该 bar）
         assert float(stored.iloc[0]["close"]) == 1.0
 
-    def test_open_period_bars_are_not_stored(self, monkeypatch, test_db) -> None:
-        """在途周/月 bar 不落库：9 月的月 bar 在 9 月中不可入库。"""
+    def test_current_period_bar_is_stored(self, monkeypatch, test_db) -> None:
+        """进行中的当期 bar **要**落库：9 月的月 bar 在 9 月中就入库。
+
+        这是为了让月线信号不必等月末（早期版本按「只存已收盘周期」实现，
+        代价是信号滞后近一个月）。vendor 给的是「本月至今」的实时聚合值。
+        """
         frames = {
             ("1M", "none", "BBB.SS"): _weekly_frame([("2026-07-31", 1.0), ("2026-08-31", 2.0), ("2026-09-11", 3.0)]),
             ("1M", "qfq", "BBB.SS"): _weekly_frame([("2026-07-31", 1.0), ("2026-08-31", 2.0), ("2026-09-11", 3.0)]),
@@ -260,9 +264,71 @@ class TestUpdatePoolPeriods:
         monkeypatch.setattr(service, "sync_ex_factors", lambda symbols, db=None: ({}, []))
         payload = service.update_pool_periods(["BBB.SS"], ("1M",), end_date=date(2026, 9, 12), job_type="")
         info = payload["periods"]["1M"]
-        assert info["dropped_open_period"] >= 1
+        assert info["dropped_future_bars"] == 0
         stored = test_db.load_market_data("BBB.SS", period="1M")
-        assert [str(day)[:10] for day in stored["time"]] == ["2026-07-31", "2026-08-31"]
+        assert [str(day)[:10] for day in stored["time"]] == ["2026-07-31", "2026-08-31", "2026-09-11"]
+
+    def test_future_dated_bar_is_dropped(self, test_db) -> None:
+        """未来日期的 bar 仍要丢（脏数据/时区错位的兜底）。
+
+        抓取窗口本身到不了未来（end_date 上限=今天），所以这条过滤是纵深防御：
+        直接测落库前处理这一层，而不是绕一圈通过 update_pool_periods。
+        """
+        from data.service import DataService
+
+        frame = _weekly_frame([("2026-07-31", 1.0), ("2026-09-30", 9.0)])
+        kept, dropped = DataService._prepare_period_frame(frame, "1M")
+        assert dropped == 1
+        assert [str(day)[:10] for day in kept["time"]] == ["2026-07-31"]
+
+    def test_provisional_bar_is_refetched_and_overwritten(self, monkeypatch, test_db) -> None:
+        """当期 bar 每天重取覆盖：第二轮必须**再抓一次**并写上新值。
+
+        抓取窗口从本周期开头起（而不是「末根之后的下一个周期」——那会跳过
+        当期 bar，信号就永远停在旧值上）。
+        """
+        frames = {
+            ("1M", "none", "PROV.SS"): _weekly_frame([("2026-08-31", 2.0), ("2026-09-11", 3.0)]),
+            ("1M", "qfq", "PROV.SS"): _weekly_frame([("2026-08-31", 2.0), ("2026-09-11", 3.0)]),
+        }
+        provider = _FakeProvider(frames)
+        service = _make_service(monkeypatch, provider, test_db)
+        monkeypatch.setattr(service, "sync_ex_factors", lambda symbols, db=None: ({}, []))
+
+        service.update_pool_periods(["PROV.SS"], ("1M",), end_date=date(2026, 9, 12), job_type="")
+        assert float(test_db.load_market_data("PROV.SS", period="1M").iloc[-1]["close"]) == 3.0
+
+        # 第二天：当月 bar 值变大了 → 重取后应覆盖同一主键行
+        provider.frames[("1M", "none", "PROV.SS")] = _weekly_frame([("2026-08-31", 2.0), ("2026-09-11", 4.0)])
+        provider.frames[("1M", "qfq", "PROV.SS")] = _weekly_frame([("2026-08-31", 2.0), ("2026-09-11", 4.0)])
+        provider.calls.clear()
+        payload = service.update_pool_periods(["PROV.SS"], ("1M",), end_date=date(2026, 9, 13), job_type="")
+
+        info = payload["periods"]["1M"]
+        assert info["updated"] == 1, "当期 bar 未收盘时不应被判定为「已最新」"
+        # 窗口从本周期（9 月）开头起，而不是 2026-09-12（下一周期首日）
+        assert provider.calls[0]["start"] == date(2026, 9, 1)
+        stored = test_db.load_market_data("PROV.SS", period="1M")
+        assert [str(day)[:10] for day in stored["time"]] == ["2026-08-31", "2026-09-11"]
+        assert float(stored.iloc[-1]["close"]) == 4.0, "当期 bar 必须被新值覆盖"
+
+    def test_closed_bar_is_not_refetched(self, monkeypatch, test_db) -> None:
+        """已收盘的末根 bar 不再重取：第二轮零请求（省掉无意义往返）。"""
+        frames = {
+            ("1w", "none", "CLOSED.SS"): _weekly_frame([("2026-09-11", 1.0)]),
+            ("1w", "qfq", "CLOSED.SS"): _weekly_frame([("2026-09-11", 1.0)]),
+        }
+        provider = _FakeProvider(frames)
+        service = _make_service(monkeypatch, provider, test_db)
+        monkeypatch.setattr(service, "sync_ex_factors", lambda symbols, db=None: ({}, []))
+        service.update_pool_periods(["CLOSED.SS"], ("1w",), end_date=date(2026, 9, 12), job_type="")
+        provider.calls.clear()
+        # 末根 2026-09-11 已收盘（那天是周五）→ 下一周期首日 09-14 已晚于
+        # 截止日 09-12 → 无需抓取，零请求。
+        payload = service.update_pool_periods(["CLOSED.SS"], ("1w",), end_date=date(2026, 9, 12), job_type="")
+        info = payload["periods"]["1w"]
+        assert provider.calls == []
+        assert info["planned"] == 0 and info["updated"] == 0 and info["up_to_date"] == 1
 
     def test_ex_factor_change_refetches_qfq_full_range(self, monkeypatch, test_db) -> None:
         """除权后 qfq 必须整段重取（历史 bar 的前复权价全部变化）。"""

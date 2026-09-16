@@ -41,6 +41,15 @@ router modules from services/core/data.
    `data/indicator_store.get_series` with live-compute fallback. Fallback is permanent.
 3. **Intraday rows are never persisted.** Realtime overlay rows (synthetic bar)
    are view-only; backtests and stop-loss use EOD data only.
+   Exception (2026-09-12): weekly/monthly tables DO store the in-progress current
+   period bar. It is a provisional row, not history — detect with
+   `core.bars.is_period_bar_provisional(bar_day, period)` (API:
+   `meta.last_bar_provisional`). It is refreshed by the 16:30 job and also every
+   5 minutes during the session (`core.jobs.intraday_period_refresh_job`) so the
+   weekly/monthly signal does not wait for the period to end.
+   Daily bars keep the rule above unchanged: only written after the close by the
+   16:30 job, synthetic intraday bar never persisted.
+   See `docs/26-09-12-周月K/` §14/§15.
 4. **Backtest results must stay bit-identical** when refactoring the engine —
    golden-master tests (`tests/unit/test_p13_memoized_golden.py`) are the gate.
 
