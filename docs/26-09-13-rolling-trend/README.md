@@ -22,8 +22,9 @@
 
 回看 K=16 根 bar（月口径最多 16×22=352 个交易日）。本表只落库原始趋势值，
 不含状态离散化；研究/信号层的三态阈值（2026-09-14 起）：日 ±5，
-滚动周/月 ±9（依据 `research/2026-09-13_rolling-trend-calibration` 的
-分布标定，±9 使「无趋势」恢复约 2/3 多数语义）。
+滚动周/月 ±9（依据 2026-09-13 rolling-trend-calibration 研究的
+分布标定，±9 使「无趋势」恢复约 2/3 多数语义；研究已归档浓缩于
+`research/README.md`）。
 
 趋势值是确定性 PIT 函数：第 t 日的值只依赖截至 t 的日K。预热期内
 （周 <50 个交易日 / 月 <220 个交易日）为 NaN，双 NaN 行不落库。
@@ -89,11 +90,12 @@ db.load_rolling_trend_many(["510300.SS", "600036.SS"])              # 批量
 
 ## 5. 与研究目录的关系
 
-- `research/2026-09-13_rolling-trend-calibration/` — 滚动口径的参数标定
-  （D=5/22、周 8/8/4、月 6/6/3 的来源）；落库参数与其一致。
-- `research/2026-09-13_phase-migration-rolling/` — 用本口径做相位迁移
-  分析（逐日现算趋势值）；回填脚本的标的池与该脚本同一口径
-  （instrument_metadata 中 asset_type 为 stock/etf）。趋势值落库后，
+- 滚动口径的参数标定（D=5/22、周 8/8/4、月 6/6/3 的来源）与相位迁移
+  分析出自 2026-09-13 的 rolling-trend-calibration / phase-migration-rolling
+  两项研究；研究目录已删除（2026-09-16），背景与结论浓缩存档于
+  `research/README.md`。落库参数与标定口径一致。回填脚本的标的池与研究
+  脚本同一口径（instrument_metadata 中 asset_type 为 stock/etf）。
+  趋势值落库后，
   后续研究可直接读表，无需重复现算。
 
 ## 6. 测试

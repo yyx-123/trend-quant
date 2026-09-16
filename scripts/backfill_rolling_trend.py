@@ -11,8 +11,7 @@ trend_rolling_daily。用途：
 日常维护不需要本脚本：日更任务（ensure_daily_history）会为更新的标的
 增量补行、除权因子变化时整段重建（见 docs/26-09-13-rolling-trend/）。
 
-标的池与相位迁移研究脚本（research/2026-09-13_phase-migration-rolling/
-trend_phase_rolling.py）同一口径：instrument_metadata 中 asset_type 为
+标的池与相位迁移研究脚本同一口径（研究已归档，见 research/README.md）：instrument_metadata 中 asset_type 为
 stock/etf 的标的（默认只补启用中的）。
 
 用法：
