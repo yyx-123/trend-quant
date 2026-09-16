@@ -152,7 +152,12 @@ def symbol_detail(symbol: str, days: int = 60, rsi_period: int = 14, intraday: b
     Returns:
         包含 dates、candles(OHLC)、volumes、indicators 的完整数据。
         indicators 包含: trend(score/ma/price_direction/confidence),
-        ma, atr, bias, e_bias, boll, macd, rsi。
+        ma, atr, bias, e_bias, boll, macd, rsi, trend_rolling。
+        trend_rolling 为滚动锚定的周/月趋势值（weekly/monthly，由日K
+        派生的跨周期参照，与网页标的查看页 TREND 副图同源）：与 trend.score
+        等其余指标组同为全历史长度、同一日期轴，预热期无值处为 null；
+        标的没有滚动数据时该组缺省。indicators 各组均为全历史长度，
+        需自行截尾与 dates（最近 days 天）对齐。
         e_bias 为均线偏离度（减法版）：ln(close)-EMA(ln close,20)，单位
         为百分点（series 元素 5.0 表示高于 20 日 EMA 5%），lines 为其
         参考线（取自广发策略行业指数口径，未在本 ETF 池标定，仅供参考）。

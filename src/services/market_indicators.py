@@ -46,6 +46,25 @@ def _series(values: Iterable[object]) -> list[float | None]:
     return [_num(v) for v in values]
 
 
+def align_rolling_trend(rolling: pd.DataFrame | None, dates: list[str]) -> dict | None:
+    """把 trend_rolling_daily 的滚动周/月趋势值对齐到展示日期轴。
+
+    表是逐交易日的（``data.storage.db.load_rolling_trend``），日期轴来自当前
+    视图的 K 线：日K 口径下两者一一对应，没有滚动行的日期（预热期、盘中合成
+    bar）补 None。两侧全为 None（预热期）时返回 None —— 调用方据此不输出该组。
+    """
+    if rolling is None or rolling.empty or not dates:
+        return None
+    day_keys = rolling["time"].dt.strftime("%Y-%m-%d")
+    weekly_map = dict(zip(day_keys, rolling["w_trend"]))
+    monthly_map = dict(zip(day_keys, rolling["m_trend"]))
+    weekly = [_num(weekly_map.get(day)) for day in dates]
+    monthly = [_num(monthly_map.get(day)) for day in dates]
+    if all(value is None for value in weekly) and all(value is None for value in monthly):
+        return None
+    return {"weekly": weekly, "monthly": monthly}
+
+
 def trend_config(overrides: dict | None = None) -> dict:
     cfg = get_strategy_config()
     cfg.update(overrides or {})

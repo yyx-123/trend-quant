@@ -81,13 +81,17 @@ FAKE_INTRADAY_RESULT = {
 
 
 class _FakeDb:
-    def __init__(self, df: pd.DataFrame) -> None:
+    def __init__(self, df: pd.DataFrame, rolling: pd.DataFrame | None = None) -> None:
         self.df = df
+        self.rolling = rolling if rolling is not None else pd.DataFrame()
 
     def load_market_data(self, symbol: str, price_mode: str = "qfq") -> pd.DataFrame:
         df = self.df.copy()
         df["time"] = pd.to_datetime(df["time"])
         return df
+
+    def load_rolling_trend(self, symbol: str, start=None, end=None) -> pd.DataFrame:
+        return self.rolling.copy()
 
     def get_market_data_summary(self, symbol: str, price_mode: str = "qfq") -> dict:
         return {
@@ -205,3 +209,76 @@ class TestSymbolDetailContract:
             payload = symbol_detail_service.symbol_detail_payload("999999.SS")
         assert payload["ok"] is False
         assert "未找到" in payload["error"]
+
+
+class TestSymbolDetailTrendRolling:
+    """indicators.trend_rolling 契约：滚动周/月趋势值（trend_rolling_daily）。
+
+    与 indicators 其余各组同契约——全历史长度、按全历史日K日期轴对齐
+    （不随 days 截尾），无滚动行的日期（预热期）为 None；标的完全没有
+    滚动数据时不输出该组。与 Web 日K 接口共用
+    services.market_indicators.align_rolling_trend。
+    """
+
+    def _rolling_rows(self, df: pd.DataFrame, idx_values: dict[int, tuple]) -> pd.DataFrame:
+        times = pd.to_datetime(df["time"])
+        return pd.DataFrame(
+            {
+                "time": [times[i] for i in idx_values],
+                "w_trend": [v[0] for v in idx_values.values()],
+                "m_trend": [v[1] for v in idx_values.values()],
+            }
+        )
+
+    def _payload(self, df: pd.DataFrame, rolling: pd.DataFrame | None, **kwargs) -> dict:
+        with (
+            patch.object(symbol_detail_service, "get_db", return_value=_FakeDb(df, rolling)),
+            patch.object(symbol_detail_service, "load_instrument_name_map", return_value={}),
+        ):
+            return symbol_detail_service.symbol_detail_payload("518850.SS", **kwargs)
+
+    def test_aligned_full_history_axis(self) -> None:
+        df = _daily_bars_ending(date(2026, 8, 27), rows=100)
+        rolling = self._rolling_rows(df, {0: (1.5, 2.5), 50: (3.123456789, None), 99: (-4.0, 5.0)})
+
+        payload = self._payload(df, rolling, days=5)
+
+        node = payload["indicators"]["trend_rolling"]
+        # 全历史长度（与 trend.score 同轴），不受 days=5 截尾影响
+        assert len(node["weekly"]) == len(df)
+        assert len(node["monthly"]) == len(df)
+        assert node["weekly"][0] == 1.5
+        assert node["monthly"][0] == 2.5
+        # 无滚动行的日期 → None；数值按 number6_or_none 口径保留 6 位小数
+        assert node["weekly"][1] is None
+        assert node["weekly"][50] == 3.123457
+        assert node["monthly"][50] is None
+        assert node["weekly"][-1] == -4.0
+        assert node["monthly"][-1] == 5.0
+
+    def test_no_rolling_rows_key_absent(self) -> None:
+        df = _daily_bars_ending(date(2026, 8, 27), rows=100)
+
+        payload = self._payload(df, None, days=5)
+
+        assert "trend_rolling" not in payload["indicators"]
+
+    def test_intraday_bar_not_in_rolling_axis(self) -> None:
+        """盘中合成 bar 只追加到 dates/candles：trend_rolling 仍锚定全历史
+        EOD 轴（与其余指标组一致），长度不含当日合成 bar。"""
+        df = _daily_bars_ending(date.today() - timedelta(days=1), rows=80)
+        rolling = self._rolling_rows(df, {79: (2.0, 3.0)})
+        with (
+            patch.object(symbol_detail_service, "get_db", return_value=_FakeDb(df, rolling)),
+            patch.object(intraday_service, "is_past_market_open", return_value=True),
+            patch.object(intraday_service, "get_data_service") as mock_ds_cls,
+            patch.object(intraday_service, "compute_intraday_trend_score", return_value=FAKE_INTRADAY_RESULT),
+            patch.object(symbol_detail_service, "load_instrument_name_map", return_value={}),
+        ):
+            mock_ds_cls.return_value.fetch_latest_quote.return_value = _fake_quote()
+            payload = server.symbol_detail("518850.SS", days=60, intraday=True)
+
+        node = payload["indicators"]["trend_rolling"]
+        assert payload["meta"]["is_intraday"] is True
+        assert len(node["weekly"]) == len(df)
+        assert node["weekly"][-1] == 2.0

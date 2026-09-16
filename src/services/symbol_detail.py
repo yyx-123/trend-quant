@@ -17,7 +17,7 @@ from core.display import category_path, format_symbol_display, load_instrument_n
 from core.symbols import normalize_symbol
 from data.intraday_service import build_intraday_overlay
 from data.storage.db import get_db
-from services.market_indicators import compute_market_indicators, trend_config
+from services.market_indicators import align_rolling_trend, compute_market_indicators, trend_config
 
 logger = get_logger(__name__)
 
@@ -69,6 +69,16 @@ def symbol_detail_payload(
 
     trend_cfg = trend_config()
     indicators = compute_market_indicators(df, trend_cfg=trend_cfg, rsi_period=rsi_period)
+
+    # 滚动周/月趋势值（trend_rolling_daily）：与 indicators 其余各组同契约——
+    # 全历史长度、按全历史日K日期轴对齐（与 trend.score 等同轴，调用方截尾
+    # 与 dates 对齐），预热期/无滚动行的日期为 None；标的完全没有滚动数据时
+    # 不输出该组（与 Web 日K 接口的 trend_rolling 同一实现，见
+    # services.market_indicators.align_rolling_trend）。
+    full_dates = [str(d.date()) for d in df["time"]]
+    rolling = align_rolling_trend(db.load_rolling_trend(symbol), full_dates)
+    if rolling is not None:
+        indicators["trend_rolling"] = rolling
 
     n = min(requested, len(df))
     full_df = df  # 盘中趋势用全量历史（与 EOD 同一把尺子），不用截尾窗口

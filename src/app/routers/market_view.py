@@ -24,6 +24,7 @@ from services.market_indicators import (
     E_BIAS_PERIOD,
     MA_PERIODS,
     VOL_MA_PERIODS,
+    align_rolling_trend,
     compute_market_indicators,
 )
 from services.market_indicators import (
@@ -144,25 +145,6 @@ def _date_only(value: object) -> str:
     return ts.date().isoformat()
 
 
-def _align_rolling_trend(rolling: pd.DataFrame | None, dates: list[str]) -> dict | None:
-    """把 trend_rolling_daily 的滚动周/月趋势值对齐到展示日期轴。
-
-    表是逐交易日的（``data.storage.db.load_rolling_trend``），日期轴来自当前
-    视图的 K 线：日K 视图下两者一一对应，没有滚动行的日期（预热期、盘中合成
-    bar）补 None。两侧全为 None（预热期）时返回 None —— 前端据此不画线。
-    """
-    if rolling is None or rolling.empty or not dates:
-        return None
-    day_keys = rolling["time"].dt.strftime("%Y-%m-%d")
-    weekly_map = dict(zip(day_keys, rolling["w_trend"]))
-    monthly_map = dict(zip(day_keys, rolling["m_trend"]))
-    weekly = [_num(weekly_map.get(day)) for day in dates]
-    monthly = [_num(monthly_map.get(day)) for day in dates]
-    if all(value is None for value in weekly) and all(value is None for value in monthly):
-        return None
-    return {"weekly": weekly, "monthly": monthly}
-
-
 def _validate_trend_config(cfg: dict) -> None:
     n_short = int(cfg.get("n_short", 3))
     n_mid = int(cfg.get("n_mid", 5))
@@ -238,7 +220,7 @@ def build_market_payload(
     indicators = compute_market_indicators(data, trend_cfg, rsi_period)
     # 滚动周/月趋势值（日K口径的跨周期参照）：只挂在 indicators 下，
     # 展示数组按 limit 截尾时随 _tail_indicator_node 一起截。
-    rolling = _align_rolling_trend(rolling_trend, dates)
+    rolling = align_rolling_trend(rolling_trend, dates)
     if rolling is not None:
         indicators["trend_rolling"] = rolling
 
