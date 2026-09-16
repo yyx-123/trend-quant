@@ -56,6 +56,20 @@ class SubjectMarketApiTest(unittest.TestCase):
             def load_market_tail(self, days: int, price_mode: str = "qfq") -> list[dict]:
                 return history_rows
 
+            def load_rolling_trend_many(self, symbols, start: str | None = None):
+                # 周趋势值一律 +10（>±9 → 正趋势）、月趋势值 0（无趋势）。
+                dates = pd.date_range("2026-01-01", periods=90, freq="B")
+                return {
+                    str(symbol): pd.DataFrame(
+                        {
+                            "time": dates,
+                            "w_trend": [10.0] * len(dates),
+                            "m_trend": [0.0] * len(dates),
+                        }
+                    )
+                    for symbol in symbols
+                }
+
             def indicator_cache_info(self, symbol: str) -> dict:
                 # Cold cache → indicator_store falls back to live compute.
                 return {
@@ -199,6 +213,34 @@ class SubjectMarketApiTest(unittest.TestCase):
         )
         self.assertAlmostEqual(chemical["e_bias_pct"], ccc["e_bias_pct"], places=5)
 
+        # 多周期趋势相位（trend_periods）：日/周/月三个维度恒存在，阈值分别
+        # 为日 ±5、周/月 ±9。周/月来自滚动趋势值索引（trend_rolling_daily），
+        # 此处 fixture 固定为周 +10 / 月 0 → 周=正趋势、月=无趋势。
+        for item in (aaa, service, l2):
+            periods = item["trend_periods"]
+            self.assertEqual(list(periods), ["daily", "weekly", "monthly"])
+            self.assertEqual(periods["daily"]["threshold"], 5.0)
+            self.assertEqual(periods["weekly"]["threshold"], 9.0)
+            self.assertEqual(periods["monthly"]["threshold"], 9.0)
+            self.assertIsNotNone(periods["daily"]["phase"])
+            self.assertGreaterEqual(periods["daily"]["phase_days"], 1)
+            self.assertEqual(periods["weekly"]["phase"], "positive")
+            self.assertEqual(periods["weekly"]["phase_days"], 90)
+            self.assertEqual(periods["monthly"]["phase"], "none")
+            # 前一根 bar 的相位（读「从什么相位变化到什么相位」的原料）：相位
+            # 已持续整段 → 昨日同相位；持续天数为 1 的日线维度则是切换当日。
+            for period, state in periods.items():
+                if state["phase_days"] > 1:
+                    self.assertEqual(state["previous_phase"], state["phase"], period)
+        # 单调上涨（AAA）判正趋势；单调下跌（CCC）趋势值为负（斜率温和，
+        # 未必越过 -5 阈值，但绝不能判成正趋势）。
+        self.assertEqual(aaa["trend_periods"]["daily"]["phase"], "positive")
+        self.assertLess(ccc["trend_periods"]["daily"]["trend_score"], 0)
+        self.assertIn(ccc["trend_periods"]["daily"]["phase"], ("none", "negative"))
+        # 标的级周趋势值为自身滚动值；类目级为成员成交额加权（周值同为 10）。
+        self.assertEqual(aaa["trend_periods"]["weekly"]["trend_score"], 10.0)
+        self.assertAlmostEqual(service["trend_periods"]["weekly"]["trend_score"], 10.0)
+
     def test_e_bias_pct_matches_core_log_bias(self) -> None:
         """看板 e_bias_pct == core.e_bias(decimal) × 100（单位换算契约）。"""
         from core.indicators import e_bias
@@ -211,6 +253,9 @@ class SubjectMarketApiTest(unittest.TestCase):
 
             def load_market_tail(self, days: int, price_mode: str = "qfq") -> list[dict]:
                 return history_rows
+
+            def load_rolling_trend_many(self, symbols, start: str | None = None):
+                return {}
 
             def indicator_cache_info(self, symbol: str) -> dict:
                 return {

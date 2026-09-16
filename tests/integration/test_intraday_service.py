@@ -519,3 +519,70 @@ class TestBuildIntradayDashboard:
                     assert l3["kline"] == []
                     assert l3["macd_golden_count"] == sum(1 for i in l3["children"] if i["macd_phase"] == "golden")
                     assert l3["macd_dead_count"] == sum(1 for i in l3["children"] if i["macd_phase"] == "dead")
+
+    def test_trend_periods_daily_live_and_periods_from_rolling_table(self, fake_deps) -> None:
+        """多周期趋势相位：日线维度用**实时**序列（末位含今日合成 bar，盘中转入
+        当天即可见），周/月维度用滚动趋势值物化表（周/月无在途 bar）。"""
+        ds, db, cfg = fake_deps
+        from data.intraday_service import build_intraday_dashboard
+
+        # 只给 A.SS 建滚动行：B/C 无数据 → 周/月维度回落空 bundle（形状仍在）。
+        dates = pd.date_range("2025-08-01", periods=60, freq="B")
+        db.save_rolling_trend_many(
+            [
+                (
+                    "A.SS",
+                    pd.DataFrame(
+                        {
+                            "time": dates,
+                            "w_trend": [12.0] * len(dates),
+                            "m_trend": [-12.0] * len(dates),
+                        }
+                    ),
+                )
+            ]
+        )
+
+        result = build_intraday_dashboard(
+            symbols=["A.SS", "B.SS", "C.SS"], db=db, data_service=ds, trend_config=cfg
+        )
+        instruments = {
+            inst["symbol"]: inst
+            for group in result["groups"]
+            for l2 in group["items"]
+            for l3 in l2["children"]
+            for inst in l3["children"]
+        }
+
+        a = instruments["A.SS"]["trend_periods"]
+        assert list(a) == ["daily", "weekly", "monthly"]
+        assert a["daily"]["threshold"] == 5.0
+        assert a["weekly"]["threshold"] == a["monthly"]["threshold"] == 9.0
+        # 周 +12 → 正趋势，持续整段（60 根）；月 -12 → 负趋势。
+        assert a["weekly"]["phase"] == "positive"
+        assert a["weekly"]["phase_days"] == len(dates)
+        assert a["weekly"]["trend_score"] == pytest.approx(12.0)
+        assert a["monthly"]["phase"] == "negative"
+        # 前一根 bar 的相位：持续多日时昨日同相位；切换当日才与当前不同。
+        assert a["weekly"]["previous_phase"] == "positive"
+        assert a["monthly"]["previous_phase"] == "negative"
+        # 日线维度取自实时序列：末值即行内 trend_score（含今日盘中合成 bar）。
+        assert a["daily"]["trend_score"] == pytest.approx(instruments["A.SS"]["trend_score"])
+        assert a["daily"]["phase_days"] >= 1
+        if a["daily"]["phase_days"] == 1:
+            assert a["daily"]["previous_phase"] != a["daily"]["phase"]
+        else:
+            assert a["daily"]["previous_phase"] == a["daily"]["phase"]
+
+        # 无滚动数据的标的：周/月为 null 但维度仍在（形状稳定）。
+        b = instruments["B.SS"]["trend_periods"]
+        assert b["weekly"]["phase"] is None
+        assert b["weekly"]["phase_days"] is None
+        assert b["monthly"]["trend_score"] is None
+        assert b["daily"]["phase"] is not None
+
+        # 类目行：日线维度 = 成员实时序列的成交额加权，末值即行内 trend_score；
+        # 周/月维度同指数（A.SS 的 12 → 加权后仍为正趋势）。
+        l3 = result["groups"][0]["items"][0]["children"][0]
+        assert l3["trend_periods"]["weekly"]["phase"] == "positive"
+        assert l3["trend_periods"]["daily"]["trend_score"] == pytest.approx(l3["trend_score"])

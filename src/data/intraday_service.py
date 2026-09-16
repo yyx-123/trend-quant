@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from audit.app_logger import get_logger
+from core.bars import PERIOD_DAILY
 from core.calendar import is_past_market_open, is_realtime_available, market_now
 from core.indicators import atr as _compute_atr
 from core.indicators import detect_macd_phase, kline_mini, macd_mini
@@ -27,11 +28,13 @@ from core.trend import (
     calculate_trend_score_snapshot,
     safe_float,
 )
+from core.trend_phase import period_state, trend_periods
 from data.service import DataService, get_data_service
 from data.storage.db import Database
 from services.dashboard_common import DISPLAY_DAYS as _DISPLAY_DAYS
 from services.dashboard_common import assign_strength as _assign_strength
 from services.dashboard_common import assign_strength_history as _assign_strength_history
+from services.dashboard_common import build_period_phase_index as _build_period_phase_index
 from services.dashboard_common import key_tuple as _key_tuple
 from services.dashboard_common import ma5 as _ma5
 from services.dashboard_common import macd_counts as _macd_counts
@@ -549,6 +552,21 @@ def build_intraday_dashboard(
         entry[0].append(str(row["time"])[:10])
         entry[1].append(row["trend_score"])
 
+    # 周/月趋势相位索引（trend_rolling_daily 长窗口物化值 + 类目成交额加权聚合）：
+    # 周/月没有在途 bar——盘中取最近收盘口径，与 /market-view 的滚动参照线一致。
+    # 日线维度不走本索引：下面的实时序列（含今日合成 bar）自己算。
+    phase_index = _build_period_phase_index(
+        db,
+        {
+            str(symbol): (
+                str(metadata_map.get(symbol, {}).get("category_l1") or ""),
+                str(metadata_map.get(symbol, {}).get("category_l2") or ""),
+                str(metadata_map.get(symbol, {}).get("category_l3") or ""),
+            )
+            for symbol in symbols
+        },
+    )
+
     # --- 3. Per-symbol computation -----------------------------------------
     instrument_rows: list[dict] = []
     failed: list[str] = []
@@ -835,7 +853,13 @@ def build_intraday_dashboard(
         w = weights[valid].to_numpy(dtype=float)
         return float((values[valid].to_numpy(dtype=float) * w).sum() / w.sum())
 
-    def _metrics_summary_intra(rows_df: pd.DataFrame, meta: dict, *, is_instrument: bool = False) -> dict | None:
+    def _metrics_summary_intra(
+        rows_df: pd.DataFrame,
+        meta: dict,
+        *,
+        is_instrument: bool = False,
+        period_states: dict | None = None,
+    ) -> dict | None:
         if rows_df.empty:
             return None
         trend_vals: list[float] = []
@@ -862,10 +886,20 @@ def build_intraday_dashboard(
         ma5_series = _ma5(series_scores)
         latest_ma5 = ma5_series[-1] if ma5_series else None
 
+        # 多周期趋势相位（trend_periods）：日线用上面这条**实时**序列（末位含
+        # 今日合成 bar，故盘中当日转入即可见）；周/月取物化索引（无在途 bar）。
+        weekly = (period_states or {}).get("weekly")
+        monthly = (period_states or {}).get("monthly")
+
         result = {
             "member_count": int(meta.get("member_count", len(rows_df))),
             "trend_score": avg_trend,
             "trend_ma5": latest_ma5 if latest_ma5 is not None else avg_trend,
+            "trend_periods": trend_periods(
+                daily=period_state(series_scores, PERIOD_DAILY, dates=series_dates),
+                weekly=weekly,
+                monthly=monthly,
+            ),
             # E-BIAS：类目级成交额加权，标的级即成员原值（与 EOD 看板同口径）。
             "e_bias_pct": avg_e_bias,
             "daily_change_pct": avg_1d,
@@ -941,7 +975,14 @@ def build_intraday_dashboard(
     l3_columns = ["category_l1", "category_l2", "category_l3"]
     inst_columns = ["category_l1", "category_l2", "category_l3", "symbol", "name"]
 
-    def _build_summaries(df: pd.DataFrame, group_cols: list[str], *, is_instrument: bool = False) -> list[dict]:
+    def _build_summaries(
+        df: pd.DataFrame,
+        group_cols: list[str],
+        *,
+        is_instrument: bool = False,
+        period_index: dict | None = None,
+        period_key_columns: list[str] | None = None,
+    ) -> list[dict]:
         summaries: list[dict] = []
         for key, grp in df.groupby(group_cols, sort=False):
             key_tuple_vals = tuple(str(v) for v in (_key_tuple(key)))
@@ -951,15 +992,33 @@ def build_intraday_dashboard(
                 "priority_l2": int(grp["priority_l2"].min()) if "priority_l2" in grp.columns else 9999,
                 "priority_l3": int(grp["priority_l3"].min()) if "priority_l3" in grp.columns else 9999,
             }
-            summary = _metrics_summary_intra(grp, meta_counts, is_instrument=is_instrument)
+            # 周/月相位索引的键列可以是本层分组列的子集（标的层用 symbol）。
+            period_states = None
+            if period_index and period_key_columns:
+                period_states = period_index.get(
+                    tuple(str(grp.iloc[0][column]) for column in period_key_columns)
+                )
+            summary = _metrics_summary_intra(
+                grp, meta_counts, is_instrument=is_instrument, period_states=period_states
+            )
             if summary:
                 summary.update(dict(zip(group_cols, key_tuple_vals)))
                 summaries.append(summary)
         return summaries
 
-    l2_items = _build_summaries(source, l2_columns)
-    l3_items = _build_summaries(source, l3_columns)
-    instruments = _build_summaries(source, inst_columns, is_instrument=True)
+    l2_items = _build_summaries(
+        source, l2_columns, period_index=phase_index.get("l2"), period_key_columns=l2_columns
+    )
+    l3_items = _build_summaries(
+        source, l3_columns, period_index=phase_index.get("l3"), period_key_columns=l3_columns
+    )
+    instruments = _build_summaries(
+        source,
+        inst_columns,
+        is_instrument=True,
+        period_index=phase_index.get("instruments"),
+        period_key_columns=["symbol"],
+    )
 
     # Assign strength percentiles.
     _assign_strength(l2_items, ("category_l1",))

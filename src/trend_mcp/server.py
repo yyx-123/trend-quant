@@ -108,6 +108,17 @@ def dashboard(category: str = "", detail: str = "full", mode: str = "auto") -> d
     指标)、同级强度百分位 (strength)、日/5日/20日/60日涨跌幅、趋势相位
     检测（上升/下降/震荡）、历史趋势值 MA5 序列 (trend_history)。
 
+    多周期趋势相位 (trend_periods)：日/周/月三个维度各自给出
+    trend_score（该周期最新趋势值）、phase（三态离散：positive 正 /
+    negative 负 / none 无）、previous_phase（紧邻前一根 bar 的相位，与
+    phase 不同即当日发生相位切换，据此可读出「从什么相位变化到什么相位」、
+    走强还是走弱）、phase_days（当前相位已持续的根数，转入当日为 1；日线
+    按交易日、周线按周、月线按月）、phase_since（该段相位首日 YYYY-MM-DD）、
+    threshold（该周期阈值：日 ±5、周/月 ±9）。类目行（L2/L3）的同名字段为
+    成员成交额加权聚合后的相位。周/月维度取自逐日物化的滚动锚定趋势值
+    （trend_rolling_daily）——盘中快照口径下日线维度含当日实时值，周/月为
+    最近收盘（周/月无在途 bar）。
+
     Args:
         category: 可选，按分类筛选（匹配 L1/L2/L3），如 "ETF"、"宽基"、
             "跨境"、"股票"。不传则返回全部标的。

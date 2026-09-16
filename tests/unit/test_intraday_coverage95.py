@@ -129,6 +129,10 @@ class _DashboardFixtures:
             def load_trend_daily_bulk(self, since, param_set="default", formula_version=None):
                 return []
 
+            def load_rolling_trend_many(self, symbols, start=None):
+                # 本组用例不涉及周/月维度：空表 → 周/月相位回落空 bundle。
+                return {}
+
         return FakeDb()
 
     def _hist(self, days: int = 30) -> pd.DataFrame:

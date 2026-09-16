@@ -15,8 +15,10 @@ import numpy as np
 import pandas as pd
 
 from audit.app_logger import get_logger
+from core.bars import PERIOD_DAILY
 from core.indicators import detect_macd_phase, kline_mini, macd_mini
 from core.trend import TREND_FORMULA_VERSION, _detect_trend_ma5_phase, _detect_trend_phase
+from core.trend_phase import period_state, trend_periods
 from data.indicator_store import get_series, get_series_bulk
 from data.storage.db import get_db
 
@@ -28,10 +30,16 @@ from services.dashboard_common import (
     DISPLAY_DAYS,
 )
 from services.dashboard_common import (
+    aggregate_daily as _aggregate_daily,
+)
+from services.dashboard_common import (
     assign_strength as _assign_strength,
 )
 from services.dashboard_common import (
     assign_strength_history as _assign_strength_history,
+)
+from services.dashboard_common import (
+    build_period_phase_index as _build_period_phase_index,
 )
 from services.dashboard_common import (
     key_tuple as _key_tuple,
@@ -79,43 +87,7 @@ class RevisionCache:
 dashboard_revision_cache = RevisionCache()
 
 
-def _aggregate_daily(frame: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:
-    metrics = {
-        "trend_score": "trend_score",
-        "daily_change_pct": "return_1d",
-        "change_5d": "return_5d",
-        "change_20d": "return_20d",
-        "change_60d": "return_60d",
-        # E-BIAS（均线偏离度）：类目级按成交额加权，与 trend_score 同口径。
-        # 单位与 daily_change_pct 一致为百分比（缓存列 e_bias20 是 decimal，
-        # 在 build_subject_dashboard_payload 里 ×100 转换）。
-        "e_bias_pct": "e_bias_pct",
-        "close": "close",
-    }
-    columns = [*group_columns, "time", "amount", *metrics.values()]
-    work = frame[columns].copy()
-    amount = pd.to_numeric(work["amount"], errors="coerce").to_numpy(dtype=float)
-    valid_amount = np.isfinite(amount) & (amount > 0)
-    work["_amount_total"] = np.where(np.isfinite(amount) & (amount >= 0), amount, 0.0)
-    aggregation_columns = ["_amount_total"]
-    for target, source in metrics.items():
-        values = pd.to_numeric(work[source], errors="coerce").to_numpy(dtype=float)
-        valid = valid_amount & np.isfinite(values)
-        numerator = f"_{target}_numerator"
-        denominator = f"_{target}_denominator"
-        work[numerator] = np.where(valid, values * amount, 0.0)
-        work[denominator] = np.where(valid, amount, 0.0)
-        aggregation_columns.extend([numerator, denominator])
-    daily = work.groupby([*group_columns, "time"], as_index=False, sort=True)[aggregation_columns].sum()
-    daily["amount"] = daily.pop("_amount_total").where(lambda values: values > 0, np.nan)
-    for target in metrics:
-        numerator = daily.pop(f"_{target}_numerator")
-        denominator = daily.pop(f"_{target}_denominator")
-        daily[target] = (numerator / denominator.replace(0.0, np.nan)).astype("float64")
-    return daily
-
-
-def _metrics_summary(daily: pd.DataFrame, metadata: dict) -> dict | None:
+def _metrics_summary(daily: pd.DataFrame, metadata: dict, period_states: dict | None = None) -> dict | None:
     if daily.empty:
         return None
     daily = daily.sort_values("time")
@@ -130,11 +102,20 @@ def _metrics_summary(daily: pd.DataFrame, metadata: dict) -> dict | None:
     # 趋势相位（看板「趋势相位」列）：判定量是趋势值 MA5 的符号——MA5 转正
     # 当日为趋势启动第 1 天，转负当日为趋势结束第 1 天，与 MACD 相位同口径。
     ma5_phase_info = _detect_trend_ma5_phase(trend_ma5, raw_close, dates)
+    # 多周期趋势相位（trend_periods）：日线用本帧的趋势值序列（展示窗口已
+    # 覆盖日线最长持续段），周/月来自长窗口滚动趋势值索引（period_states）。
+    weekly = (period_states or {}).get("weekly")
+    monthly = (period_states or {}).get("monthly")
 
     return {
         "member_count": int(metadata["member_count"]),
         "trend_score": _number(latest["trend_score"]),
         "trend_ma5": trend_ma5[-1] if trend_ma5 else None,
+        "trend_periods": trend_periods(
+            daily=period_state(raw_trend, PERIOD_DAILY, dates=dates),
+            weekly=weekly,
+            monthly=monthly,
+        ),
         # 均线偏离度（百分比）：正=高于 20 日 EMA，负=低于。
         "e_bias_pct": _number(latest["e_bias_pct"]),
         "daily_change_pct": _number(latest["daily_change_pct"]),
@@ -164,7 +145,13 @@ def _metrics_summary(daily: pd.DataFrame, metadata: dict) -> dict | None:
     }
 
 
-def _build_level_summaries(calculated: pd.DataFrame, group_columns: list[str]) -> list[dict]:
+def _build_level_summaries(
+    calculated: pd.DataFrame,
+    group_columns: list[str],
+    *,
+    period_index: dict | None = None,
+    period_key_columns: list[str] | None = None,
+) -> list[dict]:
     metadata_frame = (
         calculated.groupby(group_columns, as_index=False, sort=False)
         .agg(
@@ -182,7 +169,14 @@ def _build_level_summaries(calculated: pd.DataFrame, group_columns: list[str]) -
     summaries: list[dict] = []
     for raw_key, level_daily in daily.groupby(group_columns, sort=False):
         key = tuple(str(value) for value in _key_tuple(raw_key))
-        summary = _metrics_summary(level_daily, metadata_by_key[key])
+        # 周/月相位索引的键列可以是本层分组列的子集（标的层用 symbol）。
+        period_key = None
+        if period_index and period_key_columns:
+            lookup = tuple(
+                str(level_daily.iloc[0][column]) for column in period_key_columns
+            )
+            period_key = period_index.get(lookup)
+        summary = _metrics_summary(level_daily, metadata_by_key[key], period_key)
         if summary is not None:
             summary.update(dict(zip(group_columns, key)))
             summaries.append(summary)
@@ -342,9 +336,27 @@ def build_subject_dashboard_payload(db=None) -> dict:
     l2_columns = ["category_l1", "category_l2"]
     l3_columns = [*l2_columns, "category_l3"]
     instrument_columns = [*l3_columns, "symbol", "name"]
-    l2_items = _build_level_summaries(calculated, l2_columns)
-    l3_items = _build_level_summaries(calculated, l3_columns)
-    instruments = _build_level_summaries(calculated, instrument_columns)
+    # 周/月趋势相位索引（trend_rolling_daily 长窗口物化值 + 成交额加权聚合）：
+    # 日线维度的序列各层自己已有（展示帧），这里只补周/月两个维度。
+    symbol_categories = {
+        str(symbol): (str(l1), str(l2), str(l3))
+        for symbol, l1, l2, l3 in source[["symbol", "category_l1", "category_l2", "category_l3"]]
+        .drop_duplicates("symbol")
+        .itertuples(index=False, name=None)
+    }
+    phase_index = _build_period_phase_index(db, symbol_categories)
+    l2_items = _build_level_summaries(
+        calculated, l2_columns, period_index=phase_index.get("l2"), period_key_columns=l2_columns
+    )
+    l3_items = _build_level_summaries(
+        calculated, l3_columns, period_index=phase_index.get("l3"), period_key_columns=l3_columns
+    )
+    instruments = _build_level_summaries(
+        calculated,
+        instrument_columns,
+        period_index=phase_index.get("instruments"),
+        period_key_columns=["symbol"],
+    )
 
     # MACD 金叉/死叉相位 + 近40日K线 mini 图：仅具体标的级；类目聚合行的
     # 聚合口径（成交额加权 MACD 并无意义）待定义，先给占位（看板显示 —）。
