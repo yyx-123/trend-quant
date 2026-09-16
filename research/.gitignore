@@ -1,8 +1,11 @@
 # 研究目录通用约定：可再生的中间产物不入库
-# - data/*.npy 原始样本 / data/events.csv 事件明细：由计算脚本从生产库重新生成
+# - data/*.npy 原始样本 / data/events.csv 事件明细 / data/baseline.csv 基准明细
+#   / data/control.csv 对照明细：由计算脚本从生产库重新生成
 # - fonts/ 绘图字体：绘图脚本运行时自动下载
 */data/*.npy
 */data/events.csv
+*/data/baseline.csv
+*/data/control.csv
 */data/series/
 */fonts/
 */data/*.parquet
@@ -13,3 +16,7 @@
 */data/selection_edge_daily.csv
 */data/*_out.txt
 */data/compare_event.txt
+# 2026-09-16_stock-universe-expansion：全市场原始快照（体积大且随行情变化，
+# 由 scan_market.py / scan_liquidity.py 重新拉取）；派生出的候选名单照常入库
+*/data/market_snapshot.csv
+*/data/liquidity_20d.csv
