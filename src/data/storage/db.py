@@ -144,19 +144,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_rule_strategies_active_updated
                     ON rule_strategies(is_active, updated_at);
 
-                CREATE TABLE IF NOT EXISTS position_strategies (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL DEFAULT '',
-                    description TEXT NOT NULL DEFAULT '',
-                    sizer_type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    is_active INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT DEFAULT (datetime('now','localtime')),
-                    updated_at TEXT DEFAULT (datetime('now','localtime'))
-                );
-                CREATE INDEX IF NOT EXISTS idx_position_strategies_active_updated
-                    ON position_strategies(is_active, updated_at);
-
                 CREATE TABLE IF NOT EXISTS market_data_raw (
                     symbol TEXT NOT NULL,
                     time TEXT NOT NULL,
@@ -773,84 +760,6 @@ class Database:
 
     @staticmethod
     def _rule_strategy_row(row: sqlite3.Row) -> dict:
-        d = dict(row)
-        payload = json.loads(d["payload_json"]) if d.get("payload_json") else {}
-        d["strategy"] = payload
-        return d
-
-    # ------------------------------------------------------------------
-    # position_strategies
-    # ------------------------------------------------------------------
-    def save_position_strategy(self, strategy: dict, overwrite: bool = False) -> dict:
-        strategy_id = str(strategy.get("id", "")).strip()
-        if not strategy_id:
-            raise ValueError("position strategy id is required")
-
-        with self._connect() as conn:
-            if not overwrite:
-                row = conn.execute(
-                    "SELECT id FROM position_strategies WHERE id = ? AND is_active = 1",
-                    (strategy_id,),
-                ).fetchone()
-                if row:
-                    raise FileExistsError(f"position strategy already exists: {strategy_id}")
-
-            conn.execute(
-                """INSERT INTO position_strategies
-                   (id, name, description, sizer_type, payload_json, is_active,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 1,
-                    datetime('now','localtime'), datetime('now','localtime'))
-                   ON CONFLICT(id) DO UPDATE SET
-                     name=excluded.name,
-                     description=excluded.description,
-                     sizer_type=excluded.sizer_type,
-                     payload_json=excluded.payload_json,
-                     is_active=1,
-                     updated_at=datetime('now','localtime')""",
-                (
-                    strategy_id,
-                    str(strategy.get("name", strategy_id) or strategy_id),
-                    str(strategy.get("description", "") or ""),
-                    str(strategy.get("sizer_type", "") or ""),
-                    json.dumps(strategy, ensure_ascii=False),
-                ),
-            )
-        saved = self.get_position_strategy(strategy_id)
-        if saved is None:
-            raise RuntimeError(f"failed to save position strategy: {strategy_id}")
-        return saved
-
-    def get_position_strategy(self, strategy_id: str) -> dict | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                """SELECT * FROM position_strategies
-                   WHERE id = ? AND is_active = 1""",
-                (strategy_id,),
-            ).fetchone()
-        return self._position_strategy_row(row) if row else None
-
-    def list_position_strategies(self) -> list[dict]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """SELECT * FROM position_strategies
-                   WHERE is_active = 1
-                   ORDER BY updated_at DESC, id ASC"""
-            ).fetchall()
-        return [self._position_strategy_row(row) for row in rows]
-
-    def delete_position_strategy(self, strategy_id: str) -> bool:
-        with self._connect() as conn:
-            cur = conn.execute(
-                """UPDATE position_strategies
-                   SET is_active = 0, updated_at = datetime('now','localtime')
-                   WHERE id = ? AND is_active = 1""",
-                (strategy_id,),
-            )
-            return cur.rowcount > 0
-
-    @staticmethod
-    def _position_strategy_row(row: sqlite3.Row) -> dict:
         d = dict(row)
         payload = json.loads(d["payload_json"]) if d.get("payload_json") else {}
         d["strategy"] = payload

@@ -124,7 +124,6 @@ class TestEngineBoundaries:
             start_date=kw.get("start_date"),
             end_date=kw.get("end_date"),
             execution=BacktestExecutionConfig(),
-            sizer=None,
         )
 
     def test_empty_bars_raises(self) -> None:

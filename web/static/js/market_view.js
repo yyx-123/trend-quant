@@ -17,19 +17,6 @@
   backtestStrategyPanelEl.appendChild(backtestStrategyListEl);
   document.body.appendChild(backtestStrategyPanelEl);
 
-  // Position-sizer dropdown (仓位策略) — same body-mounted panel pattern
-  const backtestSizerDropdownEl = document.getElementById('mvBacktestSizerDropdown');
-  const backtestSizerBtnEl = document.getElementById('mvBacktestSizerBtn');
-  const backtestSizerLabelEl = document.getElementById('mvBacktestSizerLabel');
-  const backtestSizerPanelEl = document.createElement('div');
-  backtestSizerPanelEl.id = 'mvBacktestSizerPanel';
-  backtestSizerPanelEl.className = 'multi-select-panel';
-  backtestSizerPanelEl.hidden = true;
-  const backtestSizerListEl = document.createElement('div');
-  backtestSizerListEl.id = 'mvBacktestSizerList';
-  backtestSizerListEl.className = 'multi-select-list';
-  backtestSizerPanelEl.appendChild(backtestSizerListEl);
-  document.body.appendChild(backtestSizerPanelEl);
   const backtestStartEl = document.getElementById('mvStartDate');
   const backtestEndEl = document.getElementById('mvEndDate');
   const runBacktestBtnEl = document.getElementById('mvRunBacktestBtn');
@@ -117,21 +104,10 @@
   // K线周期：'1d' 日 / '1w' 周 / '1M' 月。切换后重新拉数并整图重渲染，
   // 所有副图指标都由后端按该周期的 K 线重算（core.indicators 与周期无关）。
   let currentPeriod = '1d';
-  let allMultiKline = [];        // [{strategy_id, strategy_name, sizer_id, sizer_name, buy_points, sell_points, skipped_buy_points}]
-  let activeResultKey = null;    // which 策略×仓位 combo's markers are shown on chart
-  // Degraded sizing flags — synced from /api/meta (ruleMeta.sizing) in
-  // loadRuleMeta; this literal is only the pre-meta fallback.
-  let SIZING_DEGRADED_FLAGS = new Set(['kelly_floor_applied', 'atr_unavailable_fallback']);
-  const SIZING_FLAG_TEXT = {
-    kelly_floor_applied: '凯利≤0，降级仓位',
-    atr_unavailable_fallback: '无可用ATR，降级仓位',
-    atr_fallback_prev_day: '使用历史ATR',
-    risk_budget_unconstrained: '全买未超预算',
-  };
+  let allMultiKline = [];        // [{strategy_id, strategy_name, buy_points, sell_points, skipped_buy_points}]
+  let activeResultKey = null;    // which strategy's markers are shown on chart
   const SKIP_REASON_TEXT = {
     insufficient_cash: '现金不足',
-    sizer_target_below_lot: '目标不足一手',
-    sizer_skip: '仓位策略跳过',
   };
   let allSymbols = [];
   let ruleMeta = { strategies: [] };
@@ -422,16 +398,8 @@
     return [...maSeries, ...bollSeries];
   }
 
-  function hasDegradedFlag(point) {
-    return (point?.flags || []).some(f => SIZING_DEGRADED_FLAGS.has(f));
-  }
-
-  function flagText(flag) {
-    return SIZING_FLAG_TEXT[flag] || flag;
-  }
-
   function resultKey(r) {
-    return `${r?.strategy_id || ''}|${r?.sizer_id || ''}`;
+    return `${r?.strategy_id || ''}`;
   }
 
   function skippedBuySeries(points) {
@@ -500,15 +468,11 @@
       tooltip: {
         formatter: (p) => {
           const raw = p.data?.[2] || {};
-          const flagLine = (raw.flags || []).length
-            ? `标记：${(raw.flags || []).map(flagText).join('、')}`
-            : '';
           return [
             `${name} ${raw.date || ''}`,
             `成交价：${num(raw.price, 4)}`,
             `参考价：${num(raw.reference_price, 4)}`,
             `数量：${raw.qty || 0}`,
-            flagLine,
           ].filter(Boolean).join('<br/>');
         },
       },
@@ -643,17 +607,13 @@
     currentCandles = candles;
     const overlays = mainOverlaySeries(indicators);
 
-    // Build trade-marker series — only the active 策略×仓位 combo
+    // Build trade-marker series — only the active strategy's markers
     let backtestSeries = [];
     if (activeResultKey) {
       const activeKline = allMultiKline.find(sk => resultKey(sk) === activeResultKey);
       if (activeKline) {
-        const buys = activeKline.buy_points || [];
-        const normalBuys = buys.filter(p => !hasDegradedFlag(p));
-        const degradedBuys = buys.filter(p => hasDegradedFlag(p));
         backtestSeries = [
-          tradeSeries(normalBuys, '买', '#2563eb', 'pin'),
-          tradeSeries(degradedBuys, '买(降级)', '#ea580c', 'pin'),
+          tradeSeries(activeKline.buy_points || [], '买', '#2563eb', 'pin'),
           tradeSeries(activeKline.sell_points || [], '卖', '#f59e0b', 'pin'),
           skippedBuySeries(activeKline.skipped_buy_points || []),
         ];
@@ -1107,10 +1067,9 @@
   }
 
   function strategyLabel(result) {
-    const name = result?.strategy_name
+    return result?.strategy_name
       || (ruleMeta.strategies || []).find(s => s.id === result.strategy_id)?.name
       || result.strategy_id || '-';
-    return result?.sizer_name ? `${name} × ${result.sizer_name}` : name;
   }
 
   function selectChartStrategy(key) {
@@ -1465,21 +1424,7 @@
 
   function positionPctCell(trade) {
     if (String(trade?.side || '').toUpperCase() !== 'BUY') return '';
-    const sizing = trade?.sizing;
-    if (!sizing) return '<span class="text-muted">全仓</span>';
-    const value = Number(sizing.position_pct);
-    return Number.isFinite(value) ? pct(value) : '-';
-  }
-
-  function sizingBadge(trade) {
-    const sizing = trade?.sizing;
-    if (!sizing) return '';
-    const flags = sizing.flags || [];
-    if (!flags.length) return '';
-    const degraded = flags.some(f => SIZING_DEGRADED_FLAGS.has(f));
-    const text = flags.map(flagText).join('、');
-    const cls = degraded ? 'sizing-badge sizing-badge--degraded' : 'sizing-badge';
-    return ` <span class="${cls}" title="${esc(sizing.note || text)}">${esc(degraded ? '降级' : '提示')}</span>`;
+    return '<span class="text-muted">全仓</span>';
   }
 
   function skippedTradeRow(skip) {
@@ -1511,17 +1456,15 @@
     const rows = [...trades, ...skipped]
       .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
     const strategyName = tradesSource?.strategy_name || strategyLabel(tradesSource) || '';
-    const label = tradesSource?.sizer_name ? `${strategyName} × ${tradesSource.sizer_name}` : strategyName;
     tradeMetaEl.textContent = rows.length
-      ? `${label ? label + ' | ' : ''}${tradesSource.start_date || '-'} ~ ${tradesSource.end_date || '-'} | ${trades.length} 笔交易${skipped.length ? ` + ${skipped.length} 次跳过` : ''}`
+      ? `${strategyName ? strategyName + ' | ' : ''}${tradesSource.start_date || '-'} ~ ${tradesSource.end_date || '-'} | ${trades.length} 笔交易${skipped.length ? ` + ${skipped.length} 次跳过` : ''}`
       : '本次回测无交易。';
     tradesBodyEl.innerHTML = rows.length ? rows.map((t) => {
       if (t._skipped) return skippedTradeRow(t);
-      const degraded = (t.sizing?.flags || []).some(f => SIZING_DEGRADED_FLAGS.has(f));
       return `
-      <tr class="${degraded ? 'trade-row-degraded' : ''}">
+      <tr>
         <td>${esc(t.date || '')}</td>
-        <td class="text-center">${esc(sideLabel(t.side))}${sizingBadge(t)}</td>
+        <td class="text-center">${esc(sideLabel(t.side))}</td>
         <td class="num-cell">${esc(t.qty || 0)}</td>
         <td class="num-cell">${positionPctCell(t)}</td>
         <td class="num-cell">${num(t.reference_price, 4)}</td>
@@ -1552,15 +1495,13 @@
       allMultiKline = [{
         strategy_id: result.strategy_id || '',
         strategy_name: strategyLabel({ strategy_id: result.strategy_id }) || result.strategy_id || '',
-        sizer_id: result.sizer_id || '',
-        sizer_name: result.sizer_name || '',
         buy_points: result.charts.kline.buy_points || [],
         sell_points: result.charts.kline.sell_points || [],
         skipped_buy_points: result.charts.kline.skipped_buy_points || [],
       }];
     }
-    // 单一 策略×仓位 组合时直接激活其买卖点标记（用户预期：回测跑完即见策略买卖点）；
-    // 多组合仍需点击对比表行选择显示哪一组（既有交互）。
+    // 单一策略时直接激活其买卖点标记（用户预期：回测跑完即见策略买卖点）；
+    // 多策略仍需点击对比表行选择显示哪一组（既有交互）。
     activeResultKey = allMultiKline.length === 1 ? resultKey(allMultiKline[0]) : null;
     renderBacktestSummary(result);
     renderBacktestTrades(result);
@@ -1701,25 +1642,6 @@
       .filter(Boolean);
   }
 
-  function selectedSizerIds() {
-    return [...backtestSizerListEl.querySelectorAll('input[type="checkbox"]:checked')]
-      .map(cb => cb.value)
-      .filter(Boolean);
-  }
-
-  function updateSizerDropdownLabel() {
-    const ids = selectedSizerIds();
-    const items = (ruleMeta.position_strategies || []).filter(s => s.valid);
-    if (!ids.length) {
-      backtestSizerLabelEl.textContent = '全仓（默认）';
-    } else if (ids.length === 1) {
-      const found = items.find(s => s.id === ids[0]);
-      backtestSizerLabelEl.textContent = found ? (found.name || found.id) : ids[0];
-    } else {
-      backtestSizerLabelEl.textContent = `已选 ${ids.length} 个仓位策略`;
-    }
-  }
-
   function updateStrategyDropdownLabel() {
     const ids = selectedStrategyIds();
     const strategies = (ruleMeta.strategies || []).filter(s => s.valid);
@@ -1738,11 +1660,6 @@
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '策略列表加载失败');
     ruleMeta = data || { strategies: [] };
-    // Sync degradation enums from the backend (single source of truth).
-    const sizingMeta = ruleMeta.sizing || {};
-    if (Array.isArray(sizingMeta.degraded_flags) && sizingMeta.degraded_flags.length) {
-      SIZING_DEGRADED_FLAGS = new Set(sizingMeta.degraded_flags);
-    }
     const strategies = (ruleMeta.strategies || []).filter((item) => item.valid);
     backtestStrategyListEl.innerHTML = strategies.length
       ? strategies.map((item) => `
@@ -1754,17 +1671,6 @@
       : '<div class="multi-select-empty">暂无可用策略</div>';
     updateStrategyDropdownLabel();
     runBacktestBtnEl.disabled = !strategies.length;
-
-    const sizers = (ruleMeta.position_strategies || []).filter((item) => item.valid);
-    backtestSizerListEl.innerHTML = sizers.length
-      ? sizers.map((item) => `
-        <label class="multi-select-option">
-          <input type="checkbox" value="${esc(item.id)}">
-          <span>${esc(item.name || item.id)}</span>
-        </label>
-      `).join('')
-      : '<div class="multi-select-empty">暂无仓位策略，默认全仓</div>';
-    updateSizerDropdownLabel();
   }
 
   function selectedSymbol() {
@@ -1938,7 +1844,6 @@
         body: JSON.stringify({
           strategy_ids: strategyIds,
           strategy_config: drillContext ? drillContext.strategy_config : null,
-          position_strategy_ids: selectedSizerIds(),
           symbol,
           start_date: backtestStartEl.value,
           end_date: backtestEndEl.value,
@@ -2028,34 +1933,10 @@
     updateStrategyDropdownLabel();
   });
 
-  // --- Sizer dropdown (checkbox panel) ---
-  backtestSizerBtnEl.addEventListener('click', (event) => {
-    event.stopPropagation();
-    if (backtestSizerPanelEl.hidden) {
-      const rect = backtestSizerBtnEl.getBoundingClientRect();
-      backtestSizerPanelEl.style.top = (rect.bottom + 4) + 'px';
-      backtestSizerPanelEl.style.left = rect.left + 'px';
-      backtestSizerPanelEl.style.minWidth = rect.width + 'px';
-      backtestSizerPanelEl.hidden = false;
-      backtestSizerBtnEl.classList.add('multi-select-open');
-    } else {
-      backtestSizerPanelEl.hidden = true;
-      backtestSizerBtnEl.classList.remove('multi-select-open');
-    }
-  });
-
-  backtestSizerListEl.addEventListener('change', () => {
-    updateSizerDropdownLabel();
-  });
-
   document.addEventListener('click', (event) => {
     if (!backtestStrategyPanelEl.contains(event.target) && !backtestStrategyDropdownEl.contains(event.target)) {
       backtestStrategyPanelEl.hidden = true;
       backtestStrategyBtnEl.classList.remove('multi-select-open');
-    }
-    if (!backtestSizerPanelEl.contains(event.target) && !backtestSizerDropdownEl.contains(event.target)) {
-      backtestSizerPanelEl.hidden = true;
-      backtestSizerBtnEl.classList.remove('multi-select-open');
     }
   });
   backtestStartEl.addEventListener('change', updateBacktestRangeLabel);

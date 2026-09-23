@@ -948,7 +948,6 @@ class BatchBacktestService:
                                 end_date=window_end,
                                 execution=execution,
                                 run_id=f"{batch_id}-{symbol}-{s['id']}",
-                                sizer=None,
                             )
                         )
                         # 服务层补记（方案 §2.2）：引擎不关心类目归属。

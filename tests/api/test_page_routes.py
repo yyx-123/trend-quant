@@ -7,7 +7,6 @@ import pytest
 
 PAGES = [
     "/rule-backtest",
-    "/position-strategies",
     "/market-view",
     "/batch-backtest",
     "/subject-market",

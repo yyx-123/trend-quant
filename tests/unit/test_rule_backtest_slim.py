@@ -80,7 +80,7 @@ class SlimBacktestResultTest(unittest.TestCase):
         slim = slim_backtest_result(_full_result())
         top_kept = (
             "results", "benchmark_summary", "multi_kline", "status", "run_id",
-            "strategy_id", "sizer_id", "sizer_name", "symbol", "start_date", "end_date",
+            "strategy_id", "symbol", "start_date", "end_date",
             "initial_capital", "final_equity", "summary", "trades", "skipped_buys",
             "annual_returns", "monthly_heatmap", "debug_log",
         )
@@ -88,7 +88,7 @@ class SlimBacktestResultTest(unittest.TestCase):
             self.assertIn(key, slim)
         strategy = slim["results"][0]
         per_kept = (
-            "run_id", "status", "strategy_id", "strategy_name", "sizer_id", "sizer_name",
+            "run_id", "status", "strategy_id", "strategy_name",
             "symbol", "start_date", "end_date", "initial_capital", "final_equity",
             "summary", "trades", "skipped_buys", "annual_returns", "monthly_heatmap",
         )

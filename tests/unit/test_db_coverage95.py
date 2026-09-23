@@ -37,14 +37,6 @@ class TestRuleStrategyStore:
         saved2 = test_db.save_rule_strategy({**strategy, "name": "策略一改"}, overwrite=True)
         assert saved2["strategy"]["name"] == "策略一改"
 
-    def test_position_strategy_requires_id_and_roundtrip(self, test_db) -> None:
-        with pytest.raises(ValueError, match="id is required"):
-            test_db.save_position_strategy({"name": "x"})
-        saved = test_db.save_position_strategy({"id": "p1", "name": "仓位一"})
-        assert saved["id"] == "p1"
-        with pytest.raises(FileExistsError):
-            test_db.save_position_strategy({"id": "p1", "name": "仓位一"})
-
 
 class TestTagHelpers:
     def test_json_tags_variants(self, test_db) -> None:

@@ -3,11 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from rule_backtest.sizing.base import PositionSizer
-
+from typing import Literal
 
 PriceField = Literal["open", "high", "low", "close", "volume", "amount"]
 Operator = Literal[">=", "<=", "cross_above", "cross_below"]
@@ -61,8 +57,6 @@ class RuleBacktestRequest:
     end_date: date | None = None
     execution: BacktestExecutionConfig = field(default_factory=BacktestExecutionConfig)
     run_id: str | None = None
-    # Position sizer (仓位策略); None keeps the legacy all-in buy behavior.
-    sizer: PositionSizer | None = None
     # Called once per processed bar as (day_number, total_days); None disables reporting.
     progress_callback: Callable[[int, int], None] | None = None
 
