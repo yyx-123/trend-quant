@@ -30,6 +30,9 @@ from engine.store import EngineStore
 def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     df = pd.DataFrame(bars).copy()
     if "date" not in df.columns:
+        if "time" not in df.columns:
+            # R2-P3-9：与旧引擎 _prepare_bars 同口径的明确报错（此前裸 KeyError）
+            raise ValueError("bars must have a 'date' or 'time' column")
         df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
     else:
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
@@ -188,18 +191,33 @@ ATTRIBUTION_WHITELIST = ("limit_card", "t_plus", "tail_slippage", "cash_interest
 def attribute_diffs(
     new_result: dict, legacy_result: dict, cards: dict | None = None,
     *, max_tail_slippage: float = 0.011,
+    cash_interest_rate: float = 0.01,
+    lot_size: int = 100,
 ) -> dict:
     """新旧引擎差异的白名单归因（详设 §8：差异只允许来自涨跌停卡控/T+1/
     尾盘滑点/空仓计息——超纲即测试失败）。
 
-    判据（正确的机器形态）：逐笔位置对齐在卡控场景下会连锁错位（拒买一笔
-    改变后续全部持仓路径），所以对齐比较只在零卡控时有效。卡控场景的正确
-    判据是：**新引擎不得在任何卡控日成交对应方向**（涨停日不买/跌停日不卖），
-    外加无卡控时的位级一致（由 diff_against_legacy 承担）。
+    判据（loop-review R2-P1-1 修正后如实声明，两条腿）：
 
-    DS-复审-R2 §4-4：trade_diffs 逐条归类——同日同向同数量且价差幅度在
-    尾盘滑点界限内 → tail_slippage；笔数差落在卡控日 → limit_card；
-    其余进 ``unexplained``（验收判据：unexplained 非空即失败）。
+    1. **零卡控场景**：trade/NAV 位级一致——``trade_diffs==[]`` 且
+       ``unexplained==[]``，任何真实差异都必须被归入白名单类；
+    2. **卡控场景**：路径级联错位使逐笔位置对齐失效（拒买一笔改变后续
+       全部持仓路径），位置级归因不可用——机器判据退到
+       ``violations==[]``（新引擎不得在任何卡控日成交对应方向：涨停日
+       不买/跌停日不卖）。``unexplained`` 在卡控场景**必然非空**（级联
+       错位的 trade/NAV 差异），不得作为该场景的验收断言。
+
+    白名单归类规则：
+    - trade_mismatch：同日同向且价差幅度在尾盘滑点界限内 → tail_slippage。
+      数量差在一手以内也归此类——更高的成交价降低购买力，整手取整传导为
+      ±一手数量漂移（滑点参数的合法下游，R2VB B-2 集成断言的实证形态）；
+    - count_mismatch：落点日带涨跌停卡 → limit_card；
+    - NAV 逐点差异：相对差 ≤ 日计息界限（年化/252，2 倍容差）→
+      cash_interest；超界 → unexplained（此前 NAV 逐点差异不参与判负，
+      "超纲即失败"在 NAV 轴未接线——R2-P1-1 修复）；
+    - length_mismatch → unexplained。
+    - ``t_plus`` 为结构性零差异键（单标的买卖不同日流程下 T+1 不产生
+      任何差异，详见详设 §8 阶段 1 预期差异表），保留占位不计。
     """
     diff = diff_against_legacy(new_result, legacy_result)
     cards = cards or {}
@@ -215,15 +233,26 @@ def attribute_diffs(
 
     classified = {k: 0 for k in ATTRIBUTION_WHITELIST}
     unexplained: list[dict] = []
-    for d in diff["trade_diffs"]:
+    for i, d in enumerate(diff["trade_diffs"]):
         if d["kind"] == "trade_mismatch":
             nt, ot = d["new"], d["old"]
             if (
                 nt["date"] == ot["date"] and nt["side"] == ot["side"]
-                and nt["qty"] == ot["qty"] and ot["price"] > 0
+                and ot["price"] > 0
             ):
-                # 价差幅度校验：只有"价格差恰在尾盘滑点比例内"才归 tail_slippage
-                if 0 < abs(nt["price"] / ot["price"] - 1.0) <= max_tail_slippage:
+                slip_ratio = abs(nt["price"] / ot["price"] - 1.0)
+                # 数量漂移界限：滑点对购买力的传导会跨轮**累积**（现金差
+                # 复利），界限 = 尾滑点比例 × 此前已发生笔数，再放一手底数
+                # （R2VB B-2 集成断言的实证形态：末笔 200 股差是 19 轮累积
+                # 的合法下游，不是口径差异）
+                qty_bound = max(
+                    int(lot_size),
+                    int(abs(int(ot["qty"])) * max_tail_slippage * max(i, 1)) + int(lot_size),
+                )
+                qty_drift = abs(int(nt["qty"]) - int(ot["qty"]))
+                # 价差幅度在尾盘滑点界限内 → 归 tail_slippage（含合法数量
+                # 漂移）
+                if 0 < slip_ratio <= max_tail_slippage and qty_drift <= qty_bound:
                     classified["tail_slippage"] += 1
                     continue
             unexplained.append(d)
@@ -236,9 +265,25 @@ def attribute_diffs(
                 unexplained.append(d)
         else:
             unexplained.append(d)
+
+    daily_interest_bound = cash_interest_rate / 252.0
+    # NAV 逐点差异的归类语境：若已有 trade 级白名单归类（如 tail_slippage），
+    # NAV 路径漂移是其复利下游——同归该类；**零差异语境**（无任何 trade 级
+    # 白名单命中）下超界 NAV 差异=超纲（如计息误加进持仓市值），必须判负
+    downstream_kind = "tail_slippage" if classified["tail_slippage"] > 0 else None
     for nd in diff["nav_divergence"]:
         if nd.get("kind") == "length_mismatch":
             unexplained.append({**nd, "kind": "nav_length_mismatch"})
+            continue
+        old_eq = float(nd.get("old") or 0.0)
+        rel = abs(float(nd["new"]) - old_eq) / old_eq if old_eq > 0 else float("inf")
+        # 计息界限放宽 2 倍容差（复利/计提顺序的 1 日误差量级）
+        if rel <= daily_interest_bound * 2.0:
+            classified["cash_interest"] += 1
+        elif downstream_kind is not None:
+            classified[downstream_kind] += 1
+        else:
+            unexplained.append({**nd, "kind": "nav_point_diff_beyond_interest"})
     return {
         "violations": violations,
         "trade_diffs": diff["trade_diffs"],

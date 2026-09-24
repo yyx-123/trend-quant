@@ -132,50 +132,74 @@ def main() -> int:
             print(f"{row['id']} [{row['status']}] {row['title']} → {row.get('final_verdict')}")
         return 0
     if args.cmd == "confirm":
-        v = service.confirm_verdict(
-            experiment_id=args.experiment_id, final_verdict=args.verdict,
-            reasoning=args.reasoning, session_id=session["session_id"],
-        )
+        try:
+            v = service.confirm_verdict(
+                experiment_id=args.experiment_id, final_verdict=args.verdict,
+                reasoning=args.reasoning, session_id=session["session_id"],
+            )
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 1
         print(json.dumps({"ok": True, "final": v["final_verdict"]}, ensure_ascii=False))
         return 0
     if args.cmd == "rerun":
-        exp = service.rerun_experiment(
-            experiment_id=args.experiment_id, session_id=session["session_id"],
-            auto_queue=False,
-        )
+        try:
+            exp = service.rerun_experiment(
+                experiment_id=args.experiment_id, session_id=session["session_id"],
+                auto_queue=False,
+            )
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 1
         out = {"ok": True, "reproduction_of": args.experiment_id,
                "experiment_id": exp["id"],
                "attempt_index": exp["attempt_index"]}
         if getattr(args, "run", False):
             from research.pipeline import run_experiment
 
-            v = run_experiment(
-                service.db, exp["id"], registry=service.registry,
-                holdout_token=getattr(args, "token", None),
-            )
-            out["final_verdict"] = v.get("final_verdict")
+            try:
+                v = run_experiment(
+                    service.db, exp["id"], registry=service.registry,
+                    holdout_token=getattr(args, "token", None),
+                )
+            except Exception as exc:
+                out["run_error"] = str(exc)
+            else:
+                out["final_verdict"] = v.get("final_verdict")
         print(json.dumps(out, ensure_ascii=False))
         return 0
     if args.cmd == "recompute":
-        result = service.recompute_campaign(
-            old_module_ref=args.old_ref, new_module_ref=args.new_ref,
-            session_id=session["session_id"], limit=args.limit,
-        )
+        try:
+            result = service.recompute_campaign(
+                old_module_ref=args.old_ref, new_module_ref=args.new_ref,
+                session_id=session["session_id"], limit=args.limit,
+            )
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 1
         print(json.dumps({"ok": True, "recomputed": len(result["recomputed"]),
                           "failed": len(result["failed"])}, ensure_ascii=False))
         return 0
     if args.cmd == "promote":
-        v = service.promote_to_library(
-            experiment_id=args.experiment_id, strategy_id=args.strategy_id,
-            session_id=session["session_id"], name=args.name,
-        )
+        try:
+            v = service.promote_to_library(
+                experiment_id=args.experiment_id, strategy_id=args.strategy_id,
+                session_id=session["session_id"], name=args.name,
+            )
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 1
         print(json.dumps({"ok": True, "version_id": v["id"]}, ensure_ascii=False))
         return 0
     if args.cmd == "conclude":
-        t = service.conclude_topic(
-            topic_id=args.topic_id, conclusion=args.conclusion,
-            session_id=session["session_id"], grade=args.grade or None,
-        )
+        try:
+            t = service.conclude_topic(
+                topic_id=args.topic_id, conclusion=args.conclusion,
+                session_id=session["session_id"], grade=args.grade or None,
+            )
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 1
         print(json.dumps({"ok": True, "grade": t["conclusion_grade"]}, ensure_ascii=False))
         return 0
     return 1

@@ -16,9 +16,37 @@ from audit.app_logger import get_logger
 
 logger = get_logger(__name__)
 
+# Context 注解必须用 mcp 的真实类——FastMCP 的 Context 注入只认 Context
+# 子类注解（R2VB 验收 B-1 实证：`ctx: Context = None` 是死代码且污染
+# inputSchema）。本模块仅由 trend_mcp/server.py（mcp 已可导入时）加载；
+# 守卫导入只为无 mcp 的测试环境直接 import 本模块不炸。
+try:
+    from mcp.server.fastmcp import Context
+except ImportError:  # pragma: no cover - 测试环境无 mcp 包
+    Context = None
+
+# 业务错误类（可把 str(exc) 透给 AI 客户端——错误文案面向使用者写成）；
+# 其余异常属内部错误，只记日志、回笼统文案（R2-P3-3：不把 sqlite/路径等
+# 内部细节泄给客户端，也不把"沙箱违规"与"服务器 bug"混为一谈）。
+from research.errors import IntakeRejected, ResearchError
+
+
+def _error_payload(exc: Exception) -> dict:
+    if isinstance(exc, IntakeRejected):
+        return {"ok": False, "error": str(exc), "reasons": list(getattr(exc, "reasons", []) or []),
+                "experiment_id": getattr(exc, "experiment_id", None)}
+    if isinstance(exc, ResearchError):
+        return {"ok": False, "error": str(exc)}
+    logger.exception("research tool internal error")
+    return {"ok": False, "error": "internal error (see server logs)"}
+
 
 def _service():
-    """优先复用 app 挂载的服务面（带 worker）；否则直连默认库（同步模式）。"""
+    """优先复用 app 挂载的服务面（带 worker）；否则直连默认库（同步模式）。
+
+    意外异常转 ResearchError（R2VB B-7）：工具的 except 全靠 _error_payload
+    分类——服务面装配失败属"服务器不可用"业务语义，不该以原始 traceback
+    透给 AI 客户端。"""
     try:
         from app.main import app
 
@@ -27,18 +55,45 @@ def _service():
             return service
     except Exception:
         pass
-    from data.storage import db as db_module
-    from portfolio.slots import REGISTRY, ensure_builtins
-    from research.api import ResearchService
+    try:
+        from data.storage import db as db_module
+        from portfolio.slots import REGISTRY, ensure_builtins
+        from research.api import ResearchService
 
-    ensure_builtins()
-    return ResearchService(db_module.get_db(), registry=REGISTRY)
+        ensure_builtins()
+        return ResearchService(db_module.get_db(), registry=REGISTRY)
+    except Exception:
+        logger.exception("research service assembly failed")
+        raise ResearchError("research service unavailable (see server logs)")
 
 
-def _ai_session(db):
-    from research.sessions import get_or_create_ai_session
+def _ai_session(db, ctx=None):
+    """AI 会话归属（R2-P3-4）：多 token（TREND_MCP_TOKENS 的 tokenA=用户A）
+    部署下按 mcp_user 派生独立会话（ai-mcp-<user>），台账可区分是哪个
+    token 用户的研究操作；单 token / 无请求上下文时回退共享默认会话。"""
+    from research.sessions import get_or_create_ai_session, get_session
 
-    return get_or_create_ai_session(db, channel="mcp")
+    username = None
+    if ctx is not None:
+        try:
+            request = ctx.request_context.request
+            state = getattr(request, "scope", {}).get("state") or {}
+            username = state.get("mcp_user")
+        except (ValueError, AttributeError, TypeError):
+            username = None
+    if not username:
+        return get_or_create_ai_session(db, channel="mcp")
+    session_id = f"ai-mcp-{str(username)}"
+    existing = get_session(db, session_id)
+    if existing is not None:
+        return existing
+    with db.connect() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO research_sessions (session_id, kind, label, channel)
+               VALUES (?, 'ai', ?, 'mcp')""",
+            (session_id, f"AI（MCP·{username}）"),
+        )
+    return get_session(db, session_id)
 
 
 def _run_or_queue(service, experiment_id: str) -> dict:
@@ -62,24 +117,27 @@ def register_research_tools(mcp) -> None:
     def research_register_module_catalog() -> dict:
         """列出已注册的插槽模块与评估模块（AI 提实验前先读这个）。"""
         service = _service()
-        return {
-            "ok": True,
-            "modules": service.list_modules(),
-            "evaluations": service.list_evaluations(),
-        }
+        try:
+            return {
+                "ok": True,
+                "modules": service.list_modules(),
+                "evaluations": service.list_evaluations(),
+            }
+        except Exception as exc:
+            return _error_payload(exc)
 
     @mcp.tool()
-    def research_propose_topic(title: str, question: str) -> dict:
+    def research_propose_topic(title: str, question: str, ctx: Context = None) -> dict:
         """提研究课题（AI 工作流固定：先提课题、再在课题下设计实验）。"""
         service = _service()
-        session = _ai_session(service.db)
+        session = _ai_session(service.db, ctx)
         try:
             topic = service.propose_topic(
                 session_id=session["session_id"], title=title, question=question
             )
             return {"ok": True, "topic": topic}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return _error_payload(exc)
 
     @mcp.tool()
     def research_propose_experiment(
@@ -90,6 +148,7 @@ def register_research_tools(mcp) -> None:
         title: str = "",
         allow_duplicate: bool = False,
         run: bool = True,
+        ctx: Context = None,
     ) -> dict:
         """提实验（骨架校验不过即 rejected_intake 留痕并返回原因）。
 
@@ -97,7 +156,7 @@ def register_research_tools(mcp) -> None:
         run=False 时只登记不入队（攒一批再跑）。
         """
         service = _service()
-        session = _ai_session(service.db)
+        session = _ai_session(service.db, ctx)
         try:
             exp = service.propose_experiment(
                 session_id=session["session_id"], title=title or f"{evaluation_module} 实验",
@@ -106,9 +165,7 @@ def register_research_tools(mcp) -> None:
                 auto_queue=False,
             )
         except Exception as exc:
-            reasons = getattr(exc, "reasons", None)
-            return {"ok": False, "error": str(exc), "reasons": reasons,
-                    "experiment_id": getattr(exc, "experiment_id", None)}
+            return _error_payload(exc)
         dispatch = _run_or_queue(service, exp["id"]) if run else {"mode": "parked"}
         return {"ok": True, "experiment_id": exp["id"], "status": exp["status"],
                 "attempt_index": exp["attempt_index"], "dispatch": dispatch}
@@ -117,16 +174,19 @@ def register_research_tools(mcp) -> None:
     def research_get_experiment(experiment_id: str) -> dict:
         """读实验详情（spec + verdicts + 证据）。"""
         service = _service()
-        detail = service.get_experiment(experiment_id)
+        try:
+            detail = service.get_experiment(experiment_id)
+        except Exception as exc:
+            return _error_payload(exc)
         return {"ok": detail is not None, "experiment": detail}
 
     @mcp.tool()
     def research_run_status(experiment_id: str) -> dict:
-        service = _service()
         try:
+            service = _service()
             return {"ok": True, **service.run_status(experiment_id)}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return _error_payload(exc)
 
     @mcp.tool()
     def research_search_ledger(
@@ -134,26 +194,32 @@ def register_research_tools(mcp) -> None:
     ) -> dict:
         """台账检索（全员只读：含他人失败实验——先读台账再提假设）。"""
         service = _service()
-        return {
-            "ok": True,
-            "results": service.search_ledger(
+        try:
+            results = service.search_ledger(
                 subject_key=subject_key or None, topic_id=topic_id or None,
                 final_verdict=final_verdict or None,
-            ),
-        }
+            )
+        except Exception as exc:
+            return _error_payload(exc)
+        return {"ok": True, "results": results}
 
     @mcp.tool()
     def research_list_topics(status: str = "") -> dict:
-        service = _service()
-        return {"ok": True, "topics": service.list_topics(status=status or None)}
+        try:
+            service = _service()
+            topics = service.list_topics(status=status or None)
+        except Exception as exc:
+            return _error_payload(exc)
+        return {"ok": True, "topics": topics}
 
     @mcp.tool()
     def research_confirm_verdict(
         experiment_id: str, final_verdict: str, reasoning: str,
+        ctx: Context = None,
     ) -> dict:
         """确认 verdict（final 可降不可升平台建议；reasoning 必填）。"""
         service = _service()
-        session = _ai_session(service.db)
+        session = _ai_session(service.db, ctx)
         try:
             result = service.confirm_verdict(
                 experiment_id=experiment_id, final_verdict=final_verdict,
@@ -161,32 +227,32 @@ def register_research_tools(mcp) -> None:
             )
             return {"ok": True, "verdict": result["final_verdict"]}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return _error_payload(exc)
 
     @mcp.tool()
-    def research_rerun_experiment(experiment_id: str, run: bool = True) -> dict:
+    def research_rerun_experiment(experiment_id: str, run: bool = True, ctx: Context = None) -> dict:
         """复现一个已到终态的实验（同 spec 同 attempt_index、不计尝试计数）。"""
         service = _service()
-        session = _ai_session(service.db)
+        session = _ai_session(service.db, ctx)
         try:
             exp = service.rerun_experiment(
                 experiment_id=experiment_id, session_id=session["session_id"],
                 auto_queue=False,
             )
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return _error_payload(exc)
         dispatch = _run_or_queue(service, exp["id"]) if run else {"mode": "parked"}
         return {"ok": True, "experiment_id": exp["id"],
                 "attempt_index": exp["attempt_index"], "dispatch": dispatch}
 
     @mcp.tool()
     def research_promote_to_library(
-        experiment_id: str, strategy_id: str, name: str = "",
+        experiment_id: str, strategy_id: str, name: str = "", ctx: Context = None,
     ) -> dict:
         """实验晋升入策略库（决策 8 唯一的门：须 verdicted + final=confirmed；
         2026-09-24 用户决策：AI 可全流程闭环自动晋升）。"""
         service = _service()
-        session = _ai_session(service.db)
+        session = _ai_session(service.db, ctx)
         try:
             version = service.promote_to_library(
                 experiment_id=experiment_id, strategy_id=strategy_id,
@@ -194,16 +260,16 @@ def register_research_tools(mcp) -> None:
             )
             return {"ok": True, "version_id": version["id"]}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return _error_payload(exc)
 
     @mcp.tool()
     def research_conclude_topic(
         topic_id: str, conclusion: str, grade: str = "",
-        experiment_ids: list[str] | None = None,
+        experiment_ids: list[str] | None = None, ctx: Context = None,
     ) -> dict:
         """关题（平台量化摘要先行；grade 可降不可升）。"""
         service = _service()
-        session = _ai_session(service.db)
+        session = _ai_session(service.db, ctx)
         try:
             topic = service.conclude_topic(
                 topic_id=topic_id, conclusion=conclusion,
@@ -212,12 +278,12 @@ def register_research_tools(mcp) -> None:
             )
             return {"ok": True, "topic": topic}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return _error_payload(exc)
 
     @mcp.tool()
     def research_propose_module(
         slot: str, name: str, version: int, kind: str, source: str,
-        params_schema: dict | None = None,
+        params_schema: dict | None = None, ctx: Context = None,
     ) -> dict:
         """提新模块（自动测试门：契约/确定性/前缀稳定性；DSL 免测）。
 
@@ -225,7 +291,7 @@ def register_research_tools(mcp) -> None:
               "python"（定义 Module 类的源码）。
         """
         service = _service()
-        session = _ai_session(service.db)
+        session = _ai_session(service.db, ctx)
         try:
             draft = service.propose_module(
                 session_id=session["session_id"], slot=slot, name=name,
@@ -234,6 +300,6 @@ def register_research_tools(mcp) -> None:
             )
             return {"ok": draft["status"] != "rejected", "draft": draft}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return _error_payload(exc)
 
     logger.info("research MCP tools registered")

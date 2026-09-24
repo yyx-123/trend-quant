@@ -134,12 +134,15 @@ def conclude_topic(
 
     import json
 
+    # R2-P3-1：结论落定带状态守卫（rowcount）——检查与落定之间的窗口里
+    # 并发挂入在途实验/并发双 conclude 时，第二个写者 rowcount==0 被拒，
+    # 不会出现"已 conclude 课题带 queued 实验"或结论被覆盖。
     with db.connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             """UPDATE research_topics
                SET status = 'concluded', conclusion = ?, conclusion_grade = ?,
                    conclusion_summary_json = ?, concluded_at = datetime('now','localtime')
-               WHERE id = ?""",
+               WHERE id = ? AND status = 'open'""",
             (
                 conclusion,
                 final_grade,
@@ -147,4 +150,8 @@ def conclude_topic(
                 topic_id,
             ),
         )
+        if int(cur.rowcount or 0) == 0:
+            raise TopicError(
+                f"topic {topic_id} is not open (concluded concurrently or already closed)"
+            )
     return get_topic(db, topic_id)

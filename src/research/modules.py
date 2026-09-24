@@ -149,10 +149,22 @@ def _prescreen_python_source(source: str) -> list[str]:
         elif isinstance(node, ast.Attribute):
             if node.attr.startswith("__"):
                 errors.append(f"dunder attribute access not allowed: {node.attr}")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # R2-P3-5：真逃逸向量是 "{0.__class__}".format(x)——dunder 藏在
+            # 字符串常量里（f-string 内表达式反而会被上面的 Attribute 扫描
+            # 抓住）。对字符串常量做 ".__" 记号预筛：正常研究表达式不需要
+            # 在字符串字面量里引用属性逃逸形。
+            if ".__" in node.value:
+                errors.append(
+                    "string literal may not contain attribute-escape token '.__' "
+                    "(format-string dunder access is not visible to AST scan)"
+                )
         elif isinstance(node, ast.Name):
             if node.id in ("eval", "exec", "open", "compile", "getattr", "setattr",
                            "globals", "locals", "vars", "input", "breakpoint",
-                           "__import__"):
+                           "__import__", "__builtins__", "__globals__"):
+                # __builtins__/__globals__（R2VB B-6）：下标取 __import__ 的
+                # 逃逸路径（__builtins__["__import__"]("os")）从这里掐断
                 errors.append(f"name not allowed: {node.id}")
     return errors
 

@@ -24,6 +24,18 @@ router = APIRouter(prefix="/research-ledger", tags=["research-ledger"])
 templates = Jinja2Templates(directory=str(web_dir() / "templates"))
 
 
+def _reject_cross_site_form(request: Request) -> None:
+    """CSRF 补充防线（loop-review R2-P2-1）：台账的 3 个变更 POST 是全站
+    仅有的不经过 AuthWall X-Requested-With 检查（那只覆盖 /api/ 路径）的
+    变更端点。SameSite=Lax 在 Chrome 有 2 分钟 "Lax+POST" 豁免窗口，且
+    confirm 不可逆（final 落定后库层触发器拒改）——现代浏览器跨站表单
+    必带 ``Sec-Fetch-Site: cross-site``，据此拒绝；旧浏览器无该头时仍由
+    SameSite=Lax 兜底（双层互补，零 UI 改动）。"""
+    site = str(request.headers.get("sec-fetch-site") or "").lower()
+    if site == "cross-site":
+        raise HTTPException(status_code=403, detail="cross-site form post rejected")
+
+
 def _service() -> ResearchService:
     from app.main import app
 
@@ -146,9 +158,11 @@ def experiment_report_download(experiment_id: str):
 @router.post("/experiments/{experiment_id}/confirm")
 def confirm_verdict(
     experiment_id: str,
+    request: Request,
     final_verdict: str = Form(...),
     reasoning: str = Form(...),
 ):
+    _reject_cross_site_form(request)
     service = _service_or_testbed()
     session = service.default_human_session()
     try:
@@ -161,12 +175,14 @@ def confirm_verdict(
     return RedirectResponse(f"/research-ledger/experiments/{experiment_id}", status_code=303)
 
 
-@router.post("/topics/{topic_id}/conclude")
+@router.post("/topics/conclude")
 def conclude_topic(
-    topic_id: str,
+    request: Request,
+    topic_id: str = Form(...),
     conclusion: str = Form(...),
     grade: str = Form(""),
 ):
+    _reject_cross_site_form(request)
     service = _service_or_testbed()
     session = service.default_human_session()
     try:
@@ -180,7 +196,12 @@ def conclude_topic(
 
 
 @router.post("/holdout/grant")
-def grant_holdout(purpose: str = Form(""), experiment_id: str = Form("")):
+def grant_holdout(
+    request: Request,
+    purpose: str = Form(""),
+    experiment_id: str = Form(""),
+):
+    _reject_cross_site_form(request)
     service = _service_or_testbed()
     session = service.default_human_session()
     try:

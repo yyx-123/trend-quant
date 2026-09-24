@@ -107,9 +107,12 @@ def test_parity_identical_when_all_deltas_off():
     assert diff["trades_new"] == diff["trades_old"]
     assert diff["trade_diffs"] == []
     assert diff["nav_divergence"] == []
-    # 阶段 1 验收机器判据接线（DS-P2-9）：差异归因白名单——无差异时白名单自然为空
+    # 阶段 1 验收机器判据接线（DS-P2-9 + loop-review R2-P1-1）：零卡控场景
+    # unexplained 必须为空——此前该断言缺失，归因器被替换为恒空桩时本测试
+    # 仍绿（mutation 实证），"超纲即失败"名存实亡
     report = attribute_diffs(new, legacy)
     assert report["violations"] == []
+    assert report["unexplained"] == []
 
 
 def test_parity_tail_slippage_is_the_only_delta():
@@ -133,6 +136,11 @@ def test_parity_tail_slippage_is_the_only_delta():
             assert new_t["price"] == pytest.approx(
                 float(old_t["exec_price"]) * 0.997 / 0.998, rel=1e-9
             )
+    # R2VB B-2：集成层补"带真实差异 → 归因必须分类"断言——unit 层轴钉
+    # 抓"归因器回退为恒干净"，本断言抓"归因器在真实差异前不作为"
+    report = attribute_diffs(new, legacy)
+    assert report["classified"]["tail_slippage"] >= len(new_ts)
+    assert report["unexplained"] == []
 
 
 def test_parity_limit_up_card_blocks_buy():
@@ -147,7 +155,10 @@ def test_parity_limit_up_card_blocks_buy():
     # 涨停日拒买：新引擎的首笔买入不在被卡控的那一天（顺延到下一个金叉）
     assert first_buy_day not in new_buy_days
     assert first_buy_day in old_buy_days
-    # 归因白名单：所有差异必须落在 limit_card 类，超纲即失败
-    # 机器判据：卡控日零违规成交（涨停日无买/跌停日无卖）
+    # 归因白名单（loop-review R2-P1-1 如实化）：卡控场景路径级联错位，
+    # 逐笔位置归因不可用——机器判据 = 卡控日零违规成交（violations），
+    # unexplained 在该场景必然非空、不得用作验收断言（docstring 同步声明）
     report = attribute_diffs(new, legacy, cards=cards)
     assert report["violations"] == []
+    # 但"卡控日拒买"这一事实本身仍可机器验证：新引擎在被卡控日无买入成交
+    assert first_buy_day not in new_buy_days

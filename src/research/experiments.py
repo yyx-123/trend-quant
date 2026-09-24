@@ -357,6 +357,12 @@ def rerun_experiment(db, *, experiment_id: str, session_id: str) -> dict:
         raise LifecycleError(
             f"only terminal experiments can be rerun (status={original['status']})"
         )
+    # R2-P3-2：复现挂原课题——课题必须仍 open（"关题不带在途实验"不变式
+    # §6.4.1）。propose/append 都被 require_open_topic 挡住，rerun 是唯一
+    # 缺口；已关课题的复现请先新建课题（append_experiment_to_topic 迁移）。
+    from research.topics import require_open_topic
+
+    require_open_topic(db, original["topic_id"])
 
     from research.ledger import alloc_id
 

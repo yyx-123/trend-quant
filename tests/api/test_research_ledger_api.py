@@ -91,8 +91,9 @@ def test_conclude_via_page(client, seeded):
         follow_redirects=False,
     )
     resp = client.post(
-        f"/research-ledger/topics/{seeded['topic']['id']}/conclude",
-        data={"conclusion": "硬止损 1.5 成立", "grade": ""},
+        "/research-ledger/topics/conclude",
+        data={"topic_id": seeded["topic"]["id"],
+              "conclusion": "硬止损 1.5 成立", "grade": ""},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -106,3 +107,23 @@ def test_conclude_via_page(client, seeded):
 def test_experiment_detail_404(client, seeded):
     resp = client.get("/research-ledger/experiments/E9999")
     assert resp.status_code == 404
+
+
+def test_confirm_rejects_cross_site_form_post(client, seeded):
+    """loop-review R2-P2-1：Sec-Fetch-Site: cross-site 的表单 POST 被 403
+    拒绝（confirm 不可逆——CSRF 补充防线，与 SameSite=Lax 互补）。"""
+    resp = client.post(
+        f"/research-ledger/experiments/{seeded['exp']['id']}/confirm",
+        data={"final_verdict": "confirmed", "reasoning": "x"},
+        headers={"Sec-Fetch-Site": "cross-site"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 403
+    # 同源表单不受影响
+    resp2 = client.post(
+        f"/research-ledger/experiments/{seeded['exp']['id']}/confirm",
+        data={"final_verdict": "confirmed", "reasoning": "证据充分"},
+        headers={"Sec-Fetch-Site": "same-origin"},
+        follow_redirects=False,
+    )
+    assert resp2.status_code == 303

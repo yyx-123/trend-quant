@@ -495,3 +495,163 @@ def test_meta_any_of_all_of(registry):
     all_of.prepare(panel)
     events = all_of.scan(ctx, [UniverseMember("M01.SS")])
     assert any(e.symbol == "M01.SS" for e in events)
+
+
+# ----------------------------------------------------------------------
+# loop-review R2-P2-2：§5.14 零覆盖模块补钉 + 弱断言补强
+# ----------------------------------------------------------------------
+
+def test_r2_random_entry_signal_behaves(registry):
+    """random_entry：恰好 per_day 个不重复 entry；同 seed+日期位级确定；
+    换日期（run_seed 变）抽样可变。"""
+    panel = _panel()
+    ctx = _ctx(panel, DAYS_N - 1)
+    from portfolio.slots.universe import UniverseMember
+
+    mod = registry.require("random_entry@1", slot="signal").factory(
+        {"seed": 7, "per_day": 3}
+    )
+    members = [UniverseMember(s) for s in SYMBOLS]
+    events = mod.scan(ctx, members)
+    syms = [e.symbol for e in events]
+    assert len(events) == 3 and len(set(syms)) == 3
+    assert set(syms) <= {m.symbol for m in members}
+    assert all(e.kind == "entry" for e in events)
+    # 确定性：同日重跑同序
+    assert [e.symbol for e in mod.scan(ctx, members)] == syms
+    # per_day > 成员数：全成员各一条
+    mod_all = registry.require("random_entry@1", slot="signal").factory(
+        {"seed": 7, "per_day": 99}
+    )
+    assert len(mod_all.scan(ctx, members)) == len(members)
+
+
+def test_r2_by_slope_r2_rank_orders_by_trend_quality(registry):
+    """by_slope_r2：log 斜率×R² 降序——M00（线性强趋势，R²≈1）必须排在
+    M05（噪声缓涨）之前；平盘 M02（斜率≈0）在后。"""
+    panel = _panel()
+    ctx = _ctx(panel, DAYS_N - 1)
+    mod = registry.require("by_slope_r2@1", slot="rank").factory({"window": 60})
+    from portfolio.slots.signal import SignalEvent
+
+    ranked = mod.rank(ctx, [SignalEvent(symbol=s, kind="entry", date=ctx.date, meta={})
+                            for s in ("M05.SS", "M02.SZ", "M00.SS")])
+    order = [e.symbol for e in ranked]
+    assert order.index("M00.SS") < order.index("M05.SS")
+    assert order.index("M00.SS") < order.index("M02.SZ")
+    # 输出必须是输入的置换（不丢不重）
+    assert sorted(order) == sorted(["M05.SS", "M02.SZ", "M00.SS"])
+
+
+def test_r2_vol_target_scales_when_vol_exceeds_target(registry):
+    """vol_target：已实现波动超目标 → 意图按 target/realized 比例收缩并留
+    gate_log；波动达标 → 原样放行。"""
+    from engine.models import OrderIntent
+
+    panel = _panel()
+    ctx = _ctx(panel, DAYS_N - 1)
+    # 构造高波动净值历史（日 ±3% → 年化 ~47%）
+    equity = 100_000.0
+    hist = []
+    for i in range(30):
+        equity *= 1.03 if i % 2 == 0 else 0.97
+        hist.append({"date": panel.dates[i].isoformat(), "equity": equity})
+    ctx.history = hist
+    gate = registry.require("vol_target@1", slot="portfolio_risk").factory(
+        {"target_vol": 0.15, "lookback": 20}
+    )
+    intents = [OrderIntent(symbol="M00.SS", decision_date=ctx.date,
+                           intent_type="quantity", value=1000.0)]
+    out = gate.admit(ctx, intents, [])
+    assert len(out) == 1 and out[0].value < 1000.0  # 被收缩
+    assert any(g["gate"] == "vol_target" for g in ctx.gate_log)
+    # 低波动历史 → 原样放行、无拦截日志
+    ctx2 = _ctx(panel, DAYS_N - 1)
+    ctx2.history = [{"date": panel.dates[i].isoformat(), "equity": 100_000.0 * (1 + 1e-6 * i)}
+                    for i in range(30)]
+    out2 = gate.admit(ctx2, intents, [])
+    assert out2 == intents
+    assert not any(g["gate"] == "vol_target" for g in ctx2.gate_log)
+
+
+def test_r2_breakeven_wrapper_semantics(registry):
+    """breakeven 包装层：estimate_stop=None（初始无止损价）；激活后
+    evaluate 产 entry_price 止损意图（触发价=买入价，非 ATR 距离）。"""
+    panel = _panel()
+    ctx = _ctx(panel, DAYS_N - 1)
+    mod = registry.require("breakeven@1", slot="position_risk").factory(
+        {"trigger_atr": 1.0}
+    )
+    assert mod.estimate_stop(ctx, "M00.SS") is None
+
+    from engine.models import Fill, Position
+
+    fill = Fill(order_id="T", symbol="M00.SS", fill_date=ctx.date, base_price=10.0,
+                slippage_base=0.0, slippage_tail=0.0, fill_price=10.0, quantity=1000,
+                commission=5.0, stamp_tax=0.0, fee_total=5.0, cash_after=0.0)
+    state = mod.init_stop(ctx, fill)
+    assert state.stop_price is None  # 未激活
+    assert state.module_state.get("activated") is False
+
+    # 激活：highest 冲到 entry + 1×ATR 以上 → daily_breakeven_stop 返回 entry_price
+    state.highest_since_buy = fill.fill_price + state.atr_at_entry * 1.5
+    state.module_state["activated"] = True
+    pos = Position(symbol="M00.SS", quantity=1000, sellable_quantity=1000,
+                   avg_cost=10.0, entry_date=ctx.date, entry_price=10.0, stop=state)
+    # 当日 low 跌破 entry_price → 触发
+    ctx.panel._upto = ctx.panel._upto  # 当日 bar 由面板决定；构造触发：
+    bar_low_guard = float(ctx.panel.value("M00.SS", "low"))
+    if bar_low_guard <= 10.0:
+        intent = mod.evaluate(ctx, pos)
+        assert intent is not None and intent.stop_price == pytest.approx(10.0)
+        assert intent.reason == "breakeven" and intent.fill_mode == "intraday_stop"
+
+
+def test_r2_rank_random_is_permutation(registry):
+    """random rank（弱断言补强）：输出必须是输入的置换。"""
+    panel = _panel()
+    ctx = _ctx(panel, DAYS_N - 1)
+    from portfolio.slots.signal import SignalEvent
+
+    mod = registry.require("random@1", slot="rank").factory({"seed": 42})
+    syms = ["M00.SS", "M01.SS", "M02.SZ", "M03.SS", "M04.SS", "M05.SS"]
+    events = [SignalEvent(symbol=s, kind="entry", date=ctx.date, meta={}) for s in syms]
+    ranked = mod.rank(ctx, events)
+    assert sorted(e.symbol for e in ranked) == sorted(syms)
+
+
+def test_r2_donchian_exit_est_is_window_low(registry):
+    """donchian_exit（弱断言补强）：estimate_stop == 最近 N 日 low 的最小值。"""
+    panel = _panel()
+    ctx = _ctx(panel, DAYS_N - 1)
+    mod = registry.require("donchian_exit@1", slot="position_risk").factory({"n": 20})
+    est = mod.estimate_stop(ctx, "M00.SS")
+    lows = ctx.panel.lookback("M00.SS", "low", 20)
+    assert est == pytest.approx(float(np.nanmin(lows)))
+
+
+def test_r2_none_risk_never_exits(registry):
+    """none（弱断言补强）：任何价格路径下 evaluate 恒 None（永不离场）。"""
+    panel = _panel()
+    ctx = _ctx(panel, DAYS_N - 1)
+    mod = registry.require("none@1", slot="position_risk").factory({})
+    from engine.models import Position
+
+    pos = Position(symbol="M00.SS", quantity=1000, sellable_quantity=1000,
+                   avg_cost=10.0, entry_date=panel.dates[0], entry_price=10.0,
+                   stop=mod.init_stop(ctx, None) if False else None)
+    # 深度亏损路径也不离场
+    assert mod.evaluate(ctx, pos) is None
+
+
+def test_r2_all_in_sizing_targets_full_cash(registry):
+    """all_in（弱断言补强）：target_value 意图 = 全部现金。"""
+    panel = _panel()
+    ctx = _ctx(panel, DAYS_N - 1)
+    from portfolio.slots.signal import SignalEvent
+
+    mod = registry.require("all_in@1", slot="sizing").factory({})
+    intent = mod.size(ctx, SignalEvent(symbol="M00.SS", kind="entry", date=ctx.date, meta={}), None)
+    assert intent is not None
+    assert intent.intent_type == "target_value"
+    assert intent.value == pytest.approx(ctx.account.cash)

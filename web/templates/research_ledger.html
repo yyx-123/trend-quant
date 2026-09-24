@@ -26,9 +26,15 @@
 
   <details>
     <summary>关题（人工，平台量化摘要先行、分级可降不可升）</summary>
-    <form method="post" action="/research-ledger/topics/T001/conclude"
-          onsubmit="this.action = '/research-ledger/topics/' + this.topic_id.value + '/conclude'">
-      <input name="topic_id" placeholder="课题 id（如 T001）" required>
+    {# R2-P3-6：每行独立小表单（服务端渲染 action）——不再用客户端 JS 拼
+       URL，JS 失效时不会把结论误提交给硬编码课题 #}
+    <form method="post" action="/research-ledger/topics/conclude" style="margin:0.5em 0">
+      <select name="topic_id" required>
+        <option value="">— 选择 open 课题 —</option>
+        {% for t in topics %}{% if t.status == "open" %}
+        <option value="{{ t.id }}">{{ t.id }} {{ t.title }}</option>
+        {% endif %}{% endfor %}
+      </select>
       <input name="conclusion" placeholder="结论（必填）" required style="width:24em">
       <select name="grade">
         <option value="">（平台建议）</option>
@@ -38,6 +44,15 @@
         <option value="insufficient-evidence">insufficient-evidence</option>
       </select>
       <button type="submit">关题</button>
+    </form>
+  </details>
+
+  <details>
+    <summary>holdout 放行（人工；token 一次性，触碰样本外窗口必留痕）</summary>
+    <form method="post" action="/research-ledger/holdout/grant" style="margin:0.5em 0">
+      <input name="purpose" placeholder="用途（如：某策略线最终候选验证）" required style="width:24em">
+      <input name="experiment_id" placeholder="绑定实验 id（可选，如 E0042）">
+      <button type="submit">发放 token</button>
     </form>
   </details>
 

@@ -31,8 +31,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 def _arg_value(flag: str):
+    """读 --db <value>；值缺失（末位无值）直接报错退出——静默回退默认库
+    会把运行产物写进生产库（loop-review R2-P3-8）。"""
     for i, arg in enumerate(sys.argv):
-        if arg == flag and i + 1 < len(sys.argv):
+        if arg == flag:
+            if i + 1 >= len(sys.argv) or sys.argv[i + 1].startswith("--"):
+                raise SystemExit(f"{flag} requires a value (refusing to fall back to default db)")
             return sys.argv[i + 1]
     return None
 

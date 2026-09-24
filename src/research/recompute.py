@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import json
 
+from audit.app_logger import get_logger
+
 from research import evaluations, lifecycle, verdict
 from research.ledger import loads
+
+logger = get_logger(__name__)
 
 
 def _rewrite_module_ref(obj, old_ref: str, new_ref: str):
@@ -162,7 +166,12 @@ def recompute_campaign(
                     holdout_touched=bool(r.get("holdout_touched")),
                 )
             except Exception:
-                pass  # 血缘补录失败不影响复核结论（runs 行非判定输入）
+                # 血缘补录失败不影响复核结论（runs 行非判定输入），但必须
+                # 可见——静默吞掉会连 window_kind 非法这类真实错误一起藏
+                logger.warning(
+                    "recompute: research_runs backfill failed for %s", exp_id,
+                    exc_info=True,
+                )
         recomputed.append({"id": exp_id, "verdict_id": v["id"]})
     return {
         "old": old_module_ref, "new": new_module_ref,

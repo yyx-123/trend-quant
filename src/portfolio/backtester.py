@@ -554,8 +554,11 @@ def _round_trips_enriched(trades: list[dict], panel) -> list[dict]:
         exit_price = float(t["price"])
         pnl = qty * (exit_price - entry_price)
         atr_e = 0.0
+        # close 先 ffill（R2-P3-12：与 _precompute_atr 同口径——跨停牌入场
+        # 窗时 TR 含复牌跳空，r_multiple 分母不再被低估）
+        closes_ffill = pd.Series(close[: e_idx + 1, col]).ffill().to_numpy(dtype=float)
         df = pd.DataFrame({"high": high[: e_idx + 1, col], "low": low[: e_idx + 1, col],
-                           "close": close[: e_idx + 1, col]})
+                           "close": closes_ffill})
         a = core_atr(df, 20)
         if len(a) and np.isfinite(a.iloc[-1]):
             atr_e = float(a.iloc[-1])
