@@ -1,0 +1,12 @@
+{
+  "etf_scanned": 1840,
+  "etf_with_history": 1720,
+  "etf_qualify_5000w": 694,
+  "themes_total": 592,
+  "themes_with_qualify": 322,
+  "theme_representatives": 592,
+  "delisted_etf": 126,
+  "delisted_etf_qualify": 5,
+  "threshold_yi": 0.5,
+  "report_first_year": 2013
+}

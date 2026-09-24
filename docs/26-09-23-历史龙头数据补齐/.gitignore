@@ -1,0 +1,6 @@
+# 本目录约定：大体积 / 可由脚本从数据源重新拉取的中间产物不入库，
+# 结论性清单（universe_*.csv、etf_universe.csv、increment_*.txt、tushare_*listed.csv 等）照常入库。
+__pycache__/
+
+# Tushare index_weight 原始分片（13M；重跑 fetch_tushare_index_members.py 即可再生）
+data/tushare_index_raw/
