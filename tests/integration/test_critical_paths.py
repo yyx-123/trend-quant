@@ -236,4 +236,10 @@ def test_v1_sample_acceptance_artifacts():
     for sid in ("base-v1", "bench-buy-hold-csi300", "bench-60-40", "bench-random-entry"):
         assert sid in data["results"]
         assert data["results"][sid]["nav"], f"{sid} 缺 NAV 曲线"
+        # R5A-1：§7.1 性能预算（5y×874 ≤2min）的自动化守护——产物已带
+        # elapsed_s，补断言使"预算被悄然击穿"有信号（10 年窗口以 240s
+        # 为守护线：§7.1 的 120s 是 5 年窗口口径，10 年按比例放宽）
+        elapsed = data["results"][sid].get("elapsed_s")
+        assert elapsed is not None, f"{sid} 缺 elapsed_s（产物过旧，重跑 sample 脚本）"
+        assert elapsed <= 240, f"{sid} 耗时 {elapsed}s 超出性能预算守护线 240s"
     assert "base_v1_vs_benchmarks" in data
