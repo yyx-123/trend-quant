@@ -110,7 +110,11 @@ class AccountView:
 
     @property
     def positions(self):
-        return self._account.positions
+        # R4B-2：只读视图契约——返回 Mapping 代理，模块 .clear()/乱插
+        # Position 直改引擎账户的路径被 TypeError 掐断（读用法不受影响）
+        from types import MappingProxyType
+
+        return MappingProxyType(self._account.positions)
 
     def equity(self) -> float:
         return self._account.equity(self.close_prices)

@@ -55,6 +55,8 @@ scripts/temp/
 exports/
 # 投研基建运行产物（回测报告/对比数据）
 data/research/
+# 课题文件夹（平台从台账生成、可再生成；R4B-1——若改为入库阅读面需经用户定夺）
+research/topics/
 # SQLite WAL 侧文件（只读连接也会产生，不跟踪）
 data/*.db-shm
 data/*.db-wal

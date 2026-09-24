@@ -291,3 +291,47 @@ def _to_yaml(data) -> str:
     import yaml as _yaml
 
     return _yaml.safe_dump(data, allow_unicode=True)
+
+
+# ----------------------------------------------------------------------
+# Round 4 钉子（R4A/R4B 确认轮发现）
+# ----------------------------------------------------------------------
+
+def test_cost_drag_gross_pnl_not_double_counted():
+    """R4-P3-1：pnl_gross 已是费前毛利——gross_pnl_before_fees 不得再加
+    一遍 total_fee（旧实现 100 毛利+12 费被虚报成 112）。"""
+    from portfolio.reports import cost_drag
+
+    fills = [
+        {"symbol": "X.SS", "side": "buy", "fill_date": "2024-01-01",
+         "fill_price": 10.0, "quantity": 100, "fee_total": 5.0},
+        {"symbol": "X.SS", "side": "sell", "fill_date": "2024-02-01",
+         "fill_price": 11.0, "quantity": 100, "fee_total": 7.0},
+    ]
+    out = cost_drag(fills)
+    assert out["gross_pnl_before_fees"] == pytest.approx(100.0)
+    assert out["total_fees"] == pytest.approx(12.0)
+    assert out["cost_to_gross"] == pytest.approx(0.12)
+
+
+def test_account_view_positions_is_read_only():
+    """R4B-2：AccountView.positions 是只读映射——clear/写入被 TypeError
+    拒绝（读用法 in/len/迭代/取项不受影响）。"""
+    from datetime import date
+
+    from engine.models import Account, Position
+    from portfolio.context import AccountView
+
+    account = Account(cash=1.0)
+    account.positions["X.SS"] = Position(
+        symbol="X.SS", quantity=1, sellable_quantity=1, avg_cost=1.0,
+        entry_date=date(2024, 1, 1), entry_price=1.0)
+    view = AccountView(account, {})
+    assert "X.SS" in view.positions and len(view.positions) == 1
+    # mappingproxy 不暴露变更方法（AttributeError），下标写入抛 TypeError
+    with pytest.raises((TypeError, AttributeError)):
+        view.positions.clear()
+    with pytest.raises((TypeError, AttributeError)):
+        view.positions["Y.SS"] = account.positions["X.SS"]
+    with pytest.raises(TypeError):
+        view.positions["X.SS"] = None

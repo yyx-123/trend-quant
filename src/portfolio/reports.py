@@ -129,7 +129,9 @@ def cost_drag(fills: list[dict]) -> dict:
     gross_pnl = sum(r["pnl_gross"] for r in rounds)
     return {
         "total_fees": total_fee,
-        "gross_pnl_before_fees": gross_pnl + total_fee,
+        # R4-P3-1：pnl_gross 本身就是费前毛利（pair_round_trips 的毛价差），
+        # 此前再加一遍 total_fee 使"费前毛利"系统性虚高
+        "gross_pnl_before_fees": gross_pnl,
         "cost_to_gross": (total_fee / gross_pnl) if gross_pnl > 0 else None,
     }
 
