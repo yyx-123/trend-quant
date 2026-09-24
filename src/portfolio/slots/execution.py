@@ -397,7 +397,22 @@ def register_execution_modules(registry=REGISTRY) -> None:
 
 
 def register_meta_modules(registry=REGISTRY) -> None:
-    """any_of / all_of（成员清单是参数的一部分——增删成员 = 单槽 diff）。"""
+    """any_of / all_of（成员清单是参数的一部分——增删成员 = 单槽 diff）。
+
+    §5.2.8"全插槽通用"（loop-review R3B-P2-1 落实）：此前只注册了
+    signal/position_risk 两槽，跨槽引用（如 universe: any_of@1）在载入期被
+    meta 豁免放行、实例化拿到错误槽的工厂——日循环首日才 AttributeError。
+    现七槽全部注册（无成员语义的槽用显式拒绝工厂兜底），strategy 层取消
+    meta 的跨槽豁免，并对五槽 meta 引用在载入期直接拒绝（R3VA 复验强化）。
+    """
+    def _unsupported(slot_name):
+        def _factory(params):
+            raise ValueError(
+                f"any_of/all_of members are not supported for slot {slot_name} "
+                "(meta modules apply to event/condition slots; see §5.2.8)"
+            )
+        return _factory
+
     registry.register(ModuleSpec(
         slot="signal", name="any_of", version=1,
         factory=lambda p: AnyOfSignal(p, registry),
@@ -416,3 +431,15 @@ def register_meta_modules(registry=REGISTRY) -> None:
         params_schema={"members": {"type": "list", "required": True}},
         kind="builtin", description="止损组合默认语义（谁先到谁触发）",
     ))
+    # 其余槽：注册占位——保证 `registry.get(meta, slot=X)` 命中本槽 spec；
+    # 五槽的 meta 引用在 strategy 载入期即被"not supported for this slot"
+    # 拒绝（R3VA 复验强化），拒绝工厂仅作直调兜底
+    for _slot in ("universe", "rank", "sizing", "portfolio_risk", "execution"):
+        for _name in ("any_of", "all_of"):
+            registry.register(ModuleSpec(
+                slot=_slot, name=_name, version=1,
+                factory=_unsupported(_slot),
+                params_schema={"members": {"type": "list", "required": True}},
+                kind="builtin",
+                description=f"{_name} 不支持 {_slot} 槽（实例化即拒绝）",
+            ))

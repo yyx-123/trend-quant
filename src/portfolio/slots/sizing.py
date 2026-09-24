@@ -133,7 +133,10 @@ def register_sizing_modules(registry=REGISTRY) -> None:
         slot="sizing", name="target_weight", version=1, factory=TargetWeightSizing,
         params_schema={
             "weights": {"type": "dict"},
-            "mode": {"type": "string", "choices": ["equal", "explicit"]},
+            # R3B-P3-4：mode 缺省行为（weights 空时 equal）此前只在工厂内
+            # 隐式成立——schema 显式声明 default，参数域契约不再漂移
+            "mode": {"type": "string", "choices": ["equal", "explicit"],
+                     "default": "equal"},
             "members_count": {"type": "integer", "min": 1},
         },
         description="目标权重（显式表 / 成员均分）",

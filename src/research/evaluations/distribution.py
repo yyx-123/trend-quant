@@ -63,8 +63,17 @@ def run_distribution(db, experiment: dict, ctx: dict) -> dict:
     )
 
     symbols = resolve_universe_symbols(db, spec.get("universe"))
+    # F3（R3A）口径声明：distribution 的 liquidity_default **不做流动性过滤**
+    # ——详设 §6.5.4 定义本模块为"全市场池化分布统计"，与 event/bucket 的
+    # 可交易池口径不同是设计语义（标定结论按全池分布给出）
+    distribution_pool_note = (
+        "distribution pool = 全市场（liquidity_default 不做流动性过滤——全池化口径，§6.5.4）"
+        if spec.get("universe") in (None, "liquidity_default") else None
+    )
+    panel_warnings: list[str] = []
     panel = load_eval_panel(
         db, symbols=symbols, start=start, end=end, experiment_id=experiment["id"],
+        warnings_out=panel_warnings,
     )
     matrix = _feature_matrix(panel, metric)
     start_day, end_day = pd.Timestamp(start).date(), pd.Timestamp(end).date()
@@ -103,7 +112,9 @@ def run_distribution(db, experiment: dict, ctx: dict) -> dict:
     # 标定建议：调用方在 spec.criterion 里声明判断准则（文本），平台不臆造
     calibration_note = spec.get("criterion") or "（未声明判断准则，供后续实验引用）"
 
-    warnings = ["survivorship_bias(universe 为当前池穿越历史)"]
+    warnings = ["survivorship_bias(universe 为当前池穿越历史)", *panel_warnings]
+    if distribution_pool_note:
+        warnings.append(distribution_pool_note)
     # 长窗口三注记按窗口生效（DS-复审-R2 §4-1：不只 backtest 路径）
     warnings.extend(long_window_annotations(start))
 

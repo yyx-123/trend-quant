@@ -34,7 +34,7 @@
 | R1-P2-7 is_reproduction 守卫缺口 | `data/storage/db.py`：guard trigger WHEN 补 `OLD.is_reproduction <> NEW.is_reproduction`；改为 `DROP TRIGGER IF EXISTS` + `CREATE TRIGGER`（定义修订可传播到存量库，注释说明机制） | `test_loop_review_r1.py::test_is_reproduction_guarded_by_trigger`（真 SQL 直改被 IntegrityError ABORT） |
 | R1-P2-8 冻结门前移浪费 | `core/jobs.py`：非交易日判断移到冻结门之前（`_daily_market_update_job_locked` 内顺序调整） | `test_core_jobs.py` 既有回归 + 验收代理复核 |
 
-## P3 择修（19 项）
+## P3 择修（22 项计划、实修 20 项——R1-P3-3 并入 R1-P1-1 修复、R1-P3-9 转待决策后于验收阶段以 importorskip 直接修复）
 
 R1-P3-1（HeatCapGate 死代码→unstopped 逐标的落 gate_log + backtester 告警下钻 any_of 成员）、
 R1-P3-2（buffered_rotation max_swaps 生效）、R1-P3-3（rebalance_band docstring 对齐）、

@@ -120,6 +120,26 @@ CREATE TABLE IF NOT EXISTS engine_runs (
     status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','finished','failed')),
     error TEXT
 );
+
+-- engine_runs 白名单守卫（loop-review R3B-P3-10）：resolved_config_yaml 是
+-- §5.6 可复现性的落库锚点，与 research 栈证据表同制——内容字段禁改，
+-- 可改仅 status/finished_at/error（finish_run/lifecycle 收口所需）。
+-- DROP+CREATE 使定义修订传播到存量库（同 is_reproduction 整改注记）。
+DROP TRIGGER IF EXISTS trg_engine_runs_guard_update;
+CREATE TRIGGER trg_engine_runs_guard_update
+BEFORE UPDATE ON engine_runs
+WHEN OLD.run_id <> NEW.run_id
+  OR OLD.kind <> NEW.kind
+  OR OLD.strategy_ref <> NEW.strategy_ref
+  OR OLD.config_hash <> NEW.config_hash
+  OR OLD.resolved_config_yaml <> NEW.resolved_config_yaml
+  OR OLD.run_params_json <> NEW.run_params_json
+  OR OLD.data_version <> NEW.data_version
+  OR OLD.engine_version <> NEW.engine_version
+  OR OLD.git_hash <> NEW.git_hash
+  OR OLD.started_at <> NEW.started_at
+BEGIN SELECT RAISE(ABORT, 'engine_runs content is append-only'); END;
+
 CREATE INDEX IF NOT EXISTS idx_engine_runs_status ON engine_runs(status, started_at);
 
 CREATE TABLE IF NOT EXISTS engine_orders (

@@ -20,7 +20,7 @@
 | R2-P2-2 §5.14 模块覆盖缺口 | `test_module_behaviors.py` 新增 4 钉：random_entry（数量/去重/确定性/per_day 上限）、by_slope_r2（趋势质量排序+置换性）、vol_target（超目标收缩+gate_log、达标放行）、breakeven（包装层 estimate=None/激活/触发价=买入价）；补强 4 处弱断言：random rank 置换性、donchian 数值锁窗最小值、none 永不离场、all_in=全部现金 | 同左（`test_r2_*` 8 项） |
 | R2-P2-3 psr_sortino 零 golden | `test_loop_review_r2.py::test_psr_sortino_golden_and_property`：固定序列独立公式重算锚（NormalDist 参考实现）+ 代数性质（Sortino=基准 → 0.5） | 同左 |
 
-## P3 修复（10 项）
+## P3 修复（计划 10 项、实修 12 项——复审时标记录在案的 R2-P3-12/14 一并落实）
 
 | 项 | 修复落点 |
 |---|---|

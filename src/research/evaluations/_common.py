@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+from audit.app_logger import get_logger
+
+_logger = get_logger(__name__)
+
 from datetime import datetime, time
 from typing import Any
 
@@ -46,6 +50,7 @@ def load_eval_panel(
     end,
     experiment_id: str,
     min_amount20: float | None = None,
+    warnings_out: list | None = None,
 ):
     """经 L1.5 取评估面板（caller_layer=research，血缘挂在实验 id 上）。
 
@@ -54,20 +59,30 @@ def load_eval_panel(
     """
     gateway = Gateway(db)
     as_of = datetime.combine(pd.Timestamp(end).date(), time(15, 0))
-    # 垫片 300 自然日 ≈ 200 交易日（DS-复审-R2 §4-2：regime 标签/条件掩码要
-    # SMA200（min_periods=200），120 日垫片会让窗口前 ~118 个交易日的 regime
-    # 判定静默不可用）
-    pad_start = (pd.Timestamp(start) - pd.Timedelta(days=300)).date()
+    # 垫片 320 自然日（R3A-F4：A 股节假日密集段 300 自然日仅 194~205 交易日，
+    # 8/12 抽样窗口起点不足 SMA200 预热——320 保证全部抽样起点 ≥ 200 交易日；
+    # DS-复审-R2 §4-2 的预热诉求不变）
+    pad_start = (pd.Timestamp(start) - pd.Timedelta(days=320)).date()
     panel = gateway.get_panel(
         symbols=symbols, start=pad_start, end=end,
         fields=["open", "high", "low", "close", "volume", "amount"],
         adjust="qfq", as_of=as_of, mode="historical",
         caller_layer="research", run_id=experiment_id,
     )
+    liquidity_warn = None
     if min_amount20 is not None and panel.dates:
         # 流动性过滤：窗口起点前的 20 日成交额均值（评估口径的可交易池）
         start_day = pd.Timestamp(start).date()
         pre_idx = [i for i, d in enumerate(panel.dates) if d < start_day][-20:]
+        # F2（R3A）：垫片期数据不足（窗口起点即数据集起点等）时过滤会
+        # 静默失效——此前 `if pre_idx:` 直接跳过，低流动性标的原样入池。
+        # 现显式告警（不 fail-loud：评估仍可跑，但口径缩水必须可见）。
+        if len(pre_idx) < 20:
+            liquidity_warn = (
+                f"liquidity filter not fully applied: only {len(pre_idx)}/20 "
+                f"pre-window trading days available before {start} "
+                f"(pad/数据集起点限制)——低流动性标的可能未被剔除"
+            )
         if pre_idx:
             mean_amount = np.nanmean(panel.data["amount"][pre_idx, :], axis=0)
             keep = [
@@ -76,6 +91,10 @@ def load_eval_panel(
             ]
             if keep:
                 panel = _subset_panel(panel, keep)
+    if liquidity_warn:
+        _logger.warning("load_eval_panel: %s", liquidity_warn)
+        if warnings_out is not None:
+            warnings_out.append(liquidity_warn)
     gateway.flush_audit()
     return panel
 

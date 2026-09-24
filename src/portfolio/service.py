@@ -103,5 +103,10 @@ def run_backtest(
         market_profile=str(params.get("market_profile", "cn_stock")),
         strategy_ref=strategy_ref,
         run_params=params,
-        window_kind=str(params.get("window_kind", "sample")),
+        window_kind=(
+            # R3B-P3-9：L3 侧同样卡枚举——直调 L3 不再把任意字符串写进
+            # engine_runs 血缘（枚举真源与 research_runs CHECK 一致）
+            lambda wk: wk if wk in ("sample", "holdout", "plateau_probe")
+            else (_ for _ in ()).throw(ValueError(f"invalid window_kind: {wk!r}"))
+        )(str(params.get("window_kind", "sample"))),
     )

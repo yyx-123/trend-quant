@@ -270,11 +270,23 @@ def load_reviewed_modules(db, registry) -> int:
                 "reviewed module %s (draft %s) failed to load; skipped", ref, draft["id"]
             )
             continue
-        registry.register(ModuleSpec(
-            slot=draft["slot"], name=draft["name"], version=draft["version"],
-            factory=factory, params_schema=draft["params_schema"],
-            kind=draft["kind"], draft_id=draft["id"],
-            description=f"AI-proposed {draft['kind']} module",
-        ))
+        try:
+            # replace=True（R3B-P3-11）：与内置/已装载模块撞 name@version 时
+            # 幂等覆盖（同草稿重装载），而不是 ModuleRegistrationError 打穿
+            # 装载循环；replace=True 保留——reviewed 草稿的注册即最新评审态
+            registry.register(ModuleSpec(
+                slot=draft["slot"], name=draft["name"], version=draft["version"],
+                factory=factory, params_schema=draft["params_schema"],
+                kind=draft["kind"], draft_id=draft["id"],
+                description=f"AI-proposed {draft['kind']} module",
+            ), replace=True)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "reviewed module %s (draft %s) failed to register; skipped",
+                ref, draft["id"],
+            )
+            continue
         loaded += 1
     return loaded

@@ -149,10 +149,12 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
         bm = str(context_filter["benchmark"]).upper()
         if bm not in symbols:
             symbols = [*symbols, bm]
+    panel_warnings: list[str] = []
     panel = load_eval_panel(
         db, symbols=symbols, start=start, end=end,
         experiment_id=experiment["id"],
         min_amount20=DEFAULT_MIN_AMOUNT20 if liquidity_default else None,
+        warnings_out=panel_warnings,
     )
 
     # 事件扫描：signal 模块双重身份（§6.1.3）——同一份代码定义事件
@@ -210,6 +212,14 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
         if bm_col is None:
             raise ValueError(f"context_filter benchmark not in panel: {bm}")
         bm_close = panel.data["close"][:, bm_col]
+        # F1（R3A）：gateway 对无数据标的保留全 NaN 列——bm_col 命中不代表
+        # benchmark 有数据；全 NaN 时 cf_mask 全 False → 全部事件被静默剔除
+        # 成"假 inconclusive"。真 fail-loud 在此。
+        if not np.isfinite(bm_close).any():
+            raise ValueError(
+                f"context_filter benchmark {bm} has no data in window "
+                f"(events would be silently dropped to a fake inconclusive)"
+            )
         bm_ma = pd.Series(bm_close).rolling(200, min_periods=200).mean().to_numpy()
         with np.errstate(all="ignore"):
             above = bm_close > bm_ma
@@ -243,6 +253,9 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
                 continue
             if context_filter and not cf_mask[ev_t]:
                 continue
+            # F6（R3A）口径声明：去重键 (symbol, 事件日) 不含 kind——
+            # event_side="both" 时同日 entry+exit 只计 1 次（同日前瞻收益相同，
+            # 统计上无差）
             key = (ev.symbol, ev_day.isoformat())
             if key in seen_events:
                 continue
@@ -342,6 +355,7 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
         regimes=regimes_in_events,
     )
     warnings.extend(long_window_annotations(start))
+    warnings.extend(panel_warnings)  # F2（R3A）：流动性过滤缩水进 evidence
     # regime 预热透明度（DS-复审-R2 §4-2）：SMA200 预热不足的窗口前段，
     # regime 标签为 unknown / 条件掩码为 False 的事件被排除——必须显式可见，
     # 不能静默丢样本

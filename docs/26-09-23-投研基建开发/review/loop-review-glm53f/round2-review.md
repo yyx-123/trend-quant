@@ -36,7 +36,7 @@
 - 事实（主审亲自复核确认）：confirm/conclude/holdout-grant 是全站仅有的三个不带 `/api/` 的变更 POST，仅靠 SameSite=Lax（Chrome Lax+POST 2 分钟豁免窗口）；confirm 不可逆（final 落定后库触发器拒改）。
 - 修复：三个端点拒收 `Sec-Fetch-Site: cross-site` 的 POST（现代浏览器跨站表单必带该头，与 SameSite=Lax 互补、零 UI 改动）；钉子：带 `sec-fetch-site: cross-site` 的 POST → 403。
 
-### R2-P2-2 §5.14 承诺"每个预置模块带 golden 测试"——4 个模块零直接行为测试 + 3 处弱断言
+### R2-P2-2 §5.14 承诺"每个预置模块带 golden 测试"——4 个模块零直接行为测试 + 4 处弱断言
 - 事实（R2-C 逐模块 grep+抽读）：`random_entry`（signal）、`by_slope_r2`（rank）、`vol_target`（portfolio_risk，开发日志"四组合门"实际只有三门）、`breakeven`（position_risk 包装层）零直测；弱断言：rank `random` 未断言输出是输入的置换、`donchian_exit` 未锁数值、`none` 无"永不离场"语义钉、`all_in` 无单元钉。
 - 修复：补 4 个行为钉 + 补强 4 处弱断言（`test_module_behaviors.py`）。
 

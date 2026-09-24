@@ -105,8 +105,19 @@ def _validate_binding(
     if spec is None:
         errors.append(f"{slot}: module not registered: {module_ref}")
         return SlotBinding(module=None, params={})
-    if spec.slot != slot and spec.name not in META_MODULES:
+    # R3B-P2-1：meta 模块不再豁免跨槽检查——七槽均已注册各自的 any_of/all_of，
+    # 引用错槽的 meta 在载入期正确拒绝（此前被 registry.get 兜底 spec 骗过）
+    if spec.slot != slot:
         errors.append(f"{slot}: module {module_ref} belongs to slot {spec.slot}")
+        return SlotBinding(module=None, params={})
+    # R3VA 复验强化：any_of/all_of 语义只适用于事件/条件槽（§5.2.8）——
+    # universe/rank/sizing/portfolio_risk/execution 槽的 meta 引用在**载入期**
+    # 直接拒绝（不等实例化的 loud ValueError）
+    if name in META_MODULES and slot not in ("signal", "position_risk"):
+        errors.append(
+            f"{slot}: meta module {module_ref} is not supported for this slot "
+            "(any_of/all_of apply to signal/position_risk; see §5.2.8)"
+        )
         return SlotBinding(module=None, params={})
     params, param_errors = validate_params(spec.params_schema, raw.get("params"))
     errors.extend(f"{slot}: {e}" for e in param_errors)

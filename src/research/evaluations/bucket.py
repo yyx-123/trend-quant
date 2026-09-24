@@ -17,6 +17,7 @@ import pandas as pd
 from core.indicators import efficiency_ratio
 from portfolio.slots.universe import UniverseMember
 from research.evaluations._common import (
+    DEFAULT_MIN_AMOUNT20,
     collect_warnings,
     forward_returns,
     load_eval_panel,
@@ -54,7 +55,20 @@ def _feature_matrix(panel, feature: str) -> np.ndarray:
         out = np.full(panel.shape, np.nan)
         for col in range(panel.shape[1]):
             ser = pd.Series(close[:, col])
-            out[:, col] = efficiency_ratio(ser, 10).to_numpy(dtype=float)
+            er = efficiency_ratio(ser, 10).to_numpy(dtype=float)
+            # F5（R3A）：core 的 efficiency_ratio 对 warmup/缺口行 fillna(0)
+            # ——伪 0 值会把 IPO/复牌标的伪装成"完美无趋势"落最低桶。
+            # 此处以"最近 11 行 close 全有限"为有效性掩码（ER(10) 需要
+            # t 与 t−10 两端及路径完整），无效行恢复 NaN。
+            valid = (
+                pd.Series(np.isfinite(close[:, col]))
+                .rolling(11, min_periods=11)
+                .sum()
+                .to_numpy(dtype=float)
+                >= 11
+            )
+            out[~valid, col] = np.nan
+            out[:, col] = np.where(valid, er, np.nan)
         return out
     raise ValueError(f"unknown feature: {feature} (supported: {FEATURES})")
 
@@ -122,9 +136,11 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
 
     symbols = resolve_universe_symbols(db, spec.get("universe"))
     liquidity_default = spec.get("universe") in (None, "liquidity_default")
+    panel_warnings: list[str] = []
     panel = load_eval_panel(
         db, symbols=symbols, start=start, end=end, experiment_id=experiment["id"],
-        min_amount20=1e8 if liquidity_default else None,
+        min_amount20=DEFAULT_MIN_AMOUNT20 if liquidity_default else None,
+        warnings_out=panel_warnings,
     )
     from portfolio.context import PanelView
 
@@ -275,6 +291,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
                 suggested = "rejected"  # 倒挂（方向反了本身也是结论）
 
     warnings = collect_warnings(event_count=len(events))
+    warnings.extend(panel_warnings)  # F2：流动性过滤缩水进 evidence
     warnings.extend(long_window_annotations(start))
 
     evidence.update({

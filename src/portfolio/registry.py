@@ -160,15 +160,35 @@ def validate_params(schema: dict[str, dict], params: dict | None) -> tuple[dict,
 
         ptype = rule.get("type", "number")
         try:
-            if ptype == "number":
-                value = float(value)
-            elif ptype == "integer":
-                value = int(value)
+            if ptype in ("number", "integer"):
+                # R3B-P3-3：布尔是 int 子类——True 会被静默当 1.0（如
+                # risk_budget_pct: true → 100% 风险预算），必须显式拒绝
+                if isinstance(value, bool):
+                    raise TypeError("boolean not allowed for numeric param")
+                if ptype == "number":
+                    value = float(value)
+                else:
+                    f = float(value)
+                    if not f.is_integer():
+                        # R3B-P3-3：integer 参数不接受非整值 float（12.7 静默
+                        # 截断成 12 是语义改变）
+                        raise ValueError(f"non-integral value for integer param: {value!r}")
+                    value = int(f)
             elif ptype == "boolean":
                 if isinstance(value, str):
-                    value = value.strip().lower() in ("1", "true", "yes", "on")
+                    # R3B-P2-2：字符串只接受两个真值集合——"bogus"/"" 此前
+                    # 静默归 False，笔误会无声改变策略语义（如 use_exit）
+                    v = value.strip().lower()
+                    if v in ("1", "true", "yes", "on"):
+                        value = True
+                    elif v in ("0", "false", "no", "off"):
+                        value = False
+                    else:
+                        raise ValueError(f"unrecognized boolean string: {value!r}")
+                elif isinstance(value, bool):
+                    pass
                 else:
-                    value = bool(value)
+                    raise ValueError(f"boolean param must be bool or string, got {type(value).__name__}")
             elif ptype == "string":
                 value = str(value)
             elif ptype in ("list", "dict"):

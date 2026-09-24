@@ -94,6 +94,12 @@ def add_version(
     strategy = get_strategy(db, strategy_id)
     if strategy is None:
         raise LibraryError(f"strategy not registered: {strategy_id}")
+    if strategy.get("retired_at"):
+        # R3B-P3-6：退役策略线显式拒绝新写入（软删除语义=不再生长；
+        # 已有版本不受影响，仍可被实验引用与回测）
+        raise LibraryError(
+            f"strategy line {strategy_id} is retired; new versions are rejected"
+        )
     if parent_version_id is not None and get_version(db, parent_version_id) is None:
         raise LibraryError(f"parent version not found: {parent_version_id}")
 

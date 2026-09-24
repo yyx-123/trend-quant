@@ -256,3 +256,38 @@ def test_mcp_write_tools_annotate_ctx_as_context():
                     )
                     checked += 1
     assert checked >= 7, f"应至少 7 个写工具带 ctx 注解，实际 {checked}"
+
+
+def test_meta_rejected_at_parse_for_unsupported_slots():
+    """R3VA 复验强化：universe/rank/sizing/portfolio_risk/execution 槽的
+    any_of/all_of 引用在**载入期**拒绝（不等实例化）。"""
+    from portfolio.registry import fresh_registry
+    from portfolio.slots import ensure_builtins
+    from portfolio.strategy import parse_strategy_yaml
+
+    ensure_builtins()
+    reg = fresh_registry()
+    from portfolio.slots import REGISTRY as BUILTIN
+
+    for spec in BUILTIN.list():
+        reg.register(spec)
+    for slot in ("universe", "rank", "sizing", "portfolio_risk", "execution"):
+        data = {
+            "name": "x", "description": "",
+            "universe": {"module": "none"}, "signal": {"module": "none"},
+            "rank": {"module": "none"}, "sizing": {"module": "none"},
+            "portfolio_risk": [], "position_risk": {"module": "none"},
+            "execution": {"module": "none"},
+        }
+        if slot == "portfolio_risk":
+            data[slot] = [{"module": "any_of@1", "params": {"members": [{"module": "hard_stop@1"}]}}]
+        else:
+            data[slot] = {"module": "any_of@1", "params": {"members": [{"module": "hard_stop@1"}]}}
+        with pytest.raises(Exception, match="not supported for this slot"):
+            parse_strategy_yaml(_to_yaml(data), reg)
+
+
+def _to_yaml(data) -> str:
+    import yaml as _yaml
+
+    return _yaml.safe_dump(data, allow_unicode=True)
