@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page">
+  <h2>实验 {{ exp.id }} <small>{{ exp.title }}</small></h2>
+  <p>
+    课题 {{ exp.topic_id }} · {{ exp.evaluation_module }} · subject {{ exp.subject_key }} ·
+    第 {{ exp.attempt_index }} 次尝试 · 状态 <b>{{ exp.status }}</b>
+    {% if exp.holdout_touched %} · <span title="触碰 holdout 必留痕">holdout 已触碰</span>{% endif %}
+  </p>
+  <p>假设：{{ exp.hypothesis }}</p>
+  <p>创建：{{ exp.created_at }}（{{ exp.owner_session }} / {{ exp.created_by }}）</p>
+
+  <h3>spec（声明式；复现 = spec 本身）</h3>
+  <pre>{{ spec_pretty }}</pre>
+
+  <h3>verdict 记录（append-only）</h3>
+  {% for v in verdicts %}
+  <section style="border:1px solid #ddd;padding:8px;margin:8px 0">
+    <p>
+      {{ v.id }} · 平台建议 <b>{{ v.suggested_verdict }}</b> ·
+      最终判定 <b>{{ v.final_verdict or "（待确认）" }}</b> · {{ v.generated_at }}
+      {% if v.supersedes %} · 复核 {{ v.supersedes }}{% endif %}
+    </p>
+    {% if v.warnings %}<p>警告：{{ v.warnings|join("；") }}</p>{% endif %}
+    {% if v.reasoning %}<p>理由：{{ v.reasoning }}</p>{% endif %}
+    <details><summary>证据</summary><pre>{{ v.evidence_pretty }}</pre></details>
+    <details><summary>完整报告</summary><pre>{{ v.report_pretty }}</pre></details>
+    {% if loop.last %}<p><a href="/research-ledger/experiments/{{ exp.id }}/report.json" download>下载完整 report.json（全量不截断）</a></p>{% endif %}
+  </section>
+  {% endfor %}
+
+  {% if exp.status == "evaluating" %}
+  <h3>确认判定（final 可降不可升；reasoning 必填）</h3>
+  <form method="post" action="/research-ledger/experiments/{{ exp.id }}/confirm">
+    <select name="final_verdict">
+      <option value="confirmed">confirmed</option>
+      <option value="inconclusive">inconclusive</option>
+      <option value="rejected">rejected</option>
+    </select>
+    <input name="reasoning" placeholder="判定理由（必填）" required style="width:32em">
+    <button type="submit">落定 verdict</button>
+  </form>
+  {% endif %}
+
+  <p><a href="/research-ledger">← 返回台账</a></p>
+</section>
+{% endblock %}

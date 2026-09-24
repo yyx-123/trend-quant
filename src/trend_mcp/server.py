@@ -332,3 +332,8 @@ def open_positions(stop_mode: str | None = None, ctx: Context = None) -> dict:
         return tr.open_positions_overview(user, stop_mode=stop_mode)
     except (tr.TradeAuthError, tr.TradePermissionError, tr.TradeRecordError) as exc:
         return {"ok": False, "error": str(exc)}
+
+# 投研基建研究工具（AI 通道；薄通道厚服务）
+from trend_mcp.research_tools import register_research_tools
+
+register_research_tools(mcp)

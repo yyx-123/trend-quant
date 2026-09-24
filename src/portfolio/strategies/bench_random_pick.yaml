@@ -1,0 +1,11 @@
+# benchmark：候选产生后随机选择——"你的 rank 槽值多少钱"（§5.5 怀疑阶梯 6）
+# 除 rank 槽外与 base-v1 逐槽一致。
+name: bench-random-pick
+description: MACD 金叉候选 + 随机排序（检验 rank 槽价值）
+universe:   {module: category_filter@1, params: {asset_type: all}}
+signal:     {module: macd_cross@1, params: {fast: 12, slow: 26, signal: 9, use_exit: false}}
+rank:       {module: random@1, params: {seed: 42}}
+sizing:     {module: equal_risk@1, params: {risk_budget_pct: 0.0075}}
+portfolio_risk: []
+position_risk: {module: hard_stop@1, params: {atr_mul: 1.5}}
+execution:  {module: tail_session@1, params: {slippage_base: 0.002, slippage_tail: 0.001}}

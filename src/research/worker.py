@@ -1,0 +1,195 @@
+"""有界并发池（详设 §2.6 决策 4/§6.7 并发隔离）。
+
+- 并发位 2~4（按机器资源配置；防的是内存/CPU 挤爆，不是防冲突——
+  并发安全靠只读锚定 + append-only 命名空间 + 无共享可变状态）；
+- FIFO：按实验 id 顺序出队；每会话并发上限防霸占；
+- 单 run 崩溃只影响自己（failed 入表），不拖垮池；
+- 全部运行经 run_freeze 冻结写任务（决策 A3）。
+- 池线程 daemon（GLM53F-P2-14）：进程退出不等在跑 run（与存量批量
+  回测 worker 同口径）；调度循环异常守卫（GLM53F-P2-9）：瞬时 SQLite
+  busy 不杀死调度线程。
+"""
+
+from __future__ import annotations
+
+import concurrent.futures.thread as _cf_thread
+import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
+from queue import Empty, Queue
+
+from audit.app_logger import get_logger
+from core import run_freeze
+from research import lifecycle
+from research.pipeline import run_experiment
+
+_logger = get_logger(__name__)
+
+
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """daemon 工作线程的 ThreadPoolExecutor（GLM53F-P2-14）。
+
+    标准库池线程非 daemon，解释器退出会 join 在跑 run（重启被长回测拖住）。
+    仅覆写 _adjust_thread_count 加 daemon=True；stdlib 内部结构变动时
+    由调用处回退到普通池（见 ResearchWorker.start）。
+    """
+
+    def _adjust_thread_count(self) -> None:
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = f"{self._thread_name_prefix or self}_{num_threads}"
+            t = threading.Thread(
+                name=thread_name, target=_cf_thread._worker, daemon=True,
+                args=(weakref.ref(self, weakref_cb),
+                      self._work_queue, self._initializer, self._initargs),
+            )
+            t.start()
+            self._threads.add(t)
+            _cf_thread._threads_queues[t] = self._work_queue
+
+
+class ResearchWorker:
+    """进程内研究 worker：从台账 queued 队列取实验执行（FIFO）。"""
+
+    def __init__(self, db, *, registry, max_workers: int = 2, per_session_cap: int = 1) -> None:
+        self.db = db
+        self.registry = registry
+        self.max_workers = max(1, min(int(max_workers), 4))
+        self.per_session_cap = max(1, int(per_session_cap))
+        self._queue: Queue[str] = Queue()
+        self._queued_ids: set[str] = set()
+        self._lock = threading.Lock()
+        self._pool: ThreadPoolExecutor | None = None
+        self._stop = threading.Event()
+        self._dispatcher: threading.Thread | None = None
+        self._active_by_session: dict[str, int] = {}
+        self._dispatch_iterations = 0  # 调度循环计数（热自旋回归钉子的观测点）
+
+    # ------------------------------------------------------------------
+    def submit(self, experiment_id: str) -> bool:
+        """入队（幂等：重复提交直接忽略）。"""
+        with self._lock:
+            if experiment_id in self._queued_ids:
+                return False
+            exp = lifecycle.get_experiment(self.db, experiment_id)
+            if exp is None or exp["status"] != "queued":
+                return False
+            self._queued_ids.add(experiment_id)
+            self._queue.put(experiment_id)
+            return True
+
+    def submit_all_queued(self) -> int:
+        n = 0
+        for exp in lifecycle.list_experiments(self.db, status="queued"):
+            if self.submit(exp["id"]):
+                n += 1
+        return n
+
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        if self._dispatcher is not None:
+            return
+        swept = lifecycle.mark_interrupted_research_runs(self.db)
+        if swept["experiments"] or swept["engine_runs"]:
+            _logger.warning("startup sweep: %s experiments, %s engine runs marked failed",
+                            swept["experiments"], swept["engine_runs"])
+        try:
+            self._pool = _DaemonThreadPoolExecutor(
+                max_workers=self.max_workers, thread_name_prefix="research"
+            )
+        except Exception:  # stdlib 私有钩子变动的兜底：退回普通池（功能不破）
+            _logger.warning("daemon pool unavailable, falling back to ThreadPoolExecutor")
+            self._pool = ThreadPoolExecutor(
+                max_workers=self.max_workers, thread_name_prefix="research"
+            )
+        self._stop.clear()
+        self._dispatcher = threading.Thread(target=self._dispatch_loop, daemon=True, name="research-dispatch")
+        self._dispatcher.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._dispatcher:
+            join = getattr(self._dispatcher, "join", None)
+            if callable(join):
+                join(timeout=5)
+            self._dispatcher = None
+        if self._pool:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+
+    # ------------------------------------------------------------------
+    def _dispatch_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                experiment_id = self._queue.get(timeout=0.5)
+            except Empty:
+                self._dispatch_iterations += 1
+                continue
+            try:
+                exp = lifecycle.get_experiment(self.db, experiment_id)
+            except Exception:
+                # GLM53F-P2-9：循环体异常守卫——一次瞬时 SQLite busy 不得
+                # 杀死调度线程（否则队列永久卡死且无告警）
+                _logger.exception("dispatch probe failed for %s", experiment_id)
+                with self._lock:
+                    self._queued_ids.discard(experiment_id)
+                self._stop.wait(0.5)
+                continue
+            if exp is None or exp["status"] != "queued":
+                with self._lock:
+                    self._queued_ids.discard(experiment_id)
+                continue
+            owner = exp["owner_session"]
+            with self._lock:
+                if self._active_by_session.get(owner, 0) >= self.per_session_cap:
+                    # 会话霸占防护：放回队尾——但立刻 requeue 会让队列里只有
+                    # 同会话实验时调度器紧循环热自旋（评审 DS-P1-4 实测 576/s），
+                    # 故在锁外退避后再续循环。
+                    self._queue.put(experiment_id)
+                    capped = True
+                else:
+                    capped = False
+                if not capped:
+                    self._active_by_session[owner] = self._active_by_session.get(owner, 0) + 1
+                    self._queued_ids.discard(experiment_id)
+            if capped:
+                self._dispatch_iterations += 1
+                self._stop.wait(0.5)
+                continue
+            assert self._pool is not None
+            self._pool.submit(self._run_one, experiment_id, owner)
+
+    def _run_one(self, experiment_id: str, owner: str) -> None:
+        try:
+            with run_freeze.frozen_writes():
+                run_experiment(self.db, experiment_id, registry=self.registry)
+        except Exception:
+            _logger.exception("worker crashed on %s", experiment_id)
+            try:
+                exp = lifecycle.get_experiment(self.db, experiment_id)
+                # GLM53F-P2-10：只收"崩溃在转移前"（仍为 queued）的孤儿——
+                # running 态可能是另一通道的在途 run，不得代为判死
+                # （跨进程互杀的收敛以单实例运行约定兜底，见开发日志）
+                if exp is not None and exp["status"] == "queued":
+                    lifecycle.transition(self.db, experiment_id, "failed", error="worker crash")
+            except Exception:
+                _logger.exception("failed to mark %s failed", experiment_id)
+        finally:
+            with self._lock:
+                self._active_by_session[owner] = max(0, self._active_by_session.get(owner, 1) - 1)
+
+    # ------------------------------------------------------------------
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "max_workers": self.max_workers,
+                "queued": self._queue.qsize(),
+                "active_by_session": dict(self._active_by_session),
+                "frozen_writes": run_freeze.is_frozen(),
+            }

@@ -1,0 +1,12 @@
+# benchmark：Faber SMA200 择时（单宽基，线上持有线下空仓）——
+# "你跑赢最简择时了吗"（§5.5 怀疑阶梯 3）
+# 事件化表达：金叉入（valid_days 窗口内）、死叉出（use_exit=true）。
+name: bench-sma200-timing
+description: Faber SMA200 择时（沪深300ETF 线上持有线下空仓）
+universe:   {module: static_list@1, params: {symbols: [510300.SS]}}
+signal:     {module: ma_cross@1, params: {n: 200, use_exit: true, valid_days: 5}}
+rank:       {module: by_freshness@1, params: {}}
+sizing:     {module: all_in@1, params: {}}
+portfolio_risk: []
+position_risk: {module: none@1, params: {}}
+execution:  {module: tail_session@1, params: {slippage_base: 0.002, slippage_tail: 0.001}}

@@ -1,0 +1,11 @@
+# 空白基准（详设 §5.5）：七插槽全 none、不产生交易。
+# 新策略实验的 diff 起点（创建型实验的 base；平台据此自动识别创建型）。
+name: blank-base
+description: 空白基准：七插槽全 none，不产生交易（创建型实验的 diff 起点）
+universe:   {module: none}
+signal:     {module: none}
+rank:       {module: none}
+sizing:     {module: none}
+portfolio_risk: []
+position_risk: {module: none}
+execution:  {module: none}

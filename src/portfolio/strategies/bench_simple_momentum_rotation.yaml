@@ -1,0 +1,12 @@
+# benchmark：简单动量轮动（黄金腿用 518850——518880 本地无数据）（20 日动量最强的 1 只宽基 ETF，月度检查）——
+# "你跑赢傻瓜动量了吗"（§5.5 怀疑阶梯 4）
+name: bench-momentum-rotation
+description: 简单动量轮动（20日动量最强的宽基ETF，月度检查门控）
+universe:   {module: static_list@1, params: {symbols: [510300.SS, 510500.SS, 159915.SZ, 518850.SS]}}
+signal:     {module: abs_momentum@1, params: {lookback: 20, top_n: 1, threshold: 0.0}}
+rank:       {module: by_momentum@1, params: {lookback: 20}}
+sizing:     {module: all_in@1, params: {}}
+portfolio_risk: []
+position_risk: {module: none@1, params: {}}
+execution:  {module: tail_session@1, params: {slippage_base: 0.002, slippage_tail: 0.001,
+              action_gate: {freq: monthly}}}

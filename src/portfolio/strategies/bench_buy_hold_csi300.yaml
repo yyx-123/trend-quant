@@ -1,0 +1,10 @@
+# benchmark：买入并持有沪深300ETF——"你跑赢躺平了吗"（§5.5 怀疑阶梯 1）
+name: bench-buy-hold-csi300
+description: 买入并持有沪深300ETF（基准策略）
+universe:   {module: static_list@1, params: {symbols: [510300.SS]}}
+signal:     {module: always_entry@1, params: {}}
+rank:       {module: by_freshness@1, params: {}}
+sizing:     {module: all_in@1, params: {}}
+portfolio_risk: []
+position_risk: {module: none@1, params: {}}
+execution:  {module: tail_session@1, params: {slippage_base: 0.002, slippage_tail: 0.001}}

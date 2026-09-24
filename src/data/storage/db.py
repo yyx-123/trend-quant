@@ -69,6 +69,428 @@ def _dt_str(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ---------------------------------------------------------------------------
+# 投研基建新栈 DDL（2026-09-23 一期，docs/26-09-20-投研基建架构/）
+#
+# 全部为新增表/触发器，对存量表零改动。覆盖：
+#   L1.5 gateway_audit（数据请求留痕）
+#   L2   engine_*（运行/订单/成交/未成交/持仓快照/净值）
+#   L3   portfolio_strategies + portfolio_strategy_versions（策略库，版本不可变）
+#        portfolio_live_lists（实盘运行器每日清单）
+#   L4   research_*（sessions/topics/experiments/runs/verdicts 台账五表 +
+#        id_seq/holdout_tokens/module_drafts）
+#
+# append-only 的落实：内容字段 UPDATE/DELETE 被触发器拒绝；生命周期字段
+# （status / final_verdict / reasoning 等）在白名单内允许更新，状态机合法性由
+# research/lifecycle.py 代码层强制。设计出处：详设 §4.1/§5.5/§6.3/§6.6.7/§6.7。
+# ---------------------------------------------------------------------------
+_RESEARCH_STACK_DDL = """
+-- ===== L1.5 数据门面层 =====
+CREATE TABLE IF NOT EXISTS gateway_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller_layer TEXT NOT NULL,          -- engine / portfolio / research / live
+    run_id TEXT,
+    method TEXT NOT NULL,                -- get_panel / get_tradability / metadata
+    as_of TEXT NOT NULL,
+    symbols_count INTEGER NOT NULL DEFAULT 0,
+    date_start TEXT,
+    date_end TEXT,
+    fields TEXT,
+    adjust TEXT,
+    mode TEXT,
+    data_version INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_gateway_audit_run ON gateway_audit(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_gateway_audit_asof ON gateway_audit(as_of, id);
+
+-- ===== L2 交易引擎层（详设 §4.1） =====
+CREATE TABLE IF NOT EXISTS engine_runs (
+    run_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('backtest','live')),
+    strategy_ref TEXT NOT NULL DEFAULT '',
+    config_hash TEXT NOT NULL DEFAULT '',
+    resolved_config_yaml TEXT NOT NULL DEFAULT '',
+    run_params_json TEXT NOT NULL DEFAULT '{}',
+    data_version INTEGER NOT NULL DEFAULT 0,
+    engine_version TEXT NOT NULL DEFAULT '',
+    git_hash TEXT NOT NULL DEFAULT '',
+    started_at TEXT DEFAULT (datetime('now','localtime')),
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','finished','failed')),
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_engine_runs_status ON engine_runs(status, started_at);
+
+CREATE TABLE IF NOT EXISTS engine_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES engine_runs(run_id),
+    order_id TEXT NOT NULL,
+    decision_date TEXT NOT NULL,
+    target_fill_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+    order_type TEXT NOT NULL DEFAULT 'tail_market',
+    intent_type TEXT NOT NULL,
+    intent_value REAL NOT NULL,
+    source TEXT NOT NULL DEFAULT 'signal',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','filled','rejected','unfilled')),
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(run_id, order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_engine_orders_run ON engine_orders(run_id, id);
+
+CREATE TABLE IF NOT EXISTS engine_fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES engine_runs(run_id),
+    order_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    fill_date TEXT NOT NULL,
+    base_price REAL NOT NULL,
+    slippage_base REAL NOT NULL DEFAULT 0,
+    slippage_tail REAL NOT NULL DEFAULT 0,
+    fill_price REAL NOT NULL,
+    quantity INTEGER NOT NULL,
+    commission REAL NOT NULL DEFAULT 0,
+    stamp_tax REAL NOT NULL DEFAULT 0,
+    fee_total REAL NOT NULL DEFAULT 0,
+    cash_after REAL NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_engine_fills_run ON engine_fills(run_id, id);
+
+CREATE TABLE IF NOT EXISTS engine_unfilled (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES engine_runs(run_id),
+    order_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    decision_date TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN
+        ('limit_up','limit_down','suspended','t1_block','insufficient_cash','lot_rounding')),
+    intent_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_engine_unfilled_run ON engine_unfilled(run_id, id);
+
+CREATE TABLE IF NOT EXISTS engine_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES engine_runs(run_id),
+    date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    sellable_quantity INTEGER NOT NULL,
+    avg_cost REAL NOT NULL DEFAULT 0,
+    entry_date TEXT,
+    entry_price REAL NOT NULL DEFAULT 0,
+    stop_price REAL,
+    highest_since_buy REAL NOT NULL DEFAULT 0,
+    atr_at_entry REAL NOT NULL DEFAULT 0,
+    module_state_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_engine_positions_unique
+    ON engine_positions(run_id, date, symbol);
+CREATE INDEX IF NOT EXISTS idx_engine_positions_run ON engine_positions(run_id, date, symbol);
+
+CREATE TABLE IF NOT EXISTS engine_daily_nav (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES engine_runs(run_id),
+    date TEXT NOT NULL,
+    cash REAL NOT NULL DEFAULT 0,
+    positions_value REAL NOT NULL DEFAULT 0,
+    equity REAL NOT NULL DEFAULT 0,
+    heat REAL,
+    exposure REAL NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(run_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_engine_daily_nav_run ON engine_daily_nav(run_id, date);
+
+-- ===== L3 组合策略层（详设 §5.3/§5.5） =====
+CREATE TABLE IF NOT EXISTS portfolio_strategies (
+    id TEXT PRIMARY KEY,                  -- 策略线 id（如 base-v1）
+    name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    is_benchmark INTEGER NOT NULL DEFAULT 0,
+    is_blank_base INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL DEFAULT 'human',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    retired_at TEXT                       -- 软删除标记，不影响已被引用的运行
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_strategy_versions (
+    id TEXT PRIMARY KEY,                  -- <strategy_id>@<version>
+    strategy_id TEXT NOT NULL REFERENCES portfolio_strategies(id),
+    version INTEGER NOT NULL,
+    config_yaml TEXT NOT NULL,
+    config_hash TEXT NOT NULL,
+    parent_version_id TEXT,
+    experiment_id TEXT,                   -- 产出它的实验（benchmark/空白基准为 NULL）
+    created_by TEXT NOT NULL DEFAULT 'human',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(strategy_id, version),
+    UNIQUE(config_hash)
+);
+
+-- 实盘运行器每日清单（详设 §5.7）：一次运行一行，清单/对账结果存 payload。
+CREATE TABLE IF NOT EXISTS portfolio_live_lists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    list_date TEXT NOT NULL,              -- 决策日（交易日）
+    strategy_version_id TEXT NOT NULL,
+    as_of TEXT NOT NULL,                  -- 取数时刻（如 2026-09-23 14:00:00）
+    engine_run_id TEXT,
+    target_json TEXT NOT NULL DEFAULT '{}',   -- 目标持仓 + 应买应卖 + 风控拦截说明
+    reconcile_json TEXT,                      -- 次日对账结果
+    reconciled_at TEXT,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(list_date, strategy_version_id)
+);
+
+-- ===== L4 投研层（详设 §6.3/§6.6.7） =====
+CREATE TABLE IF NOT EXISTS research_sessions (
+    session_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('human','ai')),
+    label TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL DEFAULT 'api',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS research_id_seq (
+    name TEXT PRIMARY KEY,
+    value INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS research_topics (
+    id TEXT PRIMARY KEY,                  -- T + 序号
+    title TEXT NOT NULL,
+    question TEXT NOT NULL,
+    owner_session TEXT NOT NULL REFERENCES research_sessions(session_id),
+    created_by TEXT NOT NULL CHECK(created_by IN ('human','ai')),
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','concluded')),
+    conclusion TEXT,
+    conclusion_grade TEXT,                -- supported/refuted/mixed/insufficient-evidence（阶段 5）
+    conclusion_summary_json TEXT,         -- 平台量化摘要（决策 20，阶段 5）
+    concluded_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS research_experiments (
+    id TEXT PRIMARY KEY,                  -- E + 序号
+    title TEXT NOT NULL,
+    owner_session TEXT NOT NULL REFERENCES research_sessions(session_id),
+    created_by TEXT NOT NULL CHECK(created_by IN ('human','ai')),
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    topic_id TEXT NOT NULL REFERENCES research_topics(id),
+    evaluation_module TEXT NOT NULL,      -- name@version
+    subject_key TEXT NOT NULL,
+    spec_json TEXT NOT NULL,
+    hypothesis TEXT NOT NULL,
+    parent_experiment_id TEXT,
+    status TEXT NOT NULL DEFAULT 'proposed'
+        CHECK(status IN ('proposed','rejected_intake','queued','running','evaluating','verdicted','failed')),
+    attempt_index INTEGER NOT NULL DEFAULT 1,
+    reject_reason TEXT,
+    archived INTEGER NOT NULL DEFAULT 0,
+    holdout_touched INTEGER NOT NULL DEFAULT 0,
+    is_reproduction INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT,
+    finished_at TEXT,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_research_experiments_topic ON research_experiments(topic_id, id);
+CREATE INDEX IF NOT EXISTS idx_research_experiments_subject ON research_experiments(subject_key, id);
+CREATE INDEX IF NOT EXISTS idx_research_experiments_status ON research_experiments(status, created_at);
+
+CREATE TABLE IF NOT EXISTS research_runs (
+    id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL REFERENCES research_experiments(id),
+    engine_run_id TEXT,
+    window_start TEXT,
+    window_end TEXT,
+    window_kind TEXT NOT NULL DEFAULT 'sample'
+        CHECK(window_kind IN ('sample','holdout','plateau_probe')),
+    holdout_touched INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_research_runs_experiment ON research_runs(experiment_id, id);
+
+CREATE TABLE IF NOT EXISTS research_verdicts (
+    id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL REFERENCES research_experiments(id),
+    generated_at TEXT DEFAULT (datetime('now','localtime')),
+    baseline_json TEXT NOT NULL DEFAULT '{}',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    report_json TEXT NOT NULL DEFAULT '{}',
+    suggested_verdict TEXT NOT NULL CHECK(suggested_verdict IN ('confirmed','rejected','inconclusive')),
+    final_verdict TEXT CHECK(final_verdict IN ('confirmed','rejected','inconclusive')),
+    reasoning TEXT,
+    confirmed_by TEXT,
+    confirmed_at TEXT,
+    holdout_touched INTEGER NOT NULL DEFAULT 0,
+    attempt_index_snapshot INTEGER NOT NULL DEFAULT 1,
+    supersedes TEXT                       -- 复核产物指向被复核 verdict 的 experiment_id（详设 §6.6.7）
+);
+CREATE INDEX IF NOT EXISTS idx_research_verdicts_experiment ON research_verdicts(experiment_id, id);
+
+CREATE TABLE IF NOT EXISTS holdout_tokens (
+    id TEXT PRIMARY KEY,
+    granted_by TEXT NOT NULL,             -- human session id
+    purpose TEXT NOT NULL DEFAULT '',
+    experiment_id TEXT,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    consumed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS module_drafts (
+    id TEXT PRIMARY KEY,                  -- M + 序号
+    slot TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    kind TEXT NOT NULL CHECK(kind IN ('dsl','python')),
+    source TEXT NOT NULL,
+    params_schema_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'draft'
+        CHECK(status IN ('draft','reviewed','rejected','retired')),
+    test_report_json TEXT NOT NULL DEFAULT '{}',
+    reject_reason TEXT,
+    created_by TEXT NOT NULL DEFAULT 'ai',
+    owner_session TEXT,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    reviewed_at TEXT,
+    UNIQUE(name, version)
+);
+
+-- ===== append-only 触发器（列白名单制；设计：详设 §6.7） =====
+-- experiments：内容字段禁改；可改 = status/reject_reason/archived/holdout_touched/
+--              started_at/finished_at/error
+CREATE TRIGGER IF NOT EXISTS trg_research_experiments_no_delete
+BEFORE DELETE ON research_experiments
+BEGIN SELECT RAISE(ABORT, 'research_experiments is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_research_experiments_guard_update
+BEFORE UPDATE ON research_experiments
+WHEN OLD.id <> NEW.id
+  OR OLD.title <> NEW.title
+  OR OLD.owner_session <> NEW.owner_session
+  OR OLD.created_by <> NEW.created_by
+  OR OLD.created_at <> NEW.created_at
+  OR OLD.evaluation_module <> NEW.evaluation_module
+  OR OLD.subject_key <> NEW.subject_key
+  OR OLD.spec_json <> NEW.spec_json
+  OR OLD.hypothesis <> NEW.hypothesis
+  OR IFNULL(OLD.parent_experiment_id, '') <> IFNULL(NEW.parent_experiment_id, '')
+  OR OLD.attempt_index <> NEW.attempt_index
+BEGIN SELECT RAISE(ABORT, 'research_experiments content is append-only'); END;
+
+-- runs：完全 insert-only
+CREATE TRIGGER IF NOT EXISTS trg_research_runs_no_delete
+BEFORE DELETE ON research_runs
+BEGIN SELECT RAISE(ABORT, 'research_runs is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_research_runs_no_update
+BEFORE UPDATE ON research_runs
+BEGIN SELECT RAISE(ABORT, 'research_runs is append-only'); END;
+
+-- verdicts：可改 = final_verdict/reasoning/confirmed_by/confirmed_at
+CREATE TRIGGER IF NOT EXISTS trg_research_verdicts_no_delete
+BEFORE DELETE ON research_verdicts
+BEGIN SELECT RAISE(ABORT, 'research_verdicts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_research_verdicts_guard_update
+BEFORE UPDATE ON research_verdicts
+WHEN OLD.id <> NEW.id
+  OR OLD.experiment_id <> NEW.experiment_id
+  OR OLD.generated_at <> NEW.generated_at
+  OR OLD.baseline_json <> NEW.baseline_json
+  OR OLD.evidence_json <> NEW.evidence_json
+  OR OLD.warnings_json <> NEW.warnings_json
+  OR OLD.report_json <> NEW.report_json
+  OR OLD.suggested_verdict <> NEW.suggested_verdict
+  OR OLD.holdout_touched <> NEW.holdout_touched
+  OR OLD.attempt_index_snapshot <> NEW.attempt_index_snapshot
+  OR IFNULL(OLD.supersedes, '') <> IFNULL(NEW.supersedes, '')
+  -- 已落定的 final_verdict 不可改写（评审 DS-P3-1：历史永不改写——库层守卫）
+  OR (OLD.final_verdict IS NOT NULL AND OLD.final_verdict <> NEW.final_verdict)
+BEGIN SELECT RAISE(ABORT, 'research_verdicts content is append-only'); END;
+
+-- topics：可改 = status/conclusion/conclusion_grade/conclusion_summary_json/concluded_at
+CREATE TRIGGER IF NOT EXISTS trg_research_topics_no_delete
+BEFORE DELETE ON research_topics
+BEGIN SELECT RAISE(ABORT, 'research_topics is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_research_topics_guard_update
+BEFORE UPDATE ON research_topics
+WHEN OLD.id <> NEW.id
+  OR OLD.title <> NEW.title
+  OR OLD.question <> NEW.question
+  OR OLD.owner_session <> NEW.owner_session
+  OR OLD.created_by <> NEW.created_by
+  OR OLD.created_at <> NEW.created_at
+BEGIN SELECT RAISE(ABORT, 'research_topics content is append-only'); END;
+
+-- sessions：可改 = label
+CREATE TRIGGER IF NOT EXISTS trg_research_sessions_no_delete
+BEFORE DELETE ON research_sessions
+BEGIN SELECT RAISE(ABORT, 'research_sessions is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_research_sessions_guard_update
+BEFORE UPDATE ON research_sessions
+WHEN OLD.session_id <> NEW.session_id
+  OR OLD.kind <> NEW.kind
+  OR OLD.channel <> NEW.channel
+  OR OLD.created_at <> NEW.created_at
+BEGIN SELECT RAISE(ABORT, 'research_sessions content is append-only'); END;
+
+-- 策略版本不可变（详设 §5.5：改一个字就是新版本；软删除走 strategies.retired_at）
+CREATE TRIGGER IF NOT EXISTS trg_portfolio_strategy_versions_no_delete
+BEFORE DELETE ON portfolio_strategy_versions
+BEGIN SELECT RAISE(ABORT, 'portfolio_strategy_versions is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_portfolio_strategy_versions_no_update
+BEFORE UPDATE ON portfolio_strategy_versions
+BEGIN SELECT RAISE(ABORT, 'portfolio_strategy_versions is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_portfolio_strategies_no_delete
+BEFORE DELETE ON portfolio_strategies
+BEGIN SELECT RAISE(ABORT, 'portfolio_strategies is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_portfolio_strategies_guard_update
+BEFORE UPDATE ON portfolio_strategies
+WHEN OLD.id <> NEW.id
+  OR OLD.is_benchmark <> NEW.is_benchmark
+  OR OLD.is_blank_base <> NEW.is_blank_base
+  OR OLD.created_by <> NEW.created_by
+  OR OLD.created_at <> NEW.created_at
+BEGIN SELECT RAISE(ABORT, 'portfolio_strategies content is append-only'); END;
+
+-- holdout tokens：可改 = consumed_at
+CREATE TRIGGER IF NOT EXISTS trg_holdout_tokens_no_delete
+BEFORE DELETE ON holdout_tokens
+BEGIN SELECT RAISE(ABORT, 'holdout_tokens is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_holdout_tokens_guard_update
+BEFORE UPDATE ON holdout_tokens
+WHEN OLD.id <> NEW.id
+  OR OLD.granted_by <> NEW.granted_by
+  OR OLD.purpose <> NEW.purpose
+  OR IFNULL(OLD.experiment_id, '') <> IFNULL(NEW.experiment_id, '')
+  OR OLD.created_at <> NEW.created_at
+BEGIN SELECT RAISE(ABORT, 'holdout_tokens content is append-only'); END;
+
+-- module_drafts：可改 = status/test_report_json/reject_reason/reviewed_at
+CREATE TRIGGER IF NOT EXISTS trg_module_drafts_no_delete
+BEFORE DELETE ON module_drafts
+BEGIN SELECT RAISE(ABORT, 'module_drafts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_module_drafts_guard_update
+BEFORE UPDATE ON module_drafts
+WHEN OLD.id <> NEW.id
+  OR OLD.slot <> NEW.slot
+  OR OLD.name <> NEW.name
+  OR OLD.version <> NEW.version
+  OR OLD.kind <> NEW.kind
+  OR OLD.source <> NEW.source
+  OR OLD.params_schema_json <> NEW.params_schema_json
+  OR OLD.created_by <> NEW.created_by
+  OR IFNULL(OLD.owner_session, '') <> IFNULL(NEW.owner_session, '')
+  OR OLD.created_at <> NEW.created_at
+BEGIN SELECT RAISE(ABORT, 'module_drafts content is append-only'); END;
+"""
+
+
 class Database:
     def __init__(self, db_path: str | Path | None = None) -> None:
         db_path = db_path if db_path is not None else default_db_path()
@@ -99,6 +521,16 @@ class Database:
             conn.commit()
         finally:
             conn.close()
+
+    @contextmanager
+    def connect(self):
+        """公开的连接入口（`_connect` 的别名）。
+
+        投研基建新栈（engine/portfolio/research）的 store 模块经此取连接——
+        新 SQL 不再写入 db.py（God class 只维持存量与 DDL，访问逻辑归各层）。
+        """
+        with self._connect() as conn:
+            yield conn
 
     def backup_to(self, backup_dir: str | Path | None = None, keep: int = 3) -> Path:
         """Online backup via VACUUM INTO (WAL-safe), keeping the newest ``keep`` files.
@@ -581,6 +1013,7 @@ class Database:
 
                 """
             )
+            conn.executescript(_RESEARCH_STACK_DDL)
 
     # ------------------------------------------------------------------
     # schema migration
@@ -637,12 +1070,18 @@ class Database:
             "stop_profile": "TEXT NOT NULL DEFAULT 'default'",
             "atr_basis": "TEXT NOT NULL DEFAULT ''",
         }
+        research_experiment_columns = {
+            # 复现标记（评审 DS-P1-2）：rerun 的实验与原始实验同 attempt_index，
+            # 且不计入后续尝试计数——否则复现会反噬 DSR 的试验次数输入。
+            "is_reproduction": "INTEGER NOT NULL DEFAULT 0",
+        }
         targets = {
             "instrument_metadata": metadata_columns,
             "indicator_daily": indicator_columns,
             "trend_daily": cache_columns,
             "batch_backtest_cells": batch_cell_columns,
             "batch_backtest_runs": batch_run_columns,
+            "research_experiments": research_experiment_columns,
         }
         with self._connect() as conn:
             # N1（2026-08-25）：删除与 PRIMARY KEY (symbol,time) 完全同列的
@@ -1457,7 +1896,7 @@ class Database:
         return len(records)
 
     @staticmethod
-    def _market_rows_to_df(rows) -> "pd.DataFrame":
+    def _market_rows_to_df(rows) -> pd.DataFrame:
         """market_data 行 → DataFrame 的统一转换（load_market_data /
         load_market_data_many 共用，dtype 口径一致）。"""
         df = pd.DataFrame([dict(r) for r in rows])
@@ -1569,7 +2008,7 @@ class Database:
 
     def load_fitted_period_bars(
         self, symbol: str, period: str, start: str | None = None, end: str | None = None
-    ) -> "pd.DataFrame":
+    ) -> pd.DataFrame:
         """按标的读拟合周期行（含 period_start 列），可选 [start, end] 日期闭区间。"""
         table = self._fitted_table(period)
         sql = (
@@ -1657,7 +2096,7 @@ class Database:
         return len(records)
 
     @staticmethod
-    def _rolling_trend_rows_to_df(rows) -> "pd.DataFrame":
+    def _rolling_trend_rows_to_df(rows) -> pd.DataFrame:
         df = pd.DataFrame([dict(r) for r in rows])
         df["time"] = pd.to_datetime(df["time"], errors="coerce")
         for col in ("w_trend", "m_trend"):
@@ -1666,7 +2105,7 @@ class Database:
 
     def load_rolling_trend(
         self, symbol: str, start: str | None = None, end: str | None = None
-    ) -> "pd.DataFrame":
+    ) -> pd.DataFrame:
         """按标的读滚动趋势行（time/w_trend/m_trend），可选 [start, end] 日期闭区间。"""
         sql = "SELECT time, w_trend, m_trend FROM trend_rolling_daily WHERE symbol = ?"
         params: list = [symbol]
@@ -1685,7 +2124,7 @@ class Database:
 
     def load_rolling_trend_many(
         self, symbols, start: str | None = None, end: str | None = None
-    ) -> "dict[str, pd.DataFrame]":
+    ) -> dict[str, pd.DataFrame]:
         """多标的批量读滚动趋势行：单连接 + chunked IN 查询（与 load_market_data_many
         同型）。无数据的 symbol 不出现在返回 dict 中。"""
         unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
@@ -1733,7 +2172,7 @@ class Database:
 
     def load_market_data_many(
         self, symbols, price_mode: str = "qfq", period: str = "1d"
-    ) -> "dict[str, pd.DataFrame]":
+    ) -> dict[str, pd.DataFrame]:
         """多标的批量读全量日K：单连接 + chunked IN 查询，按 symbol 分组返回。
 
         批量止损试算（calc_stop_loss_batch）一次需要上百只标的的全历史，
@@ -1741,10 +2180,31 @@ class Database:
         数线性放大。这里改为单连接分块查询（每块 500 只，远离 SQLite
         变量上限）。无数据的 symbol 不出现在返回 dict 中。
         """
+        return self.load_market_data_window_many(
+            symbols, None, None, price_mode=price_mode, period=period
+        )
+
+    def load_market_data_window_many(
+        self, symbols, start=None, end=None, price_mode: str = "qfq", period: str = "1d"
+    ) -> dict[str, pd.DataFrame]:
+        """窗口限定的多标的批量读（L1 面板批量读取能力，投研基建 L1.5 面板用）。
+
+        与 load_market_data_many 同口径（单连接 chunked IN + 按 symbol 分组），
+        但把 [start, end] 过滤下推到 SQL——全历史标的在窄窗口场景下
+        （回测面板）避免整段载入。
+        """
         table = self._market_table(price_mode, period)
         unique = [s for s in dict.fromkeys(str(s or "").strip().upper() for s in symbols) if s]
         if not unique:
             return {}
+        clauses = ""
+        window_params: list = []
+        if start is not None:
+            clauses += " AND time >= ?"
+            window_params.append(str(start)[:10])
+        if end is not None:
+            clauses += " AND time <= ?"
+            window_params.append(str(end)[:10] + " 23:59:59")
         grouped: dict[str, list] = {s: [] for s in unique}
         with self._connect() as conn:
             for i in range(0, len(unique), 500):
@@ -1752,9 +2212,9 @@ class Database:
                 placeholders = ",".join("?" for _ in chunk)
                 rows = conn.execute(
                     f"""SELECT time, open, high, low, close, volume, amount, symbol, provider
-                       FROM {table} WHERE symbol IN ({placeholders})
+                       FROM {table} WHERE symbol IN ({placeholders}){clauses}
                        ORDER BY symbol, time""",
-                    chunk,
+                    (*chunk, *window_params),
                 ).fetchall()
                 for row in rows:
                     grouped[row["symbol"]].append(row)
@@ -1766,7 +2226,7 @@ class Database:
 
     def get_market_data_summary_many(
         self, symbols, price_mode: str = "qfq", period: str = "1d"
-    ) -> "dict[str, dict]":
+    ) -> dict[str, dict]:
         """多标的 {symbol: {rows, start, end}}——单连接 chunked IN + GROUP BY。
 
         与 list_market_data_summaries（全表 GROUP BY）不同，这里按给定标的
@@ -2260,7 +2720,7 @@ class Database:
 
     def load_indicator_daily_many(
         self, symbols, columns=("time", "atr")
-    ) -> "dict[str, pd.DataFrame]":
+    ) -> dict[str, pd.DataFrame]:
         """多标的批量读 indicator_daily 指定列：单连接 + chunked IN，按 symbol 分组。
 
         批量止损试算只需要 ATR 序列；逐只 load_indicator_daily 是 SELECT *
@@ -2390,7 +2850,7 @@ class Database:
             "trend_data_version": int(trend["dv"] or 0),
         }
 
-    def indicator_cache_info_many(self, symbols) -> "dict[str, dict]":
+    def indicator_cache_info_many(self, symbols) -> dict[str, dict]:
         """多标的批量版 indicator_cache_info：两张缓存表各一次 GROUP BY 查询。
 
         返回结构与 indicator_cache_info 相同；无任何缓存行的 symbol 不出现

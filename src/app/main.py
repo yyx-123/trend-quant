@@ -29,12 +29,13 @@ from app.routers import (
     instruments,
     manual_trade,
     market_view,
+    research_ledger,
     rule_backtest,
     subject_market,
 )
 from audit.app_logger import get_logger, setup_logging
 from core import env
-from core.jobs import daily_market_update_job, intraday_period_refresh_job
+from core.jobs import daily_market_update_job, intraday_period_refresh_job, live_daily_list_job
 from core.scheduler import SchedulerManager
 from core.settings import load_settings
 
@@ -209,7 +210,9 @@ async def lifespan(app: FastAPI):
             payload.get("failed", 0),
             payload.get("total", 0),
         )
-        if payload.get("status") == "skipped_non_trading_day":
+        if payload.get("status") in ("skipped_non_trading_day", "deferred_backtest_running"):
+            # 冻结顺延（决策 A3）：当日更被回测冻结推迟时，post-update pipeline
+            # （除权检测 + 指标重建 = 写任务）同样不得抢跑。
             return
         # Post-update orchestration (dividend detection + indicator rebuild)
         # lives here so that core/jobs stays free of services-layer imports.
@@ -281,6 +284,7 @@ async def lifespan(app: FastAPI):
         scheduler_manager.start(
             update_job=update_job,
             intraday_snapshot_job=intraday_snapshot_job,
+            live_list_job=lambda: live_daily_list_job(settings),
             industry_sync_job=industry_sync_job,
             backup_job=backup_job,
             intraday_period_job=intraday_period_job,
@@ -290,10 +294,36 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.scheduler_manager = scheduler_manager
 
+    # 投研基建：research worker（有界并发池）随 app 启动；测试环境
+    # （TREND_QUANT_DISABLE_SCHEDULER=1）不起后台线程。
+    if not _background_tasks_disabled():
+        from portfolio.slots import REGISTRY as _REGISTRY
+        from portfolio.slots import ensure_builtins as _ensure
+        from research.api import ResearchService
+        from research.modules import load_reviewed_modules
+        from research.worker import ResearchWorker
+
+        _ensure()
+        load_reviewed_modules(db, _REGISTRY)
+        research_worker = ResearchWorker(db, registry=_REGISTRY, max_workers=2)
+        research_worker.submit_all_queued()  # 启动补偿：上次进程退出遗留的 queued 实验
+        research_worker.start()
+        app.state.research_worker = research_worker
+        app.state.research_service = ResearchService(
+            db, registry=_REGISTRY, worker=research_worker
+        )
+    else:
+        app.state.research_worker = None
+        app.state.research_service = None
+
+
     logger.info("Application started")
     try:
         yield
     finally:
+        worker = getattr(app.state, "research_worker", None)
+        if worker is not None:
+            worker.stop()  # 停研究并发池（B-R2-P2：lifespan 不停 worker 已修）
         scheduler_manager.shutdown()
         logger.info("Application stopped")
 
@@ -564,6 +594,7 @@ app.include_router(subject_market.router)
 app.include_router(manual_trade.router)
 app.include_router(batch_backtest.router)
 app.include_router(auth.router)
+app.include_router(research_ledger.router)
 
 
 @app.get("/", include_in_schema=False)

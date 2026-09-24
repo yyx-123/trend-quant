@@ -37,6 +37,7 @@ class SchedulerManager:
         industry_sync_job: Callable[[], None] | None = None,
         backup_job: Callable[[], None] | None = None,
         intraday_period_job: Callable[[], None] | None = None,
+        live_list_job: Callable[[], None] | None = None,
     ) -> None:
         if self.scheduler is not None:
             return
@@ -108,6 +109,18 @@ class SchedulerManager:
                     misfire_grace_time=60,
                     coalesce=True,
                 )
+
+        if live_list_job is not None:
+            # 实盘运行器（投研基建 L3）：交易日 14:05 产出目标持仓清单。
+            # 任务内部以 is_trading_day 兜底跳过节假日。
+            scheduler.add_job(
+                live_list_job,
+                trigger=CronTrigger(day_of_week="mon-fri", hour=14, minute=5),
+                id="live_daily_list",
+                replace_existing=True,
+                misfire_grace_time=1800,
+                coalesce=True,
+            )
 
         # 任务执行异常/misfire 显式记日志（默认只进 apscheduler logger 的
         # 低级别记录，容易被淹没，P2-22）

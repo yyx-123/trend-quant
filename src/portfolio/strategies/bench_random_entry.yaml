@@ -1,0 +1,11 @@
+# benchmark：随机入场 + 与基准 v1 相同的止损——"你的信号比猴子强吗"（§5.5 怀疑阶梯 5）
+# 除 signal 槽外与 base-v1 逐槽一致。
+name: bench-random-entry
+description: 随机入场 + 硬止损（猴子基准，v1 同止损口径）
+universe:   {module: category_filter@1, params: {asset_type: all}}
+signal:     {module: random_entry@1, params: {seed: 42, per_day: 3}}
+rank:       {module: by_freshness@1, params: {}}
+sizing:     {module: equal_risk@1, params: {risk_budget_pct: 0.0075}}
+portfolio_risk: []
+position_risk: {module: hard_stop@1, params: {atr_mul: 1.5}}
+execution:  {module: tail_session@1, params: {slippage_base: 0.002, slippage_tail: 0.001}}

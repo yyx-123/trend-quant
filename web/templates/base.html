@@ -23,6 +23,7 @@
         <a href="/subject-market" class="{% if path.startswith('/subject-market') %}is-active{% endif %}">标的看板</a>
         <a href="/instruments" class="{% if path.startswith('/instruments') %}is-active{% endif %}">标的管理</a>
         <a href="/manual-trade" class="{% if path.startswith('/manual-trade') %}is-active{% endif %}">手工交易</a>
+        <a href="/research-ledger" class="{% if path.startswith('/research-ledger') %}is-active{% endif %}">投研台账</a>
         {% if request.state.user %}
         <span class="site-user" title="当前登录用户">
           <span class="site-user__name">{{ request.state.user.username }}{% if request.state.user.is_admin %}·admin{% endif %}</span>

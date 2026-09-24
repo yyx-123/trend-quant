@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page">
+  <h2>投研台账 <small style="font-weight:normal;color:#888">全员只读的经验资产：失败与成功同等入表</small></h2>
+
+  {% if worker_status %}
+  <p class="muted">研究 worker：并发位 {{ worker_status.max_workers }}，队列 {{ worker_status.queued }}，写冻结 {{ "是" if worker_status.frozen_writes else "否" }}</p>
+  {% endif %}
+
+  <h3>课题板</h3>
+  <table class="data-table">
+    <thead><tr><th>课题</th><th>问题</th><th>状态</th><th>结论分级</th><th>实验数</th><th>结论</th></tr></thead>
+    <tbody>
+      {% for t in topics %}
+      <tr>
+        <td>{{ t.id }} {{ t.title }}</td>
+        <td>{{ t.question }}</td>
+        <td>{{ t.status }}</td>
+        <td>{{ t.conclusion_grade or "" }}</td>
+        <td>{{ t.experiment_ids|length }}</td>
+        <td>{{ t.conclusion or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <details>
+    <summary>关题（人工，平台量化摘要先行、分级可降不可升）</summary>
+    <form method="post" action="/research-ledger/topics/T001/conclude"
+          onsubmit="this.action = '/research-ledger/topics/' + this.topic_id.value + '/conclude'">
+      <input name="topic_id" placeholder="课题 id（如 T001）" required>
+      <input name="conclusion" placeholder="结论（必填）" required style="width:24em">
+      <select name="grade">
+        <option value="">（平台建议）</option>
+        <option value="supported">supported</option>
+        <option value="refuted">refuted</option>
+        <option value="mixed">mixed</option>
+        <option value="insufficient-evidence">insufficient-evidence</option>
+      </select>
+      <button type="submit">关题</button>
+    </form>
+  </details>
+
+  <h3>实验台账</h3>
+  <table class="data-table">
+    <thead><tr>
+      <th>实验</th><th>课题</th><th>评估模块</th><th>subject</th><th>状态</th>
+      <th>平台建议</th><th>最终判定</th><th>#尝试</th><th>holdout</th><th>警告</th>
+    </tr></thead>
+    <tbody>
+      {% for e in experiments %}
+      <tr>
+        <td><a href="/research-ledger/experiments/{{ e.id }}">{{ e.id }}</a> {{ e.title }}</td>
+        <td>{{ e.topic_id }}</td>
+        <td>{{ e.evaluation_module }}</td>
+        <td>{{ e.subject_key }}</td>
+        <td>{{ e.status }}{% if e.archived %}（归档）{% endif %}</td>
+        <td>{{ e.suggested_verdict or "" }}</td>
+        <td>{{ e.final_verdict or "" }}</td>
+        <td>{{ e.attempt_index }}</td>
+        <td>{{ "是" if e.holdout_touched else "" }}</td>
+        <td>{{ e.warnings|length if e.warnings else "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if stale %}
+  <h3>烂尾清单（evaluating 超 7 天未确认——公开失信记录）</h3>
+  <ul>
+    {% for e in stale %}<li>{{ e.id }}（{{ e.owner_session }}，{{ e.started_at }}）：{{ e.title }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  <h3>实盘清单（每日 14:00 运行器产出）</h3>
+  <table class="data-table">
+    <thead><tr><th>日期</th><th>策略版本</th><th>应买</th><th>应卖</th><th>对账</th><th>清单</th></tr></thead>
+    <tbody>
+      {% for l in live_lists %}
+      <tr>
+        <td>{{ l.list_date }}</td>
+        <td>{{ l.strategy_version_id }}</td>
+        <td>{{ l.buys_count }}</td>
+        <td>{{ l.sells_count }}</td>
+        <td>{{ "已对账" if l.reconciled_at else "待对账" }}</td>
+        <td><details><summary>展开</summary><pre>{{ l.target_json_pretty }}</pre></details></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

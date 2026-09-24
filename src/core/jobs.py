@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from audit.app_logger import get_logger
+from core import run_freeze
 from core.bars import PERIOD_MONTHLY, PERIOD_WEEKLY
 from core.benchmarks import benchmark_market_symbols
 from core.calendar import is_realtime_available, is_trading_day, market_now
@@ -120,7 +121,49 @@ def intraday_period_refresh_job(
         logger.warning("Intraday weekly/monthly refresh had failures: %s", summary)
     else:
         logger.info("Intraday weekly/monthly refresh done: %s", summary)
-    return {"status": payload.get("status"), "periods": summary, **{"ts": payload.get("ts")}}
+    return {"status": payload.get("status"), "periods": summary, "ts": payload.get("ts")}
+
+
+def _spawn_same_day_catchup(
+    settings: Settings, data_service: DataService | None, *, force: bool, today,
+) -> None:
+    """冻结顺延后的当日一次性补跑哨兵（GLM53F-P2-13）。
+
+    顺延到"下一次定时触发"意味着当日 EOD/除权检测/指标重建全停一天——
+    改为挂一个 daemon 线程：解冻后立刻补跑一次（最长再等 2 小时，仍冻结
+    则放弃，由次日 cron/启动补偿兜底）。幂等：同时只允许一个哨兵在飞。
+    """
+    import threading
+
+    global _catchup_sentinel
+    if _catchup_sentinel is not None and _catchup_sentinel.is_alive():
+        return
+
+    def _watch() -> None:
+        import time as _time
+
+        waited = 0
+        while run_freeze.is_frozen() and waited < 7200:
+            _time.sleep(60)
+            waited += 60
+        if run_freeze.is_frozen():
+            logger.warning("same-day catchup abandoned: still frozen after 2h")
+            return
+        if market_now().date() != today:
+            return  # 跨日了，交给当日 cron/启动补偿
+        logger.info("same-day catchup: unfrozen, running daily update now")
+        try:
+            daily_market_update_job(settings, data_service, force=force)
+        except Exception:
+            logger.exception("same-day catchup failed")
+
+    _catchup_sentinel = threading.Thread(
+        target=_watch, daemon=True, name="daily-update-catchup"
+    )
+    _catchup_sentinel.start()
+
+
+_catchup_sentinel = None
 
 
 def daily_market_update_job(
@@ -135,8 +178,37 @@ def daily_market_update_job(
 
     ``force=True``（启动补偿调用）在非交易日也执行——定时任务本身只在
     工作日触发，但补跑可能发生在周末/节假日，用于补齐错过的交易日数据。
+
+    决策 A3（运行期数据冻结）：回测 run 执行期间冻结写任务——run 优先、
+    日更等待（最长 30 分钟轮询解冻；超时则顺延到下一次定时触发）。
     """
     today = market_now().date()
+    # 冻结门对 force 同样生效（评审 DS-P2-6：启动补偿也不能抢跑写任务——
+    # 否则补偿与活跃 run 并发读两版数据；无活跃 run 时冻结非真，照样放行）
+    if run_freeze.is_frozen():
+        import time as _time
+
+        waited = 0
+        while run_freeze.is_frozen() and waited < 1800:
+            logger.info("daily update deferred: %d backtest run(s) active, waiting...",
+                        run_freeze.active_count())
+            _time.sleep(30)
+            waited += 30
+        if run_freeze.is_frozen():
+            logger.warning("daily update deferred: backtest still running after 30min")
+            # 顺延必须留痕（评审 DS-P2-6）：job_runs 记录，日更推迟可见
+            payload = {
+                "ts": market_now().replace(tzinfo=None).isoformat(),
+                "status": "deferred_backtest_running",
+                "results": [],
+            }
+            record_job_run_safely(
+                "daily_update_deferred", payload,
+                run_date=today.isoformat(), status="deferred_backtest_running",
+            )
+            # GLM53F-P2-13：顺延 ≠ 饿一整天——挂当日一次性补跑哨兵
+            _spawn_same_day_catchup(settings, data_service, force=force, today=today)
+            return payload
     if not force and not is_trading_day(today):
         logger.info("Daily market update skipped: %s is not a trading day", today.isoformat())
         payload = {
@@ -201,3 +273,59 @@ def daily_market_update_job(
     else:
         clear_sentinel("daily_update")
     return payload
+
+
+# ----------------------------------------------------------------------
+# 实盘运行器（投研基建 L3 薄版，详设 §5.7）：交易日 14:00 目标持仓清单
+# ----------------------------------------------------------------------
+
+
+def live_daily_list_job(settings: Settings) -> dict:
+    """交易日 14:00 前后：产出已部署策略的目标持仓清单 + 对账昨日清单。
+
+    未部署策略（app_config 缺 portfolio.live_strategy_version_id）时跳过——
+    这是配置驱动的可选项，不是错误。对账用前一交易日清单。
+    """
+    from core.calendar import previous_trading_day
+    from gateway.live_overlay import default_live_overlay
+    from portfolio.live import generate_daily_list, reconcile_daily_list
+
+    now = market_now()
+    if not is_trading_day(now.date()):
+        return {"status": "skipped_non_trading_day"}
+
+    from data.storage.db import get_db
+
+    db = get_db()
+    strategy_version_id = db.get_config("portfolio.live_strategy_version_id")
+    if not strategy_version_id:
+        return {"status": "skipped_no_deployed_strategy"}
+    user_id = int(db.get_config("portfolio.live_user_id", 1))
+    initial_capital = float(db.get_config("portfolio.live_initial_capital", 1_000_000))
+
+    try:
+        target = generate_daily_list(
+            db, strategy_version_id=strategy_version_id, user_id=user_id,
+            as_of=now, initial_capital=initial_capital,
+            live_overlay=default_live_overlay(db),
+        )
+        prev_day = previous_trading_day(now.date())
+        reconcile_daily_list(
+            db, list_date=prev_day.isoformat(),
+            strategy_version_id=strategy_version_id, user_id=user_id,
+        )
+        payload = {
+            "status": "ok",
+            "list_date": now.date().isoformat(),
+            "buys": len(target.get("buys", [])),
+            "sells": len(target.get("sells", [])),
+        }
+        record_job_run_safely("live_daily_list", payload, run_date=now.date().isoformat(), status="ok")
+        return payload
+    except Exception as exc:
+        logger.exception("live daily list failed")
+        record_job_run_safely(
+            "live_daily_list", {"error": str(exc)},
+            run_date=now.date().isoformat(), status="failed",
+        )
+        return {"status": "failed", "error": str(exc)}

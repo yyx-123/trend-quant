@@ -1,0 +1,17 @@
+# 基准策略 v1 定稿（2026-09-23 设计期收口，决策 5；详设附录 A）。
+# 当前实盘打法的 1:1 复刻。回测默认初始资金 100 万元为运行级参数
+# （engine run 级，不属于策略配置）。
+name: base-v1
+description: 当前实盘打法的复刻（决策 5）；回测默认初始资金 100 万元
+universe:   {module: category_filter@1, params: {asset_type: all}}  # 全部 enabled 标的
+signal:     {module: macd_cross@1, params: {fast: 12, slow: 26, signal: 9, use_exit: false}}
+            # 只产金叉 entry；死叉不卖——exit 归止损管（死叉退场是后续实验素材）
+rank:       {module: by_freshness@1, params: {}}
+sizing:     {module: equal_risk@1, params: {risk_budget_pct: 0.0075}}
+            # 单笔风险预算 = 权益 0.75%
+portfolio_risk: []        # 实盘当前无组合级约束，如实复刻
+                          # （调研五条建议=第一个实验的 diff 素材）
+position_risk: {module: hard_stop@1, params: {atr_mul: 1.5}}
+            # 占位值（2026-09-23 用户定：硬止损 1.5×ATR）：止损选型仍是首个
+            # 研究课题的对象；引擎撮合与组合热需要每个持仓有止损价，故不能为 none
+execution:  {module: tail_session@1, params: {slippage_base: 0.002, slippage_tail: 0.001}}

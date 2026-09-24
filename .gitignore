@@ -53,3 +53,8 @@ scripts/temp/
 
 # 回测分析导出产物（方案 2026-08-30 §10，AI 离线分析用，不入库）
 exports/
+# 投研基建运行产物（回测报告/对比数据）
+data/research/
+# SQLite WAL 侧文件（只读连接也会产生，不跟踪）
+data/*.db-shm
+data/*.db-wal

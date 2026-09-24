@@ -1,0 +1,15 @@
+# benchmark：60/40 年度再平衡——"你跑赢傻瓜分散了吗"（§5.5 怀疑阶梯 2）
+# 本地池无债券 ETF 数据（511010 不在池内）——债券腿以现金（年化 1% 逆回购
+# 近似，与引擎空仓计息同口径）承担，即"60/40 股现"。这是数据可得性下的
+# 忠实近似，差异记入开发日志。
+name: bench-60-40
+description: 60/40 股现（沪深300ETF 60% + 现金 40% 年化1%，年度再平衡）
+universe:   {module: static_list@1, params: {symbols: [510300.SS]}}
+signal:     {module: always_entry@1, params: {}}
+rank:       {module: by_freshness@1, params: {}}
+sizing:     {module: target_weight@1, params: {weights: {"510300.SS": 0.6}}}
+portfolio_risk: []
+position_risk: {module: none@1, params: {}}
+execution:  {module: rebalance_band@1, params: {slippage_base: 0.002, slippage_tail: 0.001,
+              band: 0.05, action_gate: {freq: yearly},
+              weights: {"510300.SS": 0.6}}}
