@@ -1,6 +1,6 @@
 # 历史龙头数据补齐（标的池历史扩容）
 
-> 执行日期：2026-09-23 起　｜　状态：**阶段一（出清单）已完成，阶段二（灌 K 线）未开始**
+> 执行日期：2026-09-23 起　｜　状态：**阶段一（出清单）已完成；阶段二（灌 K 线）进行中 —— tushare-only 8 只已入 staging 表，见 `STAGE2-tushare灌库进度.md`**
 > 数据源：Tushare Pro（临时账号，5000 积分档）
 
 ## 先读这份
@@ -32,6 +32,10 @@
 ├── probe_tushare.py                    ← 连通性/权限探测（指数成分 + 退市股行情）
 ├── probe_tushare_fund.py               ← 基金/ETF 接口探测（benchmark / 费率 / 退市 ETF）
 ├── diff_on_server.py                   ← 在服务端库上重跑差分（dev 库标的少于生产库）
+├── test_tushare_field_mapping.py       ← 阶段二：Tushare→库字段映射验证（已通过）
+├── tf_probe_delisted.py                ← 阶段二：tf 退市/摘牌覆盖探测（推翻"tf 无退市股"）
+├── load_tushare_staging.py             ← 阶段二：tushare-only 灌 staging 表（断点续跑）
+├── STAGE2-tushare灌库进度.md            ← 阶段二进度与证据（阶段二先读这份）
 └── data/                               ← 全部产物（见下）
 ```
 
@@ -98,11 +102,19 @@ TUSHARE_TOKEN=xxx TUSHARE_HTTP_URL=https://tuaremax.top \
 `tushare` 是 `pyproject.toml` 的 optional extra，需要时 `pip install tushare`
 （**默认 PyPI 源在本机会卡死，用清华源**）。
 
-## 阶段二（未开始）
+## 阶段二（进行中）
 
-等你确认清单后：`diff_on_server.py` 重算增量 → 逐标的判断来源
-（**TickFlow 能取到完整历史的就用 TickFlow，取不到的（主要是 2021 年前退市的）用 Tushare 的 `daily` + `adj_factor`**）
-→ 写 `market_data_raw` + `ex_factors`（`provider` 标明来源，qfq 由项目自己派生）。
+**进度与证据详见 `STAGE2-tushare灌库进度.md`。** 要点：
 
-**入池方式未定**：退市标的若 `enabled=1`，日更会天天拉、天天失败；若 `enabled=0`，回测又会把它们排除掉
-（幸存者偏差就白治了）。需要加第三态（例如 `delist_date` 列），这是灌库前的阻塞项。
+- 服务端差分（生产库）：需补 2668 只（top1000 缺 1736、1001-1800 缺 848、ETF 缺 84），其中退市股 235 只
+- 数据源决策（用户定）：**tf 优先**，tushare 只补 tf 拿不到的
+- tf 覆盖探测推翻阶段一结论：tf 现在能取退市股；237 只候选中 229 只 tf 全覆盖，
+  **tushare-only 仅 8 只**（6 只 2010 年前私有化退市股 + 2 只摘牌 ETF）
+- 这 8 只已灌入临时表 `staging_ts_market_data` / `staging_ts_ex_factors` / `staging_ts_instruments`
+  （结构对齐正式表，现有流程零影响）
+- 字段映射已实测验证：amount ×1000、因子 = 累积 adj_factor 相邻比值且事件日 −1 天、qfq 重建偏差 ~1e-4
+- 阶段二新增产物：`data/tf_probe_delisted.csv`（237 只探测明细）、`data/tushare_only_symbols.csv`（8 只）
+
+**入池方式未定（仍是阻塞项）**：退市标的若 `enabled=1`，日更会天天拉、天天失败；若 `enabled=0`，
+回测又会把它们排除掉（幸存者偏差就白治了）。需要加第三态（例如 `delist_date` 列），
+这是 staging 合并进正式库、以及 tf 侧 229+2349+82 只灌库前的阻塞项。
