@@ -364,11 +364,16 @@ CREATE TABLE IF NOT EXISTS module_drafts (
 
 -- ===== append-only 触发器（列白名单制；设计：详设 §6.7） =====
 -- experiments：内容字段禁改；可改 = status/reject_reason/archived/holdout_touched/
---              started_at/finished_at/error
+--              started_at/finished_at/error/topic_id（append_experiment_to_topic）
+-- 注意（R1-P2-7）：守卫触发器定义若有修订，必须 DROP IF EXISTS + CREATE——
+-- SQLite 的 CREATE TRIGGER IF NOT EXISTS 不会把新定义传播到已存在同名触发器
+-- 的存量库。is_reproduction（仅 INSERT 写入的复现标记，直改它会增减研究线
+-- 尝试计数 = 篡改 DSR 输入）由此并入白名单守卫。
+DROP TRIGGER IF EXISTS trg_research_experiments_guard_update;
 CREATE TRIGGER IF NOT EXISTS trg_research_experiments_no_delete
 BEFORE DELETE ON research_experiments
 BEGIN SELECT RAISE(ABORT, 'research_experiments is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_research_experiments_guard_update
+CREATE TRIGGER trg_research_experiments_guard_update
 BEFORE UPDATE ON research_experiments
 WHEN OLD.id <> NEW.id
   OR OLD.title <> NEW.title
@@ -381,6 +386,7 @@ WHEN OLD.id <> NEW.id
   OR OLD.hypothesis <> NEW.hypothesis
   OR IFNULL(OLD.parent_experiment_id, '') <> IFNULL(NEW.parent_experiment_id, '')
   OR OLD.attempt_index <> NEW.attempt_index
+  OR OLD.is_reproduction <> NEW.is_reproduction
 BEGIN SELECT RAISE(ABORT, 'research_experiments content is append-only'); END;
 
 -- runs：完全 insert-only

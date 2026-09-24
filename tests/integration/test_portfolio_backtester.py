@@ -278,3 +278,25 @@ def test_t1_and_lot_rules_via_engine(market, registry):
     for t in result["trades"]:
         if t["side"] == "buy":
             assert t["qty"] % 100 == 0
+
+
+def test_run_params_records_holdout_touch(market, registry):
+    """loop-review R1-P2-6（决策 C3）：非实验路径触碰 holdout 必留痕——
+    engine_runs.run_params_json 带显式 holdout_touched 布尔。"""
+    import json as _json
+
+    cfg = parse_strategy_yaml(CFG, registry)
+    # sample 窗口（2023 年）→ 不触碰 holdout
+    r_sample = run_backtest(market, config=cfg, registry=registry,
+                            start=date(2023, 3, 1), end=date(2023, 12, 29))
+    p_sample = _json.loads(
+        EngineStore.get_run(market, r_sample["run_id"])["run_params_json"])
+    assert p_sample["holdout_touched"] is False
+    # 请求窗口跨入 holdout 段（end ≥ 2025-01-01）→ 触碰必留痕（不拦截——
+    # 决策 C3；fixture 数据止于 2023，但触碰判定按请求窗口与 holdout.check_window
+    # 同口径——意图伸进样本外即留痕）
+    r_hold = run_backtest(market, config=cfg, registry=registry,
+                          start=date(2023, 10, 1), end=date(2025, 6, 30))
+    p_hold = _json.loads(
+        EngineStore.get_run(market, r_hold["run_id"])["run_params_json"])
+    assert p_hold["holdout_touched"] is True

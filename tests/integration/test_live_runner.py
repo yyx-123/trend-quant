@@ -132,3 +132,60 @@ def test_live_list_requires_existing_strategy(market, registry):
             market, strategy_version_id="ghost@9", user_id=user["id"],
             as_of=datetime(2024, 3, 15, 14, 0),
         )
+
+
+def test_live_buy_list_lot_aligned(market, registry):
+    """loop-review R1-P1-5：清单买入数量必须整手（base-v1 的 equal_risk 产
+    quantity 意图任意浮点股数；回测引擎 matcher 内对齐，清单路径此前只
+    int() 截断，产出 16259 这类不可执行数量）。"""
+    versions = _seed(market, registry)
+    user = _user(market)
+    as_of = datetime(2024, 3, 15, 14, 0)
+    target = generate_daily_list(
+        market, strategy_version_id=versions["base-v1"], user_id=user["id"],
+        as_of=as_of, initial_capital=1_000_000,
+    )
+    assert target["buys"], "fixture 应产出买入清单"
+    for item in target["buys"]:
+        assert item["qty"] % 100 == 0, f"{item['symbol']} qty={item['qty']} 非整手"
+
+
+def test_live_account_rebuild_aggregates_same_symbol(market, registry):
+    """loop-review R1-P2-1：同标的多次 open 的 manual_trades 聚合重建——
+    不再静默覆盖（现金扣两笔、持仓只剩最后一笔的失真）。"""
+    from portfolio.live import rebuild_account_from_manual_trades
+
+    versions = _seed(market, registry)
+    user = _user(market)
+    market.create_manual_trade(user["id"], "LIV000.SS", "2024-03-13", 20.0, 1000)
+    market.create_manual_trade(user["id"], "LIV000.SS", "2024-03-14", 22.0, 500)
+    # 先产一次清单（确认持仓并入取数集的真实形态），再做重建对拍
+    generate_daily_list(
+        market, strategy_version_id=versions["base-v1"], user_id=user["id"],
+        as_of=datetime(2024, 3, 15, 14, 0), initial_capital=100_000,
+    )
+    from gateway.service import Gateway
+
+    gateway = Gateway(market)
+    as_of = datetime(2024, 3, 15, 14, 0)
+    panel = gateway.get_panel(
+        symbols=["LIV000.SS"], start=None, end=as_of.date(),
+        fields=["open", "high", "low", "close", "volume", "amount"],
+        adjust="qfq", as_of=as_of, mode="live",
+        caller_layer="live",
+    )
+    from portfolio.slots import ensure_builtins
+
+    ensure_builtins()
+    from portfolio.slots import REGISTRY as _R
+
+    prisk = _R.require("hard_stop@1", slot="position_risk").factory({"atr_mul": 1.5})
+    account = rebuild_account_from_manual_trades(
+        market, user_id=user["id"], initial_capital=100_000,
+        panel=panel, position_risk_module=prisk,
+    )
+    pos = account.positions.get("LIV000.SS")
+    assert pos is not None and pos.quantity == 1500
+    # 加权成本 = (1000×20 + 500×22) / 1500 ≈ 20.667
+    assert pos.avg_cost == pytest.approx((1000 * 20.0 + 500 * 22.0) / 1500, abs=1e-6)
+    assert pos.entry_date == pd.Timestamp("2024-03-13").date()  # 最早入场

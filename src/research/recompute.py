@@ -35,8 +35,39 @@ def _rewrite_module_ref(obj, old_ref: str, new_ref: str):
     return obj
 
 
+def _collect_module_refs(obj, refs: set) -> None:
+    """递归收集 spec 中的模块引用串（精确判定，loop-review R1-P2-4）。
+
+    两种合法形态：完整引用 "name@version"（dict 的 module/to/from 值）与
+    带 `(` 的内联参数形（如 "heat_cap@1(0.06)"）——按 name@ 前缀匹配。"""
+    if isinstance(obj, str):
+        if "(" in obj:
+            head = obj.split("(", 1)[0]
+        else:
+            head = obj
+        refs.add(head.strip())
+        return
+    if isinstance(obj, list):
+        for x in obj:
+            _collect_module_refs(x, refs)
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in ("module", "to", "from", "event", "signal_module", "base", "ref"):
+                _collect_module_refs(v, refs)
+            else:
+                _collect_module_refs(v, refs)
+
+
 def find_experiments_using(db, module_ref: str) -> list[dict]:
-    """spec 中引用某模块版本的全部实验（verdicted 才复核——半成品不复核）。"""
+    """spec 中**精确引用**某模块版本的全部实验（verdicted 才复核——半成品
+    不复核）。
+
+    R1-P2-4：SQL LIKE 只作初筛；命中与否由解析后的引用集**精确相等**判定。
+    此前 `module_ref in text` 的子串判断会让 `stop@1` 的 campaign 误伤所有
+    引用 `hard_stop@1`/`ma_stop@1` 的实验——被误伤实验按原 spec 重跑并写入
+    带错误 recompute_with 标签的复核 verdict，污染台账。
+    """
     with db.connect() as conn:
         rows = conn.execute(
             """SELECT id, spec_json FROM research_experiments
@@ -47,8 +78,9 @@ def find_experiments_using(db, module_ref: str) -> list[dict]:
     out = []
     for row in rows:
         spec = loads(row["spec_json"], {})
-        text = json.dumps(spec, ensure_ascii=False)
-        if module_ref in text:
+        refs: set = set()
+        _collect_module_refs(spec, refs)
+        if module_ref in refs:
             out.append({"id": row["id"], "spec": spec})
     return out
 
@@ -116,6 +148,21 @@ def recompute_campaign(
                    WHERE id = ?""",
                 (v["id"],),
             )
+        # R1-P3-10：复核 run 同样落 research_runs（experiment→runs→engine_runs
+        # 血缘链在复核路径不得断——否则复核 verdict 查不到取证运行）
+        from research import runs as _runs
+
+        for r in parts.get("runs", []):
+            try:
+                _runs.insert_run(
+                    db, experiment_id=exp_id,
+                    engine_run_id=r.get("engine_run_id"),
+                    window_start=r.get("window_start"), window_end=r.get("window_end"),
+                    window_kind=r.get("window_kind", "sample"),
+                    holdout_touched=bool(r.get("holdout_touched")),
+                )
+            except Exception:
+                pass  # 血缘补录失败不影响复核结论（runs 行非判定输入）
         recomputed.append({"id": exp_id, "verdict_id": v["id"]})
     return {
         "old": old_module_ref, "new": new_module_ref,

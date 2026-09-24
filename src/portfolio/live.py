@@ -50,6 +50,11 @@ def rebuild_account_from_manual_trades(
 
     持仓止损状态按模块公式用面板数据重建（highest_since_buy 取买入以来
     最高、ATR 取买入日含当根——与回测口径一致的可重建部分全部重建）。
+
+    同标的多次 open（存量 manual_trades 允许，loop-review R1-P2-1）：
+    按 symbol 聚合——qty 求和、加权成本、entry_date 取最早——不得静默
+    覆盖（旧实现现金扣了 N 笔成本、持仓只剩最后一笔，权益/heat/止损
+    全部失真且被覆盖仓位失管）。
     """
     trades = db.list_manual_trades(user_id)
     open_trades = [t for t in trades if t["status"] == "open"]
@@ -61,12 +66,31 @@ def rebuild_account_from_manual_trades(
         cash += float(t["sell_price"] or 0.0) * float(t["shares"])  # 卖出总额
         cash -= float(t["buy_price"]) * float(t["shares"])           # 对应买入成本
 
-    account = Account(cash=cash)
+    # 同标的聚合（R1-P2-1）
+    agg: dict[str, dict] = {}
     for t in open_trades:
         symbol = str(t["symbol"]).upper()
         qty = int(float(t["shares"]))
+        buy_price = float(t["buy_price"])
         buy_date = pd.Timestamp(t["buy_date"]).date()
-        entry_price = float(t["buy_price"])
+        slot = agg.get(symbol)
+        if slot is None:
+            agg[symbol] = {
+                "qty": qty, "cost": qty * buy_price, "entry_price": buy_price,
+                "entry_date": buy_date,
+            }
+        else:
+            slot["qty"] += qty
+            slot["cost"] += qty * buy_price
+            slot["entry_price"] = slot["cost"] / slot["qty"]  # 加权成本
+            slot["entry_date"] = min(slot["entry_date"], buy_date)  # 最早入场
+    del open_trades
+
+    account = Account(cash=cash)
+    for symbol, slot in agg.items():
+        qty = int(slot["qty"])
+        entry_price = float(slot["entry_price"])
+        buy_date = slot["entry_date"]
         stop_state = None
         if position_risk_module is not None:
             stop_state = _rebuild_stop_state(
@@ -116,10 +140,14 @@ def _rebuild_stop_state(module, panel, symbol: str, buy_date: date, entry_price:
     period = int(getattr(module, "atr_period", 20) or 20)
 
     def _atr_through(row_end: int) -> float:
+        # close 列内前向填充（loop-review R1-P3-5 同口径）：复牌日 TR 含
+        # 跨停牌跳空——与回测侧 _precompute_atr 一致；连续序列结果不变。
+        closes = panel.data["close"][: row_end + 1, col]
+        closes_ffill = pd.Series(closes).ffill().to_numpy(dtype=float)
         df = pd.DataFrame({
             "high": panel.data["high"][: row_end + 1, col],
             "low": panel.data["low"][: row_end + 1, col],
-            "close": panel.data["close"][: row_end + 1, col],
+            "close": closes_ffill,
         })
         atr_series = core_atr(df, period)
         if len(atr_series):
@@ -159,6 +187,28 @@ def _rebuild_stop_state(module, panel, symbol: str, buy_date: date, entry_price:
         ma = float(valid[-n:].mean()) if len(valid) >= n else None
         return StopState(stop_price=ma, highest_since_buy=highest, atr_at_entry=atr_entry,
                          fill_mode="tail", heat_approximate=True)
+    if key.startswith("any_of"):
+        # 组合止损重建（loop-review R1-P2-2）：any_of = 任一子模块触发即生效
+        # （§5.2.8 默认语义），等价于取各成员止损价的 max。成员实例在
+        # _MetaBase._subs；子模块自身无法拿到 symbol 级上下文，这里按成员
+        # 类型逐个重建其 stop_price（不认识/重建不出的成员忽略并在
+        # module_state 标注，供清单 caveat 判读）。
+        member_stops: list[float] = []
+        unknown_members: list[str] = []
+        for sub, sub_key in getattr(module, "_subs", []) or []:
+            sub_state = _rebuild_stop_state(sub, panel, symbol, buy_date, entry_price)
+            if sub_state is not None and sub_state.stop_price is not None:
+                member_stops.append(float(sub_state.stop_price))
+            else:
+                unknown_members.append(str(sub_key))
+        combined = max(member_stops) if member_stops else None
+        return StopState(
+            stop_price=combined, highest_since_buy=highest, atr_at_entry=atr_entry,
+            fill_mode="intraday_stop",
+            module_state=(
+                {"any_of_unrebuildable": unknown_members} if unknown_members else {}
+            ),
+        )
     # 其余模块（none/time_stop/…）：保守重建公共字段
     return StopState(stop_price=None, highest_since_buy=highest, atr_at_entry=atr_entry,
                      fill_mode=getattr(module, "_fill_mode", "intraday_stop"))
@@ -286,14 +336,25 @@ def generate_daily_list(
         gateway.get_tradability(symbols=list(panel.symbols), dates=[panel.dates[t_idx]],
                                 as_of=as_of, caller_layer="live")
     )
+    # 整手单位（loop-review R1-P1-5）：quantity 意图（equal_risk 产任意浮点
+    # 股数）同样必须整手对齐——回测引擎在 matcher 内做，清单路径此前只
+    # int() 截断，产出 16259 这类不可执行数量。
+    from engine.profiles import get_profile as _get_profile
+
+    lot = max(int(_get_profile("cn_stock").lot_size), 1)
     sell_list = []
     for intent in sells:
         price = close_today.get(intent.symbol)
         pos = account.positions.get(intent.symbol)
         card = cards.get((panel.dates[t_idx], intent.symbol))
+        sellable = int(pos.sellable_quantity) if pos else 0
         sell_list.append({
             "symbol": intent.symbol,
             "qty": int(pos.quantity) if pos else None,
+            # T+1（R1-P3-19）：当日买入 sellable=0，触发的止损卖出当日不可执行
+            # （引擎侧会记 t1_block）——清单显式标注，人工执行不再猜。
+            "sellable_qty": sellable,
+            "executable": bool(sellable > 0),
             "reason": intent.reason,
             "ref_price": price,
             "est_price": round(price * (1 - slip), 4) if price else None,
@@ -302,10 +363,10 @@ def generate_daily_list(
     buy_list = []
     for intent in admitted:
         price = close_today.get(intent.symbol)
-        qty_est = (
-            int(intent.value) if intent.intent_type == "quantity"
-            else int(intent.value / price // 100 * 100) if price else 0
-        )
+        if intent.intent_type == "quantity":
+            qty_est = int(intent.value // lot) * lot if intent.value else 0
+        else:
+            qty_est = int(intent.value / price // lot) * lot if price else 0
         if qty_est <= 0:
             continue
         card = cards.get((panel.dates[t_idx], intent.symbol))
@@ -329,7 +390,13 @@ def generate_daily_list(
         "gate_log": ctx.gate_log,
         "cash_est": round(shadow.cash, 2),
         "heat": None if shadow_view.heat() is None else round(shadow_view.heat(), 2),
-        "caveats": [*freshness_caveats, *_live_caveats(config)],
+        "caveats": [
+            *freshness_caveats,
+            *_live_caveats(config),
+            # R1-P2-2：组合止损重建不全（如 any_of 含 time_stop/breakeven 等
+            # 无止损价成员）时，heat/heat_cap 语义受限必须显式可见
+            *_unrebuildable_stop_caveats(account),
+        ],
     }
     # 实盘运行档案（§4.1 + 评审 DS-P3-4）：清单挂 run 级血缘锚点
     from engine.engine import new_run_id as _new_run_id
@@ -469,6 +536,27 @@ def _live_caveats(config) -> list[str]:
             caveats.append(
                 f"{gate.module} 需要组合净值历史，实盘清单 MVP 不驱动它（仅回测生效）"
             )
+    return caveats
+
+
+def _unrebuildable_stop_caveats(account: Account) -> list[str]:
+    """持仓止损状态重建不全（R1-P2-2）：any_of 中含无法重建出止损价的成员、
+    或模块本身按设计无止损价——组合热与 heat_cap 的可用性受限，须标注。"""
+    caveats: list[str] = []
+    for symbol, pos in account.positions.items():
+        if pos.stop is None or pos.stop.stop_price is None:
+            unrebuildable = (pos.stop.module_state or {}).get("any_of_unrebuildable") \
+                if pos.stop is not None else None
+            if unrebuildable:
+                caveats.append(
+                    f"{symbol}: any_of 止损含重建不出 stop_price 的成员"
+                    f"（{','.join(map(str, unrebuildable))}）——组合热记 None，heat_cap 不卡控"
+                )
+            else:
+                caveats.append(
+                    f"{symbol}: 持仓无止损价（position_risk={pos.position_risk_ref or 'unknown'}）"
+                    "——组合热记 None，heat_cap 不卡控"
+                )
     return caveats
 
 

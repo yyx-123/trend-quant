@@ -90,9 +90,13 @@ def build_conclusion_summary(db, topic_id: str) -> dict:
             # （spec.expect）同向的占比——不是"与多数方向一致"（那个构造上
             # 恒 ≥0.5，配 0.7 门槛近乎恒真）
             expect = str(loads(exp["spec_json"], {}).get("expect", "positive"))
-            dir_total += 1
-            if (effect > 0) == (expect != "negative"):
-                dir_hits += 1
+            # R1-P3-15：effect == 0 无方向——不计入一致率的分子或分母
+            # （旧行为 (0>0)==False 在 expect=negative 时把零效应计成命中）
+            expect_positive = expect != "negative"
+            if effect != 0:
+                dir_total += 1
+                if (effect > 0) == expect_positive:
+                    dir_hits += 1
         for w in loads(v.get("warnings_json"), []):
             warnings_counter[w.split("(")[0]] += 1
         evidence_all = loads(v.get("evidence_json"), {})

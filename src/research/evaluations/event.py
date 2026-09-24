@@ -91,6 +91,11 @@ def _spec_errors(spec: dict, ctx: dict) -> list[str]:
         errors.append("spec.horizons must be a non-empty list")
     elif any(int(h) <= 0 for h in horizons):
         errors.append("spec.horizons must be positive ints")
+    # primary_horizon ∈ horizons（R1-P3-8）：写错时 runner 静默取空 dict
+    # → 判定永远 inconclusive 的"假 inconclusive"必须在入口拦住
+    primary = spec.get("primary_horizon")
+    if primary is not None and horizons and int(primary) not in [int(h) for h in horizons]:
+        errors.append(f"spec.primary_horizon must be one of horizons {horizons}, got {primary}")
     if spec.get("expect", "positive") not in ("positive", "negative"):
         errors.append("spec.expect must be positive|negative")
     if spec.get("event_side", "entry") not in ("entry", "exit", "both"):
@@ -129,8 +134,10 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
     transition_matrix = bool(spec.get("transition_matrix", False))
 
     windows = holdout.get_windows(db)
-    start = str(spec.get("window", [windows["sample_start"], windows["sample_end"]])[0])
-    end = str(spec.get("window", [windows["sample_start"], windows["sample_end"]])[1])
+    # `or` 形（R1-P3-8）：spec.window 显式为 null 时 .get(key, default) 仍取
+    # None → None[0] TypeError 转 failed；统一为与 backtest/bucket 同写法
+    window = spec.get("window") or [windows["sample_start"], windows["sample_end"]]
+    start, end = str(window[0]), str(window[1])
     touched = holdout.check_window(
         db, start=start, end=end, experiment_id=experiment["id"],
         token_id=(ctx or {}).get("holdout_token"),

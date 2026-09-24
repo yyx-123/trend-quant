@@ -210,9 +210,13 @@ async def lifespan(app: FastAPI):
             payload.get("failed", 0),
             payload.get("total", 0),
         )
-        if payload.get("status") in ("skipped_non_trading_day", "deferred_backtest_running"):
+        if payload.get("status") in (
+            "skipped_non_trading_day", "deferred_backtest_running", "skipped_already_running"
+        ):
             # 冻结顺延（决策 A3）：当日更被回测冻结推迟时，post-update pipeline
             # （除权检测 + 指标重建 = 写任务）同样不得抢跑。
+            # skipped_already_running（R1-P1-4）：另一触发源正在执行日更，
+            # post-update 由那次执行完成，本触发不得叠加。
             return
         # Post-update orchestration (dividend detection + indicator rebuild)
         # lives here so that core/jobs stays free of services-layer imports.
@@ -296,22 +300,30 @@ async def lifespan(app: FastAPI):
 
     # 投研基建：research worker（有界并发池）随 app 启动；测试环境
     # （TREND_QUANT_DISABLE_SCHEDULER=1）不起后台线程。
+    # 降级保护（loop-review R1-P1-3）：worker 启动链上任一失败（坏草稿/
+    # 库忙/磁盘满）只降级研究栈，不得穿出 lifespan 拖垮整个 app——存量
+    # 业务（看板/回测/MCP）与本次新增代码共享启动路径。
     if not _background_tasks_disabled():
-        from portfolio.slots import REGISTRY as _REGISTRY
-        from portfolio.slots import ensure_builtins as _ensure
-        from research.api import ResearchService
-        from research.modules import load_reviewed_modules
-        from research.worker import ResearchWorker
+        try:
+            from portfolio.slots import REGISTRY as _REGISTRY
+            from portfolio.slots import ensure_builtins as _ensure
+            from research.api import ResearchService
+            from research.modules import load_reviewed_modules
+            from research.worker import ResearchWorker
 
-        _ensure()
-        load_reviewed_modules(db, _REGISTRY)
-        research_worker = ResearchWorker(db, registry=_REGISTRY, max_workers=2)
-        research_worker.submit_all_queued()  # 启动补偿：上次进程退出遗留的 queued 实验
-        research_worker.start()
-        app.state.research_worker = research_worker
-        app.state.research_service = ResearchService(
-            db, registry=_REGISTRY, worker=research_worker
-        )
+            _ensure()
+            load_reviewed_modules(db, _REGISTRY)
+            research_worker = ResearchWorker(db, registry=_REGISTRY, max_workers=2)
+            research_worker.submit_all_queued()  # 启动补偿：上次进程退出遗留的 queued 实验
+            research_worker.start()
+            app.state.research_worker = research_worker
+            app.state.research_service = ResearchService(
+                db, registry=_REGISTRY, worker=research_worker
+            )
+        except Exception:
+            logger.exception("research worker startup failed — degrading to no research stack")
+            app.state.research_worker = None
+            app.state.research_service = None
     else:
         app.state.research_worker = None
         app.state.research_service = None
@@ -606,7 +618,15 @@ async def root_redirect() -> RedirectResponse:
 # 机对机通道：登录墙豁免（AuthWall 提前放行），由 McpBearerMiddleware 做
 # Bearer token 鉴权（TREND_MCP_TOKENS，token→用户映射）；写工具的用户身份
 # 完全来自 token 映射，不再以工具参数传密码。
+# ImportError 收窄（loop-review R1-P3-20）：只有可选依赖 `mcp` 缺席才静默
+# 跳过挂载；trend_mcp.server 内部链上的任何 ImportError（如 research_tools
+# 的坏导入）属于代码错误——移出 try，fail-fast 暴露，而不是被误报为
+# "MCP package not installed" 后 /mcp 整个静默消失。
 try:
+    import mcp  # noqa: F401
+except ImportError:
+    logger.info("MCP package not installed – skipping /mcp endpoint")
+else:
     from app.mcp_auth import McpBearerMiddleware, load_mcp_tokens
     from trend_mcp.server import mcp as _mcp_app
 
@@ -618,5 +638,3 @@ try:
         )
     app.mount("/mcp", McpBearerMiddleware(_mcp_app.sse_app(), _mcp_tokens))
     logger.info("MCP SSE endpoint mounted at /mcp/sse (Bearer token auth, %d token(s))", len(_mcp_tokens))
-except ImportError:
-    logger.info("MCP package not installed – skipping /mcp endpoint")

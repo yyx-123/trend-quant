@@ -7,6 +7,8 @@ cookie、退出销毁 session、登录页 next 参数。conftest 的 client fixt
 
 from __future__ import annotations
 
+import pytest
+
 
 class TestWallBlocksAnonymous:
     def test_page_redirects_to_login_with_next(self, anon_client) -> None:
@@ -141,11 +143,17 @@ class TestWallEdgeCases:
     def test_mcp_requires_bearer_token(self, anon_client) -> None:
         """P0-1：/mcp 登录墙豁免但由 McpBearerMiddleware 把守——
         无 token 请求 /mcp/sse → 401（失败关闭，未配置 TREND_MCP_TOKENS 同样 401）。"""
+        pytest.importorskip(
+            "mcp", reason="可选依赖 mcp 未安装时 /mcp 通道不挂载（跳过而非误报 404）"
+        )
         resp = anon_client.get("/mcp/sse", follow_redirects=False)
         assert resp.status_code == 401
         assert "detail" in resp.json()
 
     def test_mcp_invalid_token_401(self, anon_client) -> None:
+        pytest.importorskip(
+            "mcp", reason="可选依赖 mcp 未安装时 /mcp 通道不挂载（跳过而非误报 404）"
+        )
         resp = anon_client.get(
             "/mcp/sse", headers={"Authorization": "Bearer wrong"}, follow_redirects=False
         )

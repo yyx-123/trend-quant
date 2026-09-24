@@ -122,7 +122,7 @@ def _probe(slot: str, instance, ctx):
         return [e.symbol for e in instance.rank(ctx, _candidates(ctx))]
     if slot == "sizing":
         intent = instance.size(ctx, _candidates(ctx)[0], 9.0)
-        return None if intent is None else (intent.symbol, round(float(intent.value), 6))
+        return None if intent is None else (intent.symbol, round(float(intent.value), 9))
     if slot == "portfolio_risk":
         from engine.models import OrderIntent
 
@@ -132,7 +132,7 @@ def _probe(slot: str, instance, ctx):
             for s in ctx.panel.symbols[2:4]
         ]
         out = instance.admit(ctx, intents, [])
-        return [(i.symbol, round(float(i.value), 6)) for i in out]
+        return [(i.symbol, round(float(i.value), 9)) for i in out]
     if slot == "position_risk":
         from engine.models import Fill, Position
 
@@ -146,14 +146,14 @@ def _probe(slot: str, instance, ctx):
                        avg_cost=price, entry_date=ctx.date, entry_price=price, stop=state)
         intent = instance.evaluate(ctx, pos)
         return (
-            None if state.stop_price is None else round(float(state.stop_price), 6),
+            None if state.stop_price is None else round(float(state.stop_price), 9),
             None if intent is None else (intent.reason, intent.fill_mode),
         )
     if slot == "execution":
         policy = instance.fill_policy()
         exits = instance.rotation_policy(ctx, _candidates(ctx), list(ctx.account.positions))
         return (
-            {k: round(float(v), 6) for k, v in policy.items()},
+            {k: round(float(v), 9) for k, v in policy.items()},
             [e.symbol for e in exits],
             bool(instance.allows_action(ctx)),
         )
@@ -234,7 +234,10 @@ def run_module_gate(factory, *, slot: str, params: dict | None = None) -> dict:
         checks["determinism"] = {"ok": False, "error": str(exc)[:300]}
         return {"passed": False, "checks": checks}
 
-    # 3. 前缀稳定性：截断到 cut 与全量分别 prepare，≤cut 的探测输出位级一致
+    # 3. 前缀稳定性：截断到 cut 与全量分别 prepare，≤cut 的探测输出一致。
+    #    口径如实声明（R1-P3-14）：单切点（cut=70/140）探针 + 1e-9 量化容差
+    #    ——不是数学意义的"位级一致"；小于 1e-9 的泄漏与多切点泄漏需靠
+    #    golden 值测试 + 人抽检兜底（详设 §6.2.2 的分层防线）
     try:
         full = synthetic_panel(n_days=140)
         cut = 70

@@ -427,18 +427,54 @@ def test_execution_rotation_behaviors(registry):
         ["M01.SS"],
     )
     assert exits and exits[0].symbol == "M01.SS"
-    # rebalance_band（K3-R2-注记-4 补强）：行动日对漂移超 band 的持仓发 exit；
-    # 权重在 band 内不发
-    rb = registry.require("rebalance_band@1", slot="execution").factory(
+    # rebalance_band（loop-review R1-P1-1 语义修正）：**仅 overweight** 触发
+    # exit；underweight 不动作（MVP 无加仓/部分卖出 + 同标的同日禁卖后回买，
+    # 跌了卖出只会把再平衡变成割底空仓）；band 内不触发
+    # （旧断言"深度 underweight → 清仓"锁的正是被修复的缺陷行为，已重锚）
+    rb_under = registry.require("rebalance_band@1", slot="execution").factory(
         {"band": 0.01, "action_gate": {"freq": "daily"}, "weights": {"M01.SS": 0.99}}
     )
-    # 当前 M01 权重 ≈ 100×16.05/101605 ≈ 1.6% vs 目标 99% → 漂移超 band → exit
-    exits = rb.rotation_policy(ctx, [], ["M01.SS"])
+    # 当前 M01 权重 ≈ 100×16.05/101605 ≈ 1.6% vs 目标 99% → underweight → 不动作
+    assert rb_under.rotation_policy(ctx, [], ["M01.SS"]) == []
+    rb_over = registry.require("rebalance_band@1", slot="execution").factory(
+        {"band": 0.01, "action_gate": {"freq": "daily"}, "weights": {"M01.SS": 0.001}}
+    )
+    # 实际 1.6% vs 目标 0.1% → overweight 超 band → exit
+    exits = rb_over.rotation_policy(ctx, [], ["M01.SS"])
     assert exits and exits[0].symbol == "M01.SS" and exits[0].reason == "rebalance_band"
     rb_in = registry.require("rebalance_band@1", slot="execution").factory(
         {"band": 0.01, "action_gate": {"freq": "daily"}, "weights": {"M01.SS": 0.016}}
     )
     assert rb_in.rotation_policy(ctx, [], ["M01.SS"]) == []
+    # buffered_rotation max_swaps（R1-P3-2）：参数真实生效——2 只持仓 +
+    # 2 个更强候选 → max_swaps=2 换 2 只（面板动量：M04 −0.11 < M01 −0.059
+    # < M00 0.109 < M03 0.337；负分持仓阈值按 0 判）
+    ctx.account._account.positions["M04.SS"] = Position(
+        symbol="M04.SS", quantity=100, sellable_quantity=100, avg_cost=10.0,
+        entry_date=panel.dates[DAYS_N - 30], entry_price=10.0,
+        stop=StopState(stop_price=9.0, highest_since_buy=10.0, atr_at_entry=0.3),
+    )
+    rot2 = registry.require("buffered_rotation@1", slot="execution").factory(
+        {"buffer": 0.01, "max_swaps": 2}
+    )
+    exits2 = rot2.rotation_policy(
+        ctx,
+        [SignalEvent(symbol="M03.SS", kind="entry", date=ctx.date, meta={}),
+         SignalEvent(symbol="M00.SS", kind="entry", date=ctx.date, meta={})],
+        ["M04.SS", "M01.SS"],
+    )
+    assert len(exits2) == 2 and {e.symbol for e in exits2} == {"M04.SS", "M01.SS"}
+    # max_swaps=1 时同样输入只换最差的 M04
+    rot1 = registry.require("buffered_rotation@1", slot="execution").factory(
+        {"buffer": 0.01, "max_swaps": 1}
+    )
+    exits1 = rot1.rotation_policy(
+        ctx,
+        [SignalEvent(symbol="M03.SS", kind="entry", date=ctx.date, meta={}),
+         SignalEvent(symbol="M00.SS", kind="entry", date=ctx.date, meta={})],
+        ["M04.SS", "M01.SS"],
+    )
+    assert len(exits1) == 1 and exits1[0].symbol == "M04.SS"
 
 
 def test_meta_any_of_all_of(registry):

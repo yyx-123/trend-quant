@@ -162,7 +162,8 @@ class ResearchWorker:
                 self._dispatch_iterations += 1
                 self._stop.wait(0.5)
                 continue
-            assert self._pool is not None
+            if self._pool is None:
+                break  # R1-P3-18：stop() 已置空池（join 超时路径）——dispatcher 优雅退出，不再裸 assert 崩线程
             self._pool.submit(self._run_one, experiment_id, owner)
 
     def _run_one(self, experiment_id: str, owner: str) -> None:

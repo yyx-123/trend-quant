@@ -30,6 +30,17 @@ def _spec_errors(spec: dict, ctx: dict) -> list[str]:
         return ["spec must be a mapping"]
     if str(spec.get("metric") or "") not in METRICS:
         errors.append(f"spec.metric must be one of {METRICS}")
+    uni = spec.get("universe")
+    if uni is not None and uni != "liquidity_default":
+        ok = (
+            (isinstance(uni, str) and uni.startswith("single(") and uni.endswith(")")
+             and uni[7:-1].strip())
+            or isinstance(uni, (list, tuple))
+        )
+        if not ok:
+            errors.append(
+                f"spec.universe must be liquidity_default|single(SYMBOL)|[symbols], got {uni!r}"
+            )
     return errors
 
 

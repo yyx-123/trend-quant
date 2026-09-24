@@ -2,6 +2,8 @@
 # MVP 整手约束下的近似实现：流动性 top-50 等权、月度再平衡（开发日志记录：
 # 设计原文"universe 等权月度再平衡"，874 只全摊在 100 万资金下大量标的不够
 # 一手，top-50 是资金可执行的忠实近似）。
+# 再平衡口径（loop-review R1-P1-1）：band 触发仅对 overweight 生效（MVP
+# 语义约束，同 60/40 注记）。
 name: bench-equal-weight
 description: 流动性 top-50 等权月度再平衡（universe 等权的可执行近似）
 universe:   {module: liquidity_filter@1, params: {min_amount20: 0, top_n: 50}}

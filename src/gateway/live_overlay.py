@@ -26,13 +26,24 @@ def default_live_overlay(db):
         for symbol, quote in (quotes or {}).items():
             if not quote:
                 continue
-            prev = db.load_market_data(symbol)
+            # R1-P3-4：只为取上一根 bar 的 volume——此前 load_market_data
+            # 拉全量历史（874 标的 × 10 年日K），每日 14:00 白耗 IO；
+            # 改为最近 10 个自然日窗口查询（长假期后仍有上一交易日 bar）
             prev_vol = 0.0
-            if prev is not None and not prev.empty:
-                try:
-                    prev_vol = float(prev["volume"].iloc[-1])
-                except (TypeError, ValueError, IndexError):
-                    prev_vol = 0.0
+            try:
+                import pandas as _pd
+
+                win_start = (_pd.Timestamp(as_of) - _pd.Timedelta(days=10)).date()
+                prev = db.load_market_data_window_many(
+                    [symbol], win_start, None, price_mode="raw", period="1d",
+                )
+                frames = prev.get(symbol) if isinstance(prev, dict) else None
+                if frames is not None and len(frames):
+                    rows = frames.tail(1) if hasattr(frames, "tail") else frames
+                    vol = rows["volume"].iloc[-1] if hasattr(rows, "iloc") else rows[-1]["volume"]
+                    prev_vol = float(vol)
+            except (TypeError, ValueError, IndexError, KeyError, AttributeError):
+                prev_vol = 0.0
             try:
                 out[symbol] = build_synthetic_bar(quote, prev_vol)
             except Exception:

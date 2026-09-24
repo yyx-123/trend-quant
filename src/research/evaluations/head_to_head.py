@@ -126,9 +126,19 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
     psr_ab = _psr(sr_a, sr_b, len(ra), skew_a, kurt_a)
 
     from rule_backtest.metrics import compute_summary
+    from research.evaluations._common import long_window_annotations
 
-    summary_a = compute_summary(result_a["daily_nav"], trades=[], turnover_total=0.0)
-    summary_b = compute_summary(result_b["daily_nav"], trades=[], turnover_total=0.0)
+    # R1-P2-5：换手不得报假 0（DS-P1-3 同类残留）——两条腿都落了 engine_runs，
+    # 按 fills 实算成交总额。
+    def _real_turnover(result: dict) -> float:
+        fills = (
+            portfolio_service.load_fills(db, result["run_id"])
+            if result.get("run_id") else []
+        )
+        return sum(float(f["quantity"]) * float(f["fill_price"]) for f in fills)
+
+    summary_a = compute_summary(result_a["daily_nav"], trades=[], turnover_total=_real_turnover(result_a))
+    summary_b = compute_summary(result_b["daily_nav"], trades=[], turnover_total=_real_turnover(result_b))
 
     evidence = {
         "deltas": {
@@ -144,7 +154,11 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
             "psr_a_over_b": psr_ab,
         },
     }
-    warnings = ["survivorship_bias(universe 为当前池穿越历史)"]
+    warnings = [
+        "survivorship_bias(universe 为当前池穿越历史)",
+        # R1-P2-5：长窗口三注记（§6.6.4 对全部评估模块生效，此前漏接）
+        *long_window_annotations(start),
+    ]
     if touched:
         warnings.append("holdout_touched")
 

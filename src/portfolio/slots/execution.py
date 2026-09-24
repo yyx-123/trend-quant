@@ -96,25 +96,41 @@ class BufferedRotationExecution(TailSessionExecution):
     def rotation_policy(self, ctx, candidates, holdings) -> list[ExitOrderIntent]:
         if not candidates or not holdings:
             return []
-        worst = min(holdings, key=lambda s: self._momentum(ctx, s))
-        worst_score = self._momentum(ctx, worst)
-        best = max(candidates, key=lambda e: self._momentum(ctx, e.symbol))
-        best_score = self._momentum(ctx, best.symbol)
-        if worst_score == -np.inf or best_score == -np.inf:
-            return []
-        threshold = worst_score * (1.0 + self.buffer) if worst_score >= 0 else 0.0
-        if best_score > threshold:
-            return [ExitOrderIntent(
-                symbol=worst, decision_date=ctx.date, fill_mode="tail",
-                source="rotation", reason="buffered_rotation",
-            )]
-        return []
+        # max_swaps：单行动日至多换 N 只（loop-review R1-P3-2：参数此前
+        # 声明未用，恒至多换 1 只——现按声明的参数域真实生效）
+        ranked_holdings = sorted(holdings, key=lambda s: self._momentum(ctx, s))
+        ranked_candidates = sorted(candidates, key=lambda e: self._momentum(ctx, e.symbol), reverse=True)
+        exits: list[ExitOrderIntent] = []
+        swaps = 0
+        for worst, best in zip(ranked_holdings, ranked_candidates):
+            if swaps >= self.max_swaps:
+                break
+            worst_score = self._momentum(ctx, worst)
+            best_score = self._momentum(ctx, best.symbol)
+            if worst_score == -np.inf or best_score == -np.inf:
+                break
+            threshold = worst_score * (1.0 + self.buffer) if worst_score >= 0 else 0.0
+            if best_score > threshold:
+                exits.append(ExitOrderIntent(
+                    symbol=worst, decision_date=ctx.date, fill_mode="tail",
+                    source="rotation", reason="buffered_rotation",
+                ))
+                swaps += 1
+            else:
+                break  # 最好候选都过不了最差持仓的阈值，其余更不可能
+        return exits
 
 
 class RebalanceBandExecution(TailSessionExecution):
-    """带宽/日历再平衡（MVP 整仓语义内）：行动日对偏离目标权重超 band 的
-    持仓发 exit（先卖后买同日完成再平衡）。params: band=0.05,
-    action_gate={freq}, weights={symbol: w}（缺省 = 成员均分 1/N）。"""
+    """带宽/日历再平衡（MVP 整仓语义内）：行动日仅对 **overweight**（实际
+    权重高于目标超 band）的持仓发 exit。params: band=0.05,
+    action_gate={freq}, weights={symbol: w}（缺省 = 成员均分 1/N）。
+
+    口径（loop-review R1-P1-1）：underweight **不动作**——MVP 无加仓/
+    部分卖出（§5.4.2），且"同标的同日边卖边买"被禁止（当日卖出的标的
+    当日不能回补），跌了卖出只会把"跌了买回"的再平衡变成割底空仓。
+    underweight 的修复语义（同日卖超配买低配 / 部分卖出）是设计级变更，
+    走架构修订，不在此静默近似。"""
 
     def __init__(self, params: dict) -> None:
         super().__init__(params)
@@ -141,7 +157,7 @@ class RebalanceBandExecution(TailSessionExecution):
             if price is None:
                 continue
             actual = ctx.account.positions[symbol].quantity * price / equity
-            if abs(actual - target) > self.band:
+            if actual - target > self.band:  # 仅 overweight；underweight 不动作
                 exits.append(ExitOrderIntent(
                     symbol=symbol, decision_date=ctx.date, fill_mode="tail",
                     source="rebalance", reason="rebalance_band",
@@ -177,7 +193,13 @@ class _MetaBase:
                 raise ValueError(
                     f"meta member {name} params invalid: {'; '.join(p_errors)}"
                 )
-            self._subs.append((spec.factory(normalized), spec.key))
+            sub_instance = spec.factory(normalized)
+            # loop-review R1-P2-2（V2 验收修正）：成员实例必须带注册键——
+            # 顶层实例由 instantiate_modules 打 _registered_key，元模块成员
+            # 此前没人打，live 止损重建按键分派时全落兜底分支（组合止损恒
+            # None）。与顶层同口径在此补上。
+            sub_instance._registered_key = spec.key
+            self._subs.append((sub_instance, spec.key))
 
     def prepare_with_gateway(self, bound_gateway, symbols, start) -> None:
         """GLM53F-P1-2：生产指标接线逐子转发——backtester/live/evaluations

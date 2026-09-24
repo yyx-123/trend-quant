@@ -20,10 +20,15 @@ PSR（单序列）保留为展示件，不再作 confirmed 的门槛——改进
 高相关配对，单序列 PSR 用基准已实现 Sharpe 当已知阈值是口径错误
 （配对场景下它要么几乎不可达、要么过度宽松，见 DS-P1-6 的蒙特卡洛表）。
 
-诚实检出下限（DS-P1-6/DS-复审-R2 口径澄清）：本判定门的 ΔSharpe 指
-**差序列**年化 Sharpe。10 年日频下差序列 ΔSharpe≈0.2 → t≈0.63 不可达
-confirmed（检出下限 ≈0.5）；而**策略序列级**改进 0.8→1.0（ρ≈0.98 单槽
-diff）对应差序列 Sharpe≈1.0 → 检出率 93%（DS 独立复算）。两个口径别混。
+诚实检出下限（DS-P1-6/DS-复审-R2 口径澄清，R1-P3-21 对齐实现重写）：
+confirmed 门里有两个不同的 ΔSharpe，勿混——
+- ``min_delta_sharpe``（主指标改善 > 0）作用在 evidence.deltas_vs_base.delta_sharpe，
+  即**序列级**年化 Sharpe 差（sharpe_exp − sharpe_base，backtest.py:_delta_metrics）；
+  它只是初筛（>0 才进入后续显著性与高原检查）；
+- **配对显著性（t_stat / DSR_on_diff）作用在差序列**上——这是真正的
+  binding constraint：10 年日频下差序列 ΔSharpe≈0.2 → t≈0.63 不可达
+  confirmed（差序列口径检出下限 ≈0.5）；策略序列级改进 0.8→1.0（ρ≈0.98
+  单槽 diff）对应差序列 ≈1.0 → 检出率 93%（DS 独立复算）。
 """
 
 from __future__ import annotations

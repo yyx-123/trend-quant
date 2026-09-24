@@ -43,6 +43,9 @@ class SlotLimitGate:
         out: list[OrderIntent] = []
         for intent in intents:
             if intent.symbol in ctx.account.positions:
+                # R1-P3-19：对已持仓标的的 entry 静默丢弃也要留痕（回测器
+                # 上游虽已过滤，gate 作为最后防线不该有"无声分支"）
+                _log(ctx, "slot_limit", intent.symbol, "already_held (entry ignored)")
                 continue
             if len(out) < available:
                 out.append(intent)
@@ -67,10 +70,14 @@ class HeatCapGate:
             # heat_cap 无从精确卡控——**告警放行，不冻结**（DS-R2 P2：静默拒绝全部
             # 新开仓会让"止损选型"课题得到一批原因隐蔽的零成交实验）。
             # 明确的"不卡控"状态写在 gate_log 与 run warnings 里，供 verdict 聚合。
-            unstopped = ctx.account.positions.__class__ is not None and getattr(
-                ctx.account, "_account", ctx.account
-            )
-            _log(ctx, "heat_cap", "*", "heat unknown (unstopped positions) — cap NOT enforced")
+            # R1-P3-1：unstopped 持仓清单落 gate_log（旧实现该变量赋值后未用，
+            # 日志里只有占位 "*"——无法定位是哪些持仓导致 heat 不可知）。
+            unstopped_syms = ctx.account.unstopped_symbols() \
+                if hasattr(ctx.account, "unstopped_symbols") else []
+            for s in unstopped_syms:
+                _log(ctx, "heat_cap", s, "no_stop_price (heat unknown — cap NOT enforced)")
+            if not unstopped_syms:
+                _log(ctx, "heat_cap", "*", "heat unknown (unstopped positions) — cap NOT enforced")
             return intents
         heat = heat or 0.0
         cap = equity * self.max_heat_pct

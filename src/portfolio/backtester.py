@@ -41,6 +41,17 @@ class BacktestError(Exception):
     pass
 
 
+def _holdout_start(db) -> str:
+    """holdout 段起点（决策 C3 留痕判定用；配置缺省 2025-01-01）。
+
+    经 gateway 层可用的最轻读取：直接读 app_config（元数据配置，非行情，
+    不违反数据面铁律——holdout.py 同样直接读 app_config）。"""
+    try:
+        return str(db.get_config("research.holdout_start", "2025-01-01"))
+    except Exception:
+        return "2025-01-01"
+
+
 def _build_tradability_cards(frame) -> dict[tuple[date, str], TradabilityCard]:
     cards: dict[tuple[date, str], TradabilityCard] = {}
     if frame is None or frame.empty:
@@ -55,7 +66,12 @@ def _build_tradability_cards(frame) -> dict[tuple[date, str], TradabilityCard]:
 
 
 def _precompute_atr(panel, periods: set[int]) -> dict[int, np.ndarray]:
-    """ATR 面板（T,N）：逐标的因果 rolling（含当根口径即当日行含当日 bar）。"""
+    """ATR 面板（T,N）：逐标的因果 rolling（含当根口径即当日行含当日 bar）。
+
+    停牌缺口口径（loop-review R1-P3-5）：close 先列内前向填充再算 TR——
+    复牌日的 TR 用最近可得前收计跳空波幅（否则 close.shift 在 NaN 行后
+    为 NaN，TR 退化为 high−low，跨停牌缺口被系统性低估）。连续序列
+    （golden/parity 用例）ffill 前后逐值相同。"""
     out: dict[int, np.ndarray] = {p: np.full(panel.shape, np.nan) for p in periods}
     close = panel.data["close"]
     for col, symbol in enumerate(panel.symbols):
@@ -63,13 +79,16 @@ def _precompute_atr(panel, periods: set[int]) -> dict[int, np.ndarray]:
         valid = np.isfinite(closes)
         if valid.sum() < 3:
             continue
+        closes_ffill = pd.Series(closes).ffill().to_numpy(dtype=float)
         df = pd.DataFrame({
             "high": panel.data["high"][:, col],
             "low": panel.data["low"][:, col],
-            "close": closes,
+            "close": closes_ffill,
         })
         for p in periods:
             series = core_atr(df, period=p)
+            # 无 bar 日不产 ATR 行（保持 NaN——rolling 窗口按有效行收缩）
+            series = series.where(np.isfinite(panel.data["close"][:, col]))
             out[p][:, col] = series.to_numpy(dtype=float)
     return out
 
@@ -161,21 +180,32 @@ def run_backtest(
 
         # 组合告警（DS-R2 P2）：heat_cap × 按设计无止损价的持仓风控模块——
         # heat_cap 将退化为"不卡控"，运行级警告随结果与 verdict 聚合。
+        # R1-P3-1：元模块（any_of）成员同样下钻——只查顶层名字会漏掉
+        # any_of[time_stop,...] 这类组合。
         run_warnings: list[str] = []
-        _stop_less = ("time_stop", "breakeven", "none")
         prisk_binding = config.slots.get("position_risk")
-        prisk_name = (prisk_binding.module or "") if prisk_binding else ""
+        prisk_names: list[str] = []
+        if prisk_binding is not None and prisk_binding.module:
+            prisk_names.append(prisk_binding.module)
+            for member in (prisk_binding.params or {}).get("members") or []:
+                m = member.get("module") if isinstance(member, dict) else member
+                if m:
+                    prisk_names.append(f"{m} (any_of member)")
         uses_heat_cap = any(
             (g.module or "").startswith("heat_cap") for g in config.gates
         )
-        if uses_heat_cap and prisk_name.split("@")[0] in _stop_less:
-            run_warnings.append(
-                f"heat_cap×{prisk_name}: 该持仓风控模块不提供止损价，组合热不可知，"
-                "heat_cap 本 run 不卡控（告警放行）"
-            )
+        _stop_less = ("time_stop", "breakeven", "none")
+        for name in prisk_names:
+            if uses_heat_cap and str(name).split("@")[0] in _stop_less:
+                run_warnings.append(
+                    f"heat_cap×{name}: 该持仓风控模块不提供止损价，组合热不可知，"
+                    "heat_cap 本 run 不卡控（告警放行）"
+                )
 
         store_obj = EngineStore(db, run_id) if store else None
         if store_obj:
+            # 决策 C3（R1-P2-6）：非实验路径触碰 holdout 不拦截但必留痕——
+            # 触碰标记显式进 run_params_json（不依赖从 window 间接推断）
             store_obj.begin_run(
                 kind="backtest", strategy_ref=strategy_ref or config.name,
                 config_hash=config.config_hash(),
@@ -186,6 +216,7 @@ def run_backtest(
                     "market_profile": market_profile,
                     "window_kind": window_kind,
                     "window": [start.isoformat(), end.isoformat()],
+                    "holdout_touched": str(end)[:10] >= _holdout_start(db),
                 },
                 data_version=data_version,
             )

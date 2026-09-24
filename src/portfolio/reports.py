@@ -75,7 +75,10 @@ def rolling_sharpe(nav_rows: list[dict], window: int = 126) -> list[dict]:
 
 
 def drawdown_durations(nav_rows: list[dict]) -> dict:
-    """水下曲线的时长维度：最长水下天数 + 最大回撤的修复天数。"""
+    """水下曲线的时长维度：最长水下天数 + 最大回撤的修复天数。
+
+    单位统一为**交易日**（loop-review R1-P3-6：NAV 序列的行本来就是交易日，
+    修复天数此前按日历日 .days 计，与 max_underwater_days 单位不一致）。"""
     r = daily_returns(nav_rows)
     if r.empty:
         return {"max_underwater_days": 0, "max_dd_recovery_days": None}
@@ -94,7 +97,8 @@ def drawdown_durations(nav_rows: list[dict]) -> dict:
         after = equity.iloc[trough:]
         recovered = after[after >= peak_val - 1e-12]
         if not recovered.empty:
-            recovery = int((recovered.index[0] - dd.index[trough]).days)
+            # 交易日差 = 索引位置差（NAV 行即交易日轴）
+            recovery = int(r.index.get_loc(recovered.index[0]) - trough)
     return {"max_underwater_days": max_run, "max_dd_recovery_days": recovery}
 
 

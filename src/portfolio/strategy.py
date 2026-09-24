@@ -115,9 +115,20 @@ def _validate_binding(
         members = (raw.get("params") or {}).get("members") or []
         for item in members:
             sub_ref = item.get("module") if isinstance(item, dict) else item
-            sub_name = str(sub_ref or "").split("@")[0]
+            sub_ref = str(sub_ref or "").strip()
+            sub_name = sub_ref.split("@")[0]
             if sub_name in META_MODULES:
                 errors.append(f"{slot}: meta module {name} cannot nest {sub_name}")
+                continue
+            # R1-P3-7：成员参数同样在载入期过 schema——"非法配置载入即拒绝"
+            # （§5.3）此前对 members 弱化了一步（坏 atr_mul 到 run 启动实例化
+            # 时才炸）。与 _MetaBase 工厂内的校验同构，只是前移到 parse。
+            sub_spec = registry.get(sub_ref, slot=slot)
+            if sub_spec is None:
+                continue  # 未注册由工厂/注册表路径报错，此处不重复报
+            sub_params_raw = (item.get("params") if isinstance(item, dict) else None) or {}
+            _norm, sub_errors = validate_params(sub_spec.params_schema, sub_params_raw)
+            errors.extend(f"{slot}: member {sub_ref}: {e}" for e in sub_errors)
     return SlotBinding(module=module_ref, params=params)
 
 

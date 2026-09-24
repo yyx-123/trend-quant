@@ -28,7 +28,7 @@ def bh_fdr(pvalues, q: float = 0.05) -> list[dict]:
     adjusted = np.empty(m)
     running = 1.0
     for i in range(m - 1, -1, -1):
-        running = min(running, sorted_p[i] * m / (i + 1))
+        running = min(running, min(1.0, sorted_p[i] * m / (i + 1)))  # R1-P3-16：显式封顶 1.0
         adjusted[i] = running
     out = [None] * m
     for rank, idx in enumerate(order, start=1):
@@ -42,14 +42,19 @@ def bh_fdr(pvalues, q: float = 0.05) -> list[dict]:
     return out
 
 
-def pbo_cscv(returns_matrix, *, n_blocks: int = 8, seed: int = 7) -> dict:
+def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
     """CSCV PBO。returns_matrix: (T, N)——T 期收益 × N 个策略变体。
 
     返回 {pbo, n_combinations, lambda_median}。T 或 N 不足返回 None 字段。
+    R1-P3-13：删除从未使用的 seed 参数（此前误导"随机性受控"的可复现性
+    表述——CSCV 是全组合枚举，无随机性）；n_blocks 必须为偶数（奇数时
+    IS/OOS 块数不等，CSCV 对称性被破坏）。
     """
     r = np.asarray(returns_matrix, dtype=float)
     if r.ndim != 2:
         raise ValueError("returns_matrix must be (T, N)")
+    if n_blocks % 2 != 0:
+        raise ValueError(f"n_blocks must be even for CSCV (got {n_blocks})")
     t, n = r.shape
     if t < n_blocks * 2 or n < 2:
         return {"pbo": None, "n_combinations": 0, "lambda_median": None}

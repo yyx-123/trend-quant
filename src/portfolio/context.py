@@ -88,8 +88,13 @@ class PanelView:
         return self.__panel._symbol_index.get(symbol)
 
     def date_at(self, idx: int):
-        """按全面板行下标取日期（事件日回查的合法公开入口）。"""
-        return self.__panel.dates[idx]
+        """按全面板行下标取日期（事件日回查的合法公开入口）。
+
+        钳制到 upto（loop-review R1-P3-22）：越界下标不得探测未来日期——
+        返回值 clamp 到当前日（越界 = 当日），不给模块任何日历前视。"""
+        if idx > self._upto:
+            idx = self._upto
+        return self.__panel.dates[max(0, min(idx, self._upto))]
 
 
 @dataclass(slots=True)
@@ -115,6 +120,10 @@ class AccountView:
 
     def positions_value(self) -> float:
         return self._account.positions_value(self.close_prices)
+
+    def unstopped_symbols(self) -> list[str]:
+        """无止损价的持仓清单（heat None 时的归因入口；R1-P3-1）。"""
+        return self._account.unstopped_symbols()
 
 
 @dataclass(slots=True)

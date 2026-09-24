@@ -65,6 +65,9 @@ def main() -> int:
 
     p = sub.add_parser("rerun")
     p.add_argument("experiment_id")
+    p.add_argument("--run", action="store_true",
+                   help="复现实验入队后立即同步执行（R1-P3-10：纯 CLI 用法不再停在 queued）")
+    p.add_argument("--token", default=None, help="holdout 放行 token（复现触碰样本外窗口时需要）")
 
     p = sub.add_parser("recompute")
     p.add_argument("--old", dest="old_ref", required=True)
@@ -140,9 +143,18 @@ def main() -> int:
             experiment_id=args.experiment_id, session_id=session["session_id"],
             auto_queue=False,
         )
-        print(json.dumps({"ok": True, "reproduction_of": args.experiment_id,
-                          "experiment_id": exp["id"],
-                          "attempt_index": exp["attempt_index"]}, ensure_ascii=False))
+        out = {"ok": True, "reproduction_of": args.experiment_id,
+               "experiment_id": exp["id"],
+               "attempt_index": exp["attempt_index"]}
+        if getattr(args, "run", False):
+            from research.pipeline import run_experiment
+
+            v = run_experiment(
+                service.db, exp["id"], registry=service.registry,
+                holdout_token=getattr(args, "token", None),
+            )
+            out["final_verdict"] = v.get("final_verdict")
+        print(json.dumps(out, ensure_ascii=False))
         return 0
     if args.cmd == "recompute":
         result = service.recompute_campaign(

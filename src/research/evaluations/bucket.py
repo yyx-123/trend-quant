@@ -76,6 +76,21 @@ def _spec_errors(spec: dict, ctx: dict) -> list[str]:
     buckets = int(spec.get("buckets", 5) or 5)
     if buckets < 2 or buckets > 10:
         errors.append("spec.buckets must be 2..10")
+    if spec.get("expect", "positive") not in ("positive", "negative"):
+        errors.append("spec.expect must be positive|negative")
+    # universe 非法值入口拦截（R1-P3-9）：runner 里 resolve_universe_symbols
+    # 才炸会把可防的 spec 错误变成 failed 实验入表（污染研究线+DSR 计数）
+    uni = spec.get("universe")
+    if uni is not None and uni != "liquidity_default":
+        ok = (
+            (isinstance(uni, str) and uni.startswith("single(") and uni.endswith(")")
+             and uni[7:-1].strip())
+            or isinstance(uni, (list, tuple))
+        )
+        if not ok:
+            errors.append(
+                f"spec.universe must be liquidity_default|single(SYMBOL)|[symbols], got {uni!r}"
+            )
     return errors
 
 
@@ -201,8 +216,11 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
             if np.isfinite(v):
                 bucket_returns[bucket_of[k]].append(float(v))
         means = []
+        empty_buckets = 0
         for b in range(n_buckets):
             vals = bucket_returns[b]
+            if not vals:
+                empty_buckets += 1  # R1-P3-17：空桶可见化
             means.append(float(np.mean(vals)) if vals else np.nan)
             bucket_table.append({
                 "bucket": b + 1,
@@ -210,6 +228,13 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
                 "mean_forward_ret": means[-1],
                 "feature_range": [float(quantiles[b]), float(quantiles[b + 1])],
             })
+        if empty_buckets:
+            # R1-P3-17：特征值大量并列时等频分桶出空桶 → means 含 NaN →
+            # spread/单调性 NaN → 静默 inconclusive；必须警告点破原因
+            warnings.append(
+                f"empty_buckets({empty_buckets}/{n_buckets})：特征值并列导致等频分桶空组，"
+                "spread/单调性不可计算——判定按 inconclusive 属边界效应而非无结论"
+            )
 
         # 单调性：相邻组收益差方向与预期一致的占比
         diffs = np.diff(means)

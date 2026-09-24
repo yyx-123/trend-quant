@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 
 from audit.app_logger import get_logger
@@ -131,39 +132,48 @@ def _spawn_same_day_catchup(
 
     顺延到"下一次定时触发"意味着当日 EOD/除权检测/指标重建全停一天——
     改为挂一个 daemon 线程：解冻后立刻补跑一次（最长再等 2 小时，仍冻结
-    则放弃，由次日 cron/启动补偿兜底）。幂等：同时只允许一个哨兵在飞。
+    则放弃，由次日 cron/启动补偿兜底）。幂等：单例判断在锁内完成
+    （loop-review R1-P1-4：check-then-act 竞态会让两个超时顺延源各起一个
+    哨兵）；补跑本体经 daily_market_update_job 的模块级单飞锁，与定时/
+    启动补偿互斥（同评审：哨兵此前绕过 main.py 闭包内的 _update_job_lock）。
     """
     import threading
 
     global _catchup_sentinel
-    if _catchup_sentinel is not None and _catchup_sentinel.is_alive():
-        return
-
-    def _watch() -> None:
-        import time as _time
-
-        waited = 0
-        while run_freeze.is_frozen() and waited < 7200:
-            _time.sleep(60)
-            waited += 60
-        if run_freeze.is_frozen():
-            logger.warning("same-day catchup abandoned: still frozen after 2h")
+    with _catchup_spawn_lock:
+        if _catchup_sentinel is not None and _catchup_sentinel.is_alive():
             return
-        if market_now().date() != today:
-            return  # 跨日了，交给当日 cron/启动补偿
-        logger.info("same-day catchup: unfrozen, running daily update now")
-        try:
-            daily_market_update_job(settings, data_service, force=force)
-        except Exception:
-            logger.exception("same-day catchup failed")
 
-    _catchup_sentinel = threading.Thread(
-        target=_watch, daemon=True, name="daily-update-catchup"
-    )
-    _catchup_sentinel.start()
+        def _watch() -> None:
+            import time as _time
+
+            waited = 0
+            while run_freeze.is_frozen() and waited < 7200:
+                _time.sleep(60)
+                waited += 60
+            if run_freeze.is_frozen():
+                logger.warning("same-day catchup abandoned: still frozen after 2h")
+                return
+            if market_now().date() != today:
+                return  # 跨日了，交给当日 cron/启动补偿
+            logger.info("same-day catchup: unfrozen, running daily update now")
+            try:
+                daily_market_update_job(settings, data_service, force=force)
+            except Exception:
+                logger.exception("same-day catchup failed")
+
+        _catchup_sentinel = threading.Thread(
+            target=_watch, daemon=True, name="daily-update-catchup"
+        )
+        _catchup_sentinel.start()
 
 
 _catchup_sentinel = None
+# 日更单飞锁（loop-review R1-P1-4）：从 main.py 闭包下沉到模块级——
+# 定时触发 / 启动补偿 / 冻结补跑哨兵三条路径共用，任何时刻至多一个
+# daily_market_update_job 在执行；占用者立即返回，不排队。
+_DAILY_UPDATE_LOCK = threading.Lock()
+_catchup_spawn_lock = threading.Lock()
 
 
 def daily_market_update_job(
@@ -181,8 +191,45 @@ def daily_market_update_job(
 
     决策 A3（运行期数据冻结）：回测 run 执行期间冻结写任务——run 优先、
     日更等待（最长 30 分钟轮询解冻；超时则顺延到下一次定时触发）。
+    单飞（loop-review R1-P1-4）：模块级锁自守，与调用方（定时/补偿/哨兵）
+    解耦——哨兵不再绕过 main.py 闭包内的私有锁。非交易日判断前移
+    （R1-P2-8）：节假日不必为永远轮不到的解冻白等 30 分钟。
     """
+    if not _DAILY_UPDATE_LOCK.acquire(blocking=False):
+        logger.info("Daily market data update already running; skipping duplicate trigger")
+        return {
+            "ts": market_now().replace(tzinfo=None).isoformat(),
+            "status": "skipped_already_running",
+            "results": [],
+        }
+    try:
+        return _daily_market_update_job_locked(settings, data_service, force=force)
+    finally:
+        _DAILY_UPDATE_LOCK.release()
+
+
+def _daily_market_update_job_locked(
+    settings: Settings,
+    data_service: DataService | None,
+    *,
+    force: bool,
+) -> dict:
     today = market_now().date()
+    if not force and not is_trading_day(today):
+        logger.info("Daily market update skipped: %s is not a trading day", today.isoformat())
+        payload = {
+            "ts": market_now().replace(tzinfo=None).isoformat(),
+            "status": "skipped_non_trading_day",
+            "results": [],
+        }
+        record_job_run_safely(
+            "daily_update_skip",
+            payload,
+            run_date=today.isoformat(),
+            status="skipped_non_trading_day",
+        )
+        return payload
+
     # 冻结门对 force 同样生效（评审 DS-P2-6：启动补偿也不能抢跑写任务——
     # 否则补偿与活跃 run 并发读两版数据；无活跃 run 时冻结非真，照样放行）
     if run_freeze.is_frozen():
@@ -209,20 +256,6 @@ def daily_market_update_job(
             # GLM53F-P2-13：顺延 ≠ 饿一整天——挂当日一次性补跑哨兵
             _spawn_same_day_catchup(settings, data_service, force=force, today=today)
             return payload
-    if not force and not is_trading_day(today):
-        logger.info("Daily market update skipped: %s is not a trading day", today.isoformat())
-        payload = {
-            "ts": market_now().replace(tzinfo=None).isoformat(),
-            "status": "skipped_non_trading_day",
-            "results": [],
-        }
-        record_job_run_safely(
-            "daily_update_skip",
-            payload,
-            run_date=today.isoformat(),
-            status="skipped_non_trading_day",
-        )
-        return payload
 
     try:
         strategy_cfg = get_strategy_config()

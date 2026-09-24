@@ -74,6 +74,30 @@ def _coerce_scalar(v):
     return v
 
 
+def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
+    """把"省略 = 平台缺省值"的字段展开成显式值（loop-review R1-P2-3）。
+
+    重复检测的逃逸通道：跑过 `window=[2015-01-01, 2024-12-31]` 的实验，
+    重提一个**不带 window 键**的同 diff 实验——键集不同被判"另一个实验"
+    放行，实际取数窗口与原实验完全相同（runner 侧 `spec.get("window") or
+    sample 默认`）。省略 ≠ 改问题。universe 同理（None/"liquidity_default"
+    与缺省同为 enabled 全池）。展开后 exact/similar 判定才在同一语义层。
+
+    模块感知：只展开该评估模块**声明**的字段——portfolio_backtest 的 spec
+    没有 universe 键（不是它的声明字段），给它强加 universe 反而会被
+    _spec_similar 判成"未知字段差异"误报相似。
+    """
+    from research.holdout import DEFAULT_SAMPLE_END, DEFAULT_SAMPLE_START
+
+    expanded = dict(spec or {})
+    known = _DECLARED_SPEC_FIELDS.get(str(evaluation_module or "").split("@")[0], set())
+    if "window" in known and not expanded.get("window"):
+        expanded["window"] = [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END]
+    if "universe" in known and expanded.get("universe") in (None, "liquidity_default"):
+        expanded["universe"] = "liquidity_default"
+    return expanded
+
+
 def _values_similar(a, b) -> bool:
     """相似判定（DS-R2 P2 两档恢复）：结构相同，仅数值 ±10% / 日期 ±10 天。
 
@@ -159,8 +183,11 @@ def find_duplicates(
     """
     from research.ledger import loads
 
+    # R1-P2-3：两侧先展开平台缺省（window/universe）——"省略键 = 用同一
+    # 缺省"必须与显式写缺省判定一致，否则缺省即逃逸通道
+    spec = _expand_platform_defaults(spec or {}, evaluation_module)
     target_sig = _canonical_spec(spec)
-    target_norm = {k: _normalize_spec_value(v) for k, v in (spec or {}).items()}
+    target_norm = {k: _normalize_spec_value(v) for k, v in spec.items()}
     with db.connect() as conn:
         rows = conn.execute(
             """SELECT id, spec_json FROM research_experiments
@@ -171,7 +198,9 @@ def find_duplicates(
         ).fetchall()
     exact, similar = [], []
     for row in rows:
-        existing = loads(row["spec_json"], {})
+        existing = _expand_platform_defaults(
+            loads(row["spec_json"], {}), evaluation_module
+        )
         if _canonical_spec(existing) == target_sig:
             exact.append(row["id"])
         elif _spec_similar(
