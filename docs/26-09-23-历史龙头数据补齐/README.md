@@ -1,7 +1,13 @@
 # 历史龙头数据补齐（标的池历史扩容）
 
-> 执行日期：2026-09-23　｜　状态：**阶段一（出清单）已完成，阶段二（灌 K 线）未开始**
-> 数据源：Tushare Pro（临时账号，5000 积分档，镜像站）
+> 执行日期：2026-09-23 起　｜　状态：**阶段一（出清单）已完成，阶段二（灌 K 线）未开始**
+> 数据源：Tushare Pro（临时账号，5000 积分档）
+
+## 先读这份
+
+**`2026-09-23-历史龙头数据补齐-方案.md`** —— 背景、为什么用 Tushare、股票侧与 ETF 侧的完整取数口径、交付文件与复现步骤，都在里面。
+
+本文件是目录导航与清单速查。
 
 ## 这个目录解决什么问题
 
@@ -16,15 +22,17 @@
 ## 目录
 
 ```
-├── README.md                      ← 本文件
-├── STAGE1-中证指数并集.md            ← 股票侧：方法、口径、校验证据、已知局限
-├── STAGE1-ETF清单.md                ← ETF 侧：同上（Tushare 直接口径）
-├── fetch_tushare_index_members.py  ← 股票侧主脚本
-├── fetch_tushare_etf.py            ← ETF 侧主脚本
-├── probe_tushare.py                ← 连通性/权限探测（指数成分 + 退市股行情）
-├── probe_tushare_fund.py           ← 基金/ETF 接口探测（benchmark / 费率 / 退市 ETF）
-├── diff_on_server.py               ← 在服务端库上重跑差分（dev 库标的少于生产库）
-└── data/                           ← 全部产物（见下）
+├── README.md                          ← 本文件（导航）
+├── 2026-09-23-历史龙头数据补齐-方案.md    ← 背景 + 完整取数口径 + 复现（先读这份）
+├── STAGE1-中证指数并集.md                ← 股票侧：方法、口径、校验证据、已知局限
+├── STAGE1-ETF清单.md                    ← ETF 侧：同上
+├── fetch_tushare_index_members.py      ← 股票侧主脚本
+├── fetch_tushare_etf.py                ← ETF 侧主脚本
+├── dedup_etf_themes.py                 ← ETF 主题/赛道去重
+├── probe_tushare.py                    ← 连通性/权限探测（指数成分 + 退市股行情）
+├── probe_tushare_fund.py               ← 基金/ETF 接口探测（benchmark / 费率 / 退市 ETF）
+├── diff_on_server.py                   ← 在服务端库上重跑差分（dev 库标的少于生产库）
+└── data/                               ← 全部产物（见下）
 ```
 
 ## 股票侧交付清单
@@ -55,24 +63,32 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| **`data/etf_universe.csv`** | **1720 只** ETF 主表：跟踪主题（Tushare `benchmark` 直接给）、`invest_type`、费率、规模、逐年成交额、是否主题代表 |
-| **`data/etf_theme_representatives.csv`** | 592 个跟踪主题各一只代表（按近一年日均成交额） |
+| **`data/etf_candidates_final.csv`** | **最终清单 175 只**：赛道归并后每赛道一只（含 sector / theme_norm 两列） |
+| `data/etf_candidates_dedup.csv` | 318 只全部，带 `theme_norm`（机械归并后）与 `sector`（赛道）两列，便于自行重组 |
+| `data/etf_candidates.csv` | 318 只（去重前，每个 `benchmark` 主题一只，已排除货币型） |
+| `data/etf_universe.csv` | **1720 只** ETF 全量主表：跟踪主题（Tushare `benchmark` 直接给）、`invest_type`、费率、规模、逐年成交额 |
 | `data/etf_by_year.csv` | 逐年明细长表 7652 行（含未达标，便于换阈值重筛） |
+| `data/etf_dedup_preview.md` | 赛道归并明细（每个赛道列出被合并的标的与代表） |
 | `data/tushare_etf_basic.csv` | 场内基金官方列表（含 128 只已摘牌） |
 
-口径：**2013–2026 年间至少一年日均成交额 ≥ 5000 万元** → 达标 **694 只**，归并到 **592 个跟踪主题**
-（其中 322 个主题有达标 ETF）。详细方法与校验见 `STAGE1-ETF清单.md`。
+口径：**2013–2026 年间至少一年日均成交额 ≥ 5000 万元** → 达标 **694 只**（排除货币型后 669 只）→
+按 `benchmark` 归并成 318 个主题 → 机械归并 **289** → 赛道归并 **175**。
+最终 175 只的大类分布：宽基 25 / 行业主题 92 / 跨境 29 / 债券 25 / 商品 3 / 策略 1。
+详细方法与校验见 `STAGE1-ETF清单.md` 与方案文档。
 
 ## 跑法（项目根目录）
 
 ```bash
-# 股票侧（约 110 次调用）
+# 股票侧（约 110 次调用，几分钟）
 TUSHARE_TOKEN=xxx TUSHARE_HTTP_URL=https://tuaremax.top \
   .venv/bin/python docs/26-09-23-历史龙头数据补齐/fetch_tushare_index_members.py
 
-# ETF 侧（约 1900 次调用，20 分钟，可断点续跑）
+# ETF 侧（约 1845 次调用，20 分钟，可断点续跑）
 TUSHARE_TOKEN=xxx TUSHARE_HTTP_URL=https://tuaremax.top \
   .venv/bin/python docs/26-09-23-历史龙头数据补齐/fetch_tushare_etf.py
+
+# ETF 主题/赛道去重（纯本地计算，秒出）
+.venv/bin/python docs/26-09-23-历史龙头数据补齐/dedup_etf_themes.py
 
 # 服务端重跑差分
 .venv/bin/python docs/26-09-23-历史龙头数据补齐/diff_on_server.py
@@ -90,13 +106,3 @@ TUSHARE_TOKEN=xxx TUSHARE_HTTP_URL=https://tuaremax.top \
 
 **入池方式未定**：退市标的若 `enabled=1`，日更会天天拉、天天失败；若 `enabled=0`，回测又会把它们排除掉
 （幸存者偏差就白治了）。需要加第三态（例如 `delist_date` 列），这是灌库前的阻塞项。
-
-## 历史备注
-
-早期曾试过两条被放弃的路线，已删除，结论留此备查：
-
-- **Wind 取中证1000 历史成分**：接口单次上限 100 行且无分页；网关有账户级 5 小时配额（被探测调用耗尽）；
-  按日期翻页会系统性丢数据（一次调整约 200 行，一天就撑爆一页）；返回里字面的 `Wind代码` 列其实是指数本身。
-  → 被 Tushare `index_weight` 完全取代。
-- **TickFlow 全量行情自算成交额排名**：能覆盖在市标的但对退市股无能为力（TickFlow 标的池不含退市股），
-  且主题分组只能按名称猜。→ 被 Tushare `fund_basic.benchmark` / `index_weight` 取代。
