@@ -203,7 +203,8 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
         # **不判定**，并如实告警（此前会把正常腿判成 rejected）
         warnings.append(
             "degenerate_leg(" + "/".join(_degenerate_legs)
-            + " 腿零成交或全现金：Sharpe/置信带/PSR 均为浮点噪声，已记 None，判定按 inconclusive)"
+            + " 腿的 Sharpe/置信带/PSR 不可用（零成交/全现金、近零方差或极短窗口等）："
+            "已记 None，判定按 inconclusive)"
         )
     elif d_band is not None and len(joined) >= 30:
         if d_band["low"] > 0 and psr_ab >= 0.95:

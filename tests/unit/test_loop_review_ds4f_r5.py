@@ -384,13 +384,22 @@ def test_rolling_sharpe_is_gated_per_window():
     equity = 1e6
     rows = []
     for i in range(420):
-        if i < 300:  # 前 300 日无成交：只有计息
-            equity *= 1.0 + 0.01 / 252.0
+        if i < 300:
+            # 前 300 日无成交：只有计息 + **极小的非零抖动**（分位/浮点级），
+            # 使未加闸的滚动窗口真的产出 1e12 级噪声——若抖动为严格 0，
+            # 未加闸路径会得到 NaN，钉子就变成空钉（R10A 实证）。
+            equity *= 1.0 + 0.01 / 252.0 + (1e-13 if i % 3 else -1e-13)
         else:
             equity *= 1.004 if i % 2 else 0.997
         rows.append({"date": f"{2010 + i // 250}-{1 + (i % 250) // 28:02d}-"
                              f"{1 + (i % 250) % 28:02d}", "equity": equity})
     assert is_degenerate_nav(rows) is False, "整序列 Sharpe 正常（这正是漏判的原因）"
+    from portfolio.reports import rolling_sharpe
+
+    ungated = rolling_sharpe(rows, 126)
+    assert any(abs(p["sharpe"]) > 1e3 for p in ungated), (
+        "夹具必须能产生未加闸噪声（否则钉子为空钉，R10A 实证）"
+    )
     gated6 = _rolling_sharpe_gated(rows, 126)
     assert all(p["sharpe"] is not None and abs(p["sharpe"]) < 1e3 for p in gated6), \
         "落在无成交段的滚动窗口必须被剔除"
@@ -417,3 +426,65 @@ def test_benchmark_relative_judges_both_legs():
     out = benchmark_relative(nav, near)
     assert out["beta"] is None and out["alpha_annual"] is None, out
     assert out["up_capture"] is None and out["down_capture"] is None, out
+
+
+# ----------------------------------------------------------------------
+# R10 复核后的定稿钉子：sortino 同闸 / IR 同闸 / 警示文案如实
+# ----------------------------------------------------------------------
+
+
+def test_sortino_noise_is_gated_alongside_sharpe():
+    """R10-F1（第 7 次复发）：sortino 的分母是"负收益子集 std"，与 Sharpe 不同
+    ——可以出现"Sharpe 正常、sortino 是 1e5~1e14 噪声"的腿，且真实落库。"""
+    from rule_backtest.metrics import is_degenerate_summary
+
+    rows = [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+             "equity": 1e6 * (1.004 if i % 2 else 0.997)} for i in range(60)]
+    # 同一批摘要：只把 sortino 换成噪声 → 必须判退化
+    assert is_degenerate_summary(rows, {"sharpe": 2.2, "sortino": 1.4e14}) is True
+    assert is_degenerate_summary(rows, {"sharpe": 2.2, "sortino": 3.1}) is False
+    assert is_degenerate_summary(rows, {"sharpe": 1e9, "sortino": 3.1}) is True
+    # 端到端：噪声 sortino 不得落进摘要
+    from research.evaluations.backtest import _nav_summary
+
+    summary = _nav_summary(rows)
+    assert summary.get("degenerate_leg") is None or summary["sortino"] is None
+
+
+def test_information_ratio_is_gated():
+    """R10-F2：IR/TE 也必须过闸（两条近失配腿的 excess 只剩浮点残差 → 1.4e13）。"""
+    from portfolio.reports import benchmark_relative
+
+    def _near(mean, jitter, n=120):
+        eq = 1e6
+        out = []
+        for i in range(n):
+            eq *= 1.0 + (mean + (jitter if i % 2 else -jitter))
+            out.append({"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}", "equity": eq})
+        return out
+
+    out = benchmark_relative(_near(2e-4, 2e-5), _near(1e-4, 2e-5))
+    assert out["information_ratio"] is None and out["tracking_error"] is None, out
+    # 正常对仍算出有限 IR
+    normal_p = [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+                 "equity": 1e6 * (1.004 if i % 2 else 0.997)} for i in range(120)]
+    normal_b = [{"date": r["date"], "equity": 1e6 * (1.002 if i % 3 else 0.998)}
+                for i, r in enumerate(normal_p)]
+    ok = benchmark_relative(normal_p, normal_b)
+    assert ok["information_ratio"] is not None
+
+
+def test_degenerate_warning_text_is_accurate():
+    """R10-F3：警示文案不得断言"零成交或全现金"——短窗口/近零方差的**有成交**腿
+    也会被判退化（实测 10 条真实短窗口腿），文案必须如实。"""
+    import inspect
+
+    from research.evaluations import backtest as bt
+    from research.evaluations import head_to_head as h2h
+
+    for src in (inspect.getsource(bt._assemble_result),
+                inspect.getsource(h2h.run_head_to_head)):
+        flat = "".join(src.split())  # 源码里的字符串可能跨行拼接
+        assert "不可用" in flat, "文案必须说明指标不可用而不是断言零成交"
+        assert "零成交/全现金、近零方差" in flat and "极短窗口" in flat
+        assert "零成交或全现金：Sharpe" not in flat, "不得把有成交的短窗口腿断言成零成交"

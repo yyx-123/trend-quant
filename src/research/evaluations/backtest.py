@@ -209,6 +209,8 @@ def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict
     from rule_backtest.metrics import is_degenerate_summary
 
     if is_degenerate_summary(nav_rows, summary):
+        # F1（R10）：sortino 与 sharpe 分母不同，噪声形态可以只出现在 sortino 上
+        # ——null_degenerate_metrics 同时清 sharpe/sortino
         null_degenerate_metrics(summary)
     return summary
 
@@ -817,8 +819,8 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     if _degen_labels:
         warnings.append(
             "degenerate_leg(" + "/".join(_degen_labels)
-            + " 零成交或全现金：Sharpe/Sortino/PSR/DSR 均为浮点噪声，已记 None "
-            "且不参与 Δ 判定与课题 FDR)"
+            + " 该腿的 Sharpe/Sortino/PSR/DSR 不可用（零成交/全现金、近零方差"
+            "或极短窗口等）：已记 None 且不参与 Δ 判定与课题 FDR)"
         )
     # 长窗口三注记（详设 §6.6.4，评审 DS-P2-5：进实验路径，不只进脚本产物；
     # DS-复审-R2 §4-1：共享件，event/bucket/distribution 同口径）

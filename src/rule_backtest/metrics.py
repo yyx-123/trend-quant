@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from collections import defaultdict
 
 import numpy as np
@@ -82,15 +84,32 @@ def annualized_sharpe(nav_rows) -> float | None:
     return mean_r / (var ** 0.5) * (252 ** 0.5)
 
 
-def is_degenerate_summary(nav_rows, summary: dict | None) -> bool:
-    """**唯一推荐的判据入口**：腿的 NAV + 它的摘要（含 sharpe）。
+# 摘要里**比值型**指标：任一取到 |v| > 闸门即说明该腿的指标是噪声
+# （R10 复核 F1：sortino 的分母是"负收益子集 std"，与 Sharpe 的分母不同——
+#  Sharpe 正常而 sortino 是 1e5~1e14 的形态真实存在且已落库，必须同闸）
+# 注意：**不含 calmar**——`annual_return/|maxDD|` 在低回撤/短窗口上可以合法地
+# 超过闸门（实测一个正常序列 calmar=52.8），把它纳入会误杀诚实策略。
+# sortino 必须纳入：它的分母是负收益子集 std，与 Sharpe 的分母不同源，噪声
+# 形态可以只出现在它上面（R10-F1 实证 1.4e14 落库）。
+_RATIO_METRIC_KEYS = ("sharpe", "sortino")
 
-    R9 复核（第 6 次复发）的根因是"判定有两条腿、每个调用点都要记得传全"——
-    调用点一多就漏。本函数把"NAV + Sharpe 两条腿"打包成一次调用，并**自行
-    从 NAV 现算 Sharpe**（不依赖调用方是否传对），使漏传在结构上不可能。
+
+def is_degenerate_summary(nav_rows, summary: dict | None) -> bool:
+    """**唯一推荐的判据入口**：腿的 NAV + 它的比值型指标。
+
+    R9/R10 复核（第 6/7 次复发）的根因是"判据有两条腿、每个调用点都要记得传全"
+    且"只闸了 Sharpe 忘了同源的 Sortino"。本函数把判据打包成一次调用：
+    ① NAV 的方差/均值可分辨性；② 摘要里**任一**比值型指标（sharpe/sortino/calmar）
+    的幅值超闸；③ 摘要没给指标时**自行从 NAV 现算 Sharpe**。
     """
     sharpe = None
-    if isinstance(summary, dict) and summary.get("sharpe") is not None:
+    if isinstance(summary, dict):
+        values = [
+            float(summary[k]) for k in _RATIO_METRIC_KEYS
+            if summary.get(k) is not None
+        ]
+        if values and any(abs(v) > DEGENERATE_SHARPE_ABS_LIMIT for v in values):
+            return True
         sharpe = summary.get("sharpe")
     elif isinstance(summary, (int, float)):
         sharpe = float(summary)

@@ -18,7 +18,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from rule_backtest.metrics import compute_summary, is_degenerate_summary
+from rule_backtest.metrics import (
+    DEGENERATE_SHARPE_ABS_LIMIT as _SHARPE_GATE,
+    compute_summary,
+    is_degenerate_summary,
+)
 
 
 def daily_returns(nav_rows: list[dict]) -> pd.Series:
@@ -60,6 +64,11 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
     excess = p - b
     te = float(excess.std(ddof=1) * np.sqrt(252)) if len(excess) > 1 else 0.0
     ir = float(excess.mean() / excess.std(ddof=1) * np.sqrt(252)) if excess.std(ddof=1) > 0 else 0.0
+    # R10-F2：跟踪误差/信息比同样必须过闸——两条近失配腿的 excess 序列可以
+    # 只有浮点残差（实测 IR = 1.4e13）。退化腿或幅值超闸一律记 None。
+    if _bench_degenerate or (ir is not None and abs(ir) > _SHARPE_GATE):
+        ir = None
+        te = None
     up = b > 0
     down = b < 0
     # R8 复核（P3）：退化基准（零成交/全现金）下的 up/down capture 是"除以噪声均值"
