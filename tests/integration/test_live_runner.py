@@ -252,3 +252,55 @@ def test_live_panel_window_covers_old_positions(market, registry):
     )
     caveats = " ".join(target.get("caveats") or [])
     assert "持仓无止损价" not in caveats, f"老持仓的止损状态应已重建，实际 caveats: {caveats}"
+
+
+def test_shadow_cash_excludes_unsellable_same_day_lot(market, registry, monkeypatch):
+    """R13A-F1：影子现金不得按**不可卖**的当日买入股数入账。
+
+    旧实现按 `pos.quantity` 全额入账 → "昨买 1000 + 今买 1000" 与"昨买 2000"
+    得到同一个 cash_est（多算 1000 股市值）→ 买入清单被不存在的现金放大。
+    这里把 `evaluate_exits` 打桩成"必触发止损"，直接比较两种入账形态。
+    """
+    from datetime import datetime as _dt
+
+    from engine.models import ExitOrderIntent
+    from portfolio.live import generate_daily_list
+
+    versions = _seed(market, registry)
+
+    def _list(user_id: int) -> dict:
+        return generate_daily_list(
+            market, strategy_version_id=versions["base-v1"], user_id=user_id,
+            as_of=_dt(2024, 3, 15, 14, 0), initial_capital=1_000_000,
+        )
+
+    def _patch_exits(monkeypatch):
+        import portfolio.live as live_mod
+
+        def fake_evaluate_exits(ctx, modules, panel, t_idx):
+            intents = [
+                ExitOrderIntent(symbol=s, reason="hard_stop",
+                                decision_date=panel.dates[t_idx])
+                for s in list(ctx.account.positions)
+            ]
+            return intents, [], [], []
+
+        monkeypatch.setattr(live_mod, "evaluate_exits", fake_evaluate_exits)
+
+    _patch_exits(monkeypatch)
+    # 两个用户：一个"昨买+今买"（当日那笔不可卖），一个"昨买+昨买"（都可卖）
+    today = market.create_user("r13a_today", "pass12345")
+    market.create_manual_trade(today["id"], "LIV000.SS", "2024-03-14", 20.0, 1000)
+    market.create_manual_trade(today["id"], "LIV000.SS", "2024-03-15", 22.0, 1000)
+    yesterday = market.create_user("r13a_yday", "pass12345")
+    market.create_manual_trade(yesterday["id"], "LIV000.SS", "2024-03-14", 20.0, 1000)
+    market.create_manual_trade(yesterday["id"], "LIV000.SS", "2024-03-14", 22.0, 1000)
+
+    partial = _list(today["id"])        # 只有 1000 股可卖
+    full = _list(yesterday["id"])       # 2000 股都可卖
+    assert partial["sells"] and partial["sells"][0]["sellable_qty"] == 1000
+    assert full["sells"][0]["sellable_qty"] == 2000
+    assert full["cash_est"] > partial["cash_est"],         "当日买入的不可卖部分不得计入影子现金"
+    # 差额 = 那 1000 股按本清单实际采用的参考价计得的市值
+    ref = float(partial["sells"][0]["ref_price"])
+    assert (full["cash_est"] - partial["cash_est"]) == pytest.approx(1000 * ref, rel=2e-3)

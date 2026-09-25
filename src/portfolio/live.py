@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import date, datetime
 
@@ -324,12 +325,25 @@ def generate_daily_list(
     sells = [*stop_intents, *signal_exits, *rotation_intents]
     exited = {i.symbol for i in sells}
 
-    # 假定卖出全部执行后的影子账户（清单口径：目标持仓 = 现有持仓 − 应卖 + 应买）
+    # 假定卖出全部**可卖**部分后的影子账户（清单口径：目标持仓 = 现有持仓 − 应卖 + 应买）
+    # T+1：当日买入的部分当日不可卖——若按 pos.quantity 全额入账，影子现金会多出
+    # "不可卖那部分的市值"，而买入清单的预算正是基于影子现金 → 会被不存在的现金放大
+    # （R13A-F1：昨买 1000 + 今买 1000 与昨买 2000 得到同一个 cash_est）。
     shadow = Account(cash=account.cash)
     for symbol, pos in account.positions.items():
         if symbol in exited:
             price = close_today.get(symbol)
-            shadow.cash += pos.quantity * (price if price else pos.avg_cost)
+            sellable = int(getattr(pos, "sellable_quantity", pos.quantity) or 0)
+            if sellable > 0:
+                shadow.cash += sellable * (price if price else pos.avg_cost)
+            remainder = int(pos.quantity) - sellable
+            if remainder > 0:
+                # 不可卖部分仍留在影子持仓里（今天卖不掉 → 不产生现金）。
+                # 用副本，避免改动调用方的 account（同一对象被多处引用）。
+                rest = copy.copy(pos)
+                rest.sellable_quantity = 0
+                rest.quantity = remainder
+                shadow.positions[symbol] = rest
             continue
         shadow.positions[symbol] = pos
     shadow_view = AccountView(shadow, close_today)
@@ -381,7 +395,11 @@ def generate_daily_list(
         sellable = int(pos.sellable_quantity) if pos else 0
         sell_list.append({
             "symbol": intent.symbol,
-            "qty": int(pos.quantity) if pos else None,
+            # qty = **本次可执行**的股数（T+1 不可卖的当日买入部分不计入），
+            # qty_total = 该标的的全部持仓——人工按 qty 下单才不会下出不可卖的量
+            # （旧口径 qty=全仓 + executable=true，见 R13A-F1 的连带面）。
+            "qty": sellable,
+            "qty_total": int(pos.quantity) if pos else None,
             # T+1：当日买入 sellable=0，触发的止损卖出当日不可执行
             # （引擎侧会记 t1_block）——清单显式标注，人工执行不再猜。
             "sellable_qty": sellable,

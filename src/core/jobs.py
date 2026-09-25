@@ -155,10 +155,10 @@ def _spawn_same_day_catchup(
             # 再也不会发生。
             remaining = 7200
             while remaining > 0:
-                while run_freeze.is_frozen() and remaining > 0:
+                while run_freeze.is_frozen_anywhere() and remaining > 0:
                     _time.sleep(60)
                     remaining -= 60
-                if run_freeze.is_frozen():
+                if run_freeze.is_frozen_anywhere():
                     logger.warning("same-day catchup abandoned: still frozen after 2h")
                     return
                 if market_now().date() != today:
@@ -178,7 +178,7 @@ def _spawn_same_day_catchup(
                     # 又被冻结：回到等待（预算继续消耗），不跑 pipeline；
                     # 若此时并未冻结（状态语义异常/竞态），退避一轮避免热转
                     logger.info("same-day catchup: re-deferred, waiting again")
-                    if not run_freeze.is_frozen():
+                    if not run_freeze.is_frozen_anywhere():
                         _time.sleep(60)
                     continue
                 if status in ("skipped_already_running", "skipped_non_trading_day"):
@@ -272,16 +272,16 @@ def _daily_market_update_job_locked(
 
     # 冻结门对 force 同样生效（评审 DS-P2-6：启动补偿也不能抢跑写任务——
     # 否则补偿与活跃 run 并发读两版数据；无活跃 run 时冻结非真，照样放行）
-    if run_freeze.is_frozen():
+    if run_freeze.is_frozen_anywhere():
         import time as _time
 
         waited = 0
-        while run_freeze.is_frozen() and waited < 1800:
+        while run_freeze.is_frozen_anywhere() and waited < 1800:
             logger.info("daily update deferred: %d backtest run(s) active, waiting...",
                         run_freeze.active_count())
             _time.sleep(30)
             waited += 30
-        if run_freeze.is_frozen():
+        if run_freeze.is_frozen_anywhere():
             logger.warning("daily update deferred: backtest still running after 30min")
             # 顺延必须留痕（评审 DS-P2-6）：job_runs 记录，日更推迟可见
             payload = {

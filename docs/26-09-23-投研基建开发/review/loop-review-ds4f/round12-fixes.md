@@ -12,7 +12,7 @@
 | **R12B-F1** 批量导出跨用户泄露实盘成交 | P2 | `_live_trades_frame(db, *, user_id=None)` 加 SQL 过滤；`export_batch_analysis(..., user_id=...)` 透传并在 manifest 声明 `live_trades_scope`；HTTP 端点要求登录并把**调用者 id** 传下去（admin 需显式 `live_all=true` 才取全量）；本地脚本保持 `None`=全体（单操作员） | `src/services/backtest_export.py`、`src/app/routers/batch_backtest.py` |
 | **R12B-F2** 老持仓的止损被静默取消 | P2 | `pad_start` 前移到 **最早未平仓买入日 − 60 天**（覆盖 ATR 预热），使 `_rebuild_stop_state` 能重建状态 | `src/portfolio/live.py` |
 | **R12B-F3** T+1 可卖量按最早入场日虚增 | P2 | 聚合时**逐笔留档** `lots=[(qty, buy_date)]`，可卖量 = 买入日严格早于决策日的那些笔之和（不再用最早入场日判整笔） | `src/portfolio/live.py` |
-| **R12B-F4** 旧栈批量缺运行期冻结门 | P2 | 新增 `BatchBacktestService.run_batch_frozen()`（决策 A3 的冻结门），HTTP 与 `scripts/run_stop_sweep.py` 两个入口都改走它；代价（批次与日更重叠时顺延，`job_runs` 留痕）已在 docstring 写明 | `src/rule_backtest/batch_service.py`、`src/app/routers/batch_backtest.py`、`scripts/run_stop_sweep.py` |
+| **R12B-F4** 旧栈批量缺运行期冻结门 | P2 | 新增 `BatchBacktestService.run_batch_frozen()`（决策 A3 的冻结门），HTTP 与 `scripts/run_stop_sweep.py` 两个入口都改走它；代价（批次与日更重叠时顺延，`job_runs` 留痕）已在 docstring 写明 （**更正**：CLI 是独立进程，当时的冻结计数器是进程内实现 → 对 app 进程的日更不可见；Round 13 补跨进程哨兵文件后才真正生效）| `src/rule_backtest/batch_service.py`、`src/app/routers/batch_backtest.py`、`scripts/run_stop_sweep.py` |
 | R12A backlog：calmar 不入闸无钉子 | P3 | 补 `sanitize_ratio_metrics` 语义钉子 + 年度块侧断言 | `tests/integration/test_loop_review_ds4f_r12.py` |
 | R12A backlog：`engine_runs` 迁移传播无钉子 | P3 | 补迁移钉子（建库 → DROP 守卫 → 重开 → 守卫重装且 DELETE 被拒） | 同上 |
 | R12A backlog：`manual_trade` 的幅值兜底是死代码 | P3 | 删除该分支（`is_degenerate_summary` 已含同键位判定） | `src/services/manual_trade.py` |

@@ -29,7 +29,7 @@
 |---|---|---|---|
 | **R11A-F1** 批量落库路径零闸门 | P1 | `extract_cell`：任一腿 sharpe/sortino 超闸 → 该腿两项记 None；`excess_sharpe` 任一侧不可用即记 None（不得用噪声作差） | `src/rule_backtest/batch_service.py` |
 | **R11A-F2** 逐年度块零闸门（生产库已落库 147 条） | P1 | `compute_annual_returns` 出口统一过 `sanitize_annual_blocks`；**读取面**（`aggregate_annual_returns` 聚合、`_parse_cell_blobs` HTTP 出口）同样清噪——写入面闸门管不到历史行 | `src/rule_backtest/metrics.py`、`batch_service.py`、`src/app/routers/batch_backtest.py` |
-| **R11A-F3** 两个离线脚本零闸门 | P2 | `backfill_batch_excess_metrics._benchmark_sharpe_calmar` 与 `run_base_v1_sample._summarize` 过同一幅值闸门 | `scripts/*.py` |
+| **R11A-F3** 两个离线脚本零闸门 | P2 | `run_base_v1_sample._summarize` 过幅值闸门；`backfill_batch_excess_metrics._benchmark_sharpe_calmar` **当时未真正落地**（编辑失败后未复核文件，而报告写成已修）→ 由 R13B 抓到、Round 13 补齐 | `scripts/*.py` |
 | **R11A-F5** 手工交易 HTTP 面零闸门 | P3 | `compute_manual_trade` 的 `holding.sharpe/sortino` 过闸（判据 + 幅值兜底），calmar 保留 | `src/services/manual_trade.py` |
 | **R11A-F6** 判据 docstring 自相矛盾 | P3 | docstring 改为"sharpe/sortino"并写明"刻意不含 calmar"的理由 | `src/rule_backtest/metrics.py` |
 | **R11A-F4** h2h `t_stat` 未随退化清零 | P3（**不改行为**） | 主审人复核确认不可利用（收益空间，非比值空间放大机制）→ 记录在案，避免为"看起来干净"改动更多面 | — |

@@ -177,6 +177,9 @@ def test_engine_runs_delete_guard_migrates_to_existing_db(tmp_path):
     path.parent.mkdir(parents=True, exist_ok=True)
     db = Database(path)
     with db.connect() as conn:
+        # 既要测"守卫缺失时补装"，也要测"**定义被改弱**时被 DROP+CREATE 覆盖"
+        # ——后者才是 DROP+CREATE 相对 IF NOT EXISTS 的真正差别（R13A backlog B2：
+        # 只钉前者时把实现改成 IF NOT EXISTS 仍绿）
         conn.execute("DROP TRIGGER IF EXISTS trg_engine_runs_no_delete")
     reopened = Database(path)  # 重新打开 = 走一遍 DDL（含守卫的 DROP+CREATE）
     with reopened.connect() as conn:
@@ -190,6 +193,21 @@ def test_engine_runs_delete_guard_migrates_to_existing_db(tmp_path):
             " resolved_config_yaml, run_params_json, data_version, engine_version, git_hash)"
             " VALUES ('R-mig','backtest','x','h','y','{}',1,'v','g')"
         )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("DELETE FROM engine_runs WHERE run_id='R-mig'")
+    # 第二段：把守卫**改弱**（只挡 status='x' 之外的删除）→ 重开库必须恢复强定义
+    with reopened.connect() as conn:
+        conn.execute("DROP TRIGGER trg_engine_runs_no_delete")
+        conn.execute(
+            "CREATE TRIGGER trg_engine_runs_no_delete BEFORE DELETE ON engine_runs"
+            " WHEN OLD.status = 'never' BEGIN SELECT RAISE(ABORT, 'weak'); END"
+        )
+    third = Database(path)
+    with third.connect() as conn:
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='trg_engine_runs_no_delete'"
+        ).fetchone()[0]
+        assert "is append-only" in sql, "改弱的定义必须被 DROP+CREATE 覆盖回强定义"
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("DELETE FROM engine_runs WHERE run_id='R-mig'")
 

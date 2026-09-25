@@ -180,7 +180,10 @@ def export_batch_analysis(
 
     files: dict[str, int] = {}
 
-    cells = db.get_batch_cells(batch_id)
+    # 格子级比值列清噪（与 HTTP 出口同口径）：直接读 DB 会绕过端点层闸门
+    from rule_backtest.metrics import sanitize_ratio_metrics
+
+    cells = [sanitize_ratio_metrics(c) for c in db.get_batch_cells(batch_id)]
     files["cells.csv"] = _write_csv(pd.DataFrame(cells), target / "cells.csv")
 
     rt_rows = db.get_batch_roundtrip_rows(batch_id)
@@ -195,7 +198,9 @@ def export_batch_analysis(
     if alt is not None:
         alt_rt_rows = db.get_batch_roundtrip_rows(alt_batch_id)
         files["cells_alt.csv"] = _write_csv(
-            pd.DataFrame(db.get_batch_cells(alt_batch_id)), target / "cells_alt.csv"
+            pd.DataFrame([sanitize_ratio_metrics(c)
+                          for c in db.get_batch_cells(alt_batch_id)]),
+            target / "cells_alt.csv",
         )
         files["round_trips_alt.csv"] = _write_csv(
             _round_trips_frame(alt_rt_rows), target / "round_trips_alt.csv"

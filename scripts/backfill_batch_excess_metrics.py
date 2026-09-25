@@ -35,7 +35,7 @@ import pandas as pd
 from data.storage.db import init_db
 from data.storage.market_store import MarketStore
 from rule_backtest.engine import SingleSymbolAllInBacktestEngine
-from rule_backtest.metrics import compute_summary, flat_run_days
+from rule_backtest.metrics import compute_summary, flat_run_days, sanitize_ratio_metrics
 
 DB_PATH = _common.DB_PATH
 BACKUP_DIR = Path("data/backups")
@@ -69,7 +69,13 @@ def _benchmark_sharpe_calmar(
     nav = (bench or {}).get("series", [])
     if not nav:
         return None, None
-    summary = compute_summary(daily_nav=nav, trades=[], turnover_total=0.0)
+    # 退化腿闸门：本脚本把结果 UPDATE 进 batch_backtest_cells 的
+    # benchmark_sharpe/excess_sharpe 列（方案 §8 给 AI 离线分析的面），
+    # 单调/极短基准窗口的年化 sharpe 是浮点残差噪声（R13B 实测 28775.93）。
+    # 与引擎出口/HTTP/CSV 共用同一闸门；calmar 不入闸（低回撤/短窗口可合法 > 50）。
+    summary = sanitize_ratio_metrics(
+        compute_summary(daily_nav=nav, trades=[], turnover_total=0.0)
+    )
     return summary.get("sharpe"), summary.get("calmar")
 
 

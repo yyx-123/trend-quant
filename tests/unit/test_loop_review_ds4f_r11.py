@@ -296,12 +296,10 @@ def test_offline_scripts_gate_noise_ratios():
     assert out["sortino"] == 0.0
     assert out["annual_return"] is not None and out["calmar"] is not None
 
-    # backfill 的基准腿走真实引擎接口：只钉"闸门函数存在且按幅值生效"这一半
-    backfill = _load("backfill_batch_excess_metrics.py")
-    from rule_backtest.metrics import DEGENERATE_SHARPE_ABS_LIMIT
-
-    assert callable(backfill._benchmark_sharpe_calmar)
-    assert DEGENERATE_SHARPE_ABS_LIMIT == 50.0
+    # backfill 脚本的闸门由 tests/integration/test_loop_review_ds4f_r13.py::
+    # test_offline_backfill_helper_gates_noise 行为级钉住（此处原先是空钉：
+    # 只断言 callable(助手) 与一个与脚本无关的常量，在完全无闸门的代码上也通过
+    # ——R13B 实证）
     # 合法波动的序列不得被闸（对照）
     noisy = [{"date": f"2024-01-{i + 1:02d}",
               "equity": 100_000.0 + i * 150.0 + (2_500.0 if i % 2 else -2_000.0)}

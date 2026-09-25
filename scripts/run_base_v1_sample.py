@@ -114,11 +114,13 @@ def main() -> int:
             "elapsed_s": round(elapsed, 1),
             "nav": [{"date": r["date"], "equity": round(r["equity"], 2)} for r in nav],
         }
+        _sharpe = results[sid]["summary"]["sharpe"]
+        _sharpe_txt = "  n/a" if _sharpe is None else f"{_sharpe:>5.2f}"
         print(
             f"[run] {sid:26s} final={nav[-1]['equity']:>12,.0f} "
             f"annual={results[sid]['summary']['annual_return']:>7.2%} "
             f"mdd={results[sid]['summary']['max_drawdown']:>7.2%} "
-            f"sharpe={results[sid]['summary']['sharpe']:>5.2f} "
+            f"sharpe={_sharpe_txt} "
             f"trades={len(result['trades']):>4d} unfilled={len(result['unfilled']):>3d} "
             f"({elapsed:.1f}s)"
         )
@@ -155,9 +157,13 @@ def main() -> int:
     ]
     for sid in targets:
         s = results[sid]["summary"]
+        # 退化腿会被闸门置 None → 表格里写 n/a（不能直接 :.2f 格式化）
+        def _fmt(v):
+            return "n/a" if v is None else f"{v:.2f}"
+
         lines.append(
             f"| {sid} | {s['annual_return']:.2%} | {s['total_return']:.2%} | "
-            f"{s['max_drawdown']:.2%} | {s['sharpe']:.2f} | {s['sortino']:.2f} | "
+            f"{s['max_drawdown']:.2%} | {_fmt(s['sharpe'])} | {_fmt(s['sortino'])} | "
             f"{results[sid]['trades']} | {results[sid]['unfilled']} | {results[sid]['elapsed_s']} |"
         )
     lines += [

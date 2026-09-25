@@ -703,8 +703,12 @@ def bootstrap_mean_diff_ci(
 def compare_batches(db: Database, base_batch_id: str, alt_batch_id: str) -> dict:
     """紧/松（或任意两批次）并排对比。两批次须同标的池同策略 —— 取
     symbol×strategy 交集，交集为空或任一批次仍在运行由路由层转 409。"""
-    base_cells = db.get_batch_cells(base_batch_id)
-    alt_cells = db.get_batch_cells(alt_batch_id)
+    # 比值列先清噪（与 HTTP/CSV 出口同口径）：否则 delta_sharpe 会用噪声作差，
+    # 且两侧格子列的噪声会原样进 /api/compare 响应与 compare_cell_diffs.csv
+    from rule_backtest.metrics import sanitize_ratio_metrics
+
+    base_cells = [sanitize_ratio_metrics(c) for c in db.get_batch_cells(base_batch_id)]
+    alt_cells = [sanitize_ratio_metrics(c) for c in db.get_batch_cells(alt_batch_id)]
     base_map = {
         (c["symbol"], c["strategy_id"]): c for c in base_cells if c.get("status") == "ok"
     }
@@ -890,7 +894,9 @@ class BatchBacktestService:
         """
         from core import run_freeze
 
-        with run_freeze.frozen_writes():
+        # 双层：进程内计数（app 内线程共享）+ 跨进程哨兵文件（独立 CLI 进程
+        # 发起的 sweep 也要让 app 的 16:30 日更看得到——R13A-F2）
+        with run_freeze.frozen_writes(), run_freeze.cross_process_frozen():
             self.run_batch(batch_id, cancel_event=cancel_event)
 
     def run_batch(self, batch_id: str, cancel_event: threading.Event | None = None) -> None:

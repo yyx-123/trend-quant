@@ -266,10 +266,11 @@ async def list_batch_runs() -> dict:
 
 
 def _parse_cell_blobs(row: dict) -> dict:
-    # 年度块的比值型指标走读取面清噪（幅值超闸 → None）：修复前落库的噪声
-    # （生产库 147 条 |benchmark_sharpe|>50，最大 16332.48）仍会被 HTTP 取出、
-    # 被前端显示并进 CSV——写入面闸门管不到历史行。
-    from rule_backtest.metrics import sanitize_annual_blocks
+    # 比值型指标走读取面清噪（幅值超闸 → None）：① 年度块（生产库 147 条历史噪声，
+    # 最大 16332.48）；② **格子列本身**（sharpe/sortino/benchmark_sharpe/excess_sharpe）
+    # ——R13B 实证：只清年度块会留下"同一行年度块 None、格子列 28775.93 裸奔"的自相矛盾，
+    # 而 backfill 脚本等旁路写入的正是这些列。calmar 按 R10 口径豁免。
+    from rule_backtest.metrics import sanitize_annual_blocks, sanitize_ratio_metrics
 
     for key in (
         "annual_returns_json",
@@ -290,7 +291,7 @@ def _parse_cell_blobs(row: dict) -> dict:
                 row[out_key] = None
         else:
             row[out_key] = None
-    return row
+    return sanitize_ratio_metrics(row)
 
 
 @router.get("/api/runs/{batch_id}/cells")
@@ -303,9 +304,13 @@ async def get_batch_cells(batch_id: str, response: Response) -> dict:
     response.headers["Cache-Control"] = (
         "no-store" if batch["status"] == "running" else "private, max-age=3600"
     )
+    from rule_backtest.metrics import sanitize_ratio_metrics
+
     return {
         "batch": batch,
-        "cells": db_module.get_db().get_batch_cells(batch_id),
+        # 格子级比值列同样清噪（与明细端点同口径；R13B：列表/CSV/前端都读这些列）
+        "cells": [sanitize_ratio_metrics(c)
+                  for c in db_module.get_db().get_batch_cells(batch_id)],
     }
 
 
