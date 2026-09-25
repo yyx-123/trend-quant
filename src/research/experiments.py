@@ -120,10 +120,11 @@ def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
             expanded[key] = default() if callable(default) else default
     # runner 侧 `primary_horizon` 的缺省不是常量而是 `horizons[0]`（ND-3：
     # 显式写出该值必须与省略等价）
-    # 只对**声明了** primary_horizon 的模块现算（V8 反证：给 bucket_analysis
-    # 注入未声明字段会让其键集与省略形态不同 → 同 subject_key 的第二个分桶
-    # 实验被判 similar_to，整类实验被误杀）
-    if "primary_horizon" in known and expanded.get("primary_horizon") is None:
+    # 只对**声明并真正消费** primary_horizon 的模块现算（V8 反证：给
+    # bucket_analysis 注入未声明字段会让其键集与省略形态不同 → 同 subject_key
+    # 的第二个分桶实验被判 similar_to，整类实验被误杀；V9 复核 R4：backtest
+    # 虽登记了该字段但 runner 不消费，同样不现算）。
+    if module_key == "event_study" and expanded.get("primary_horizon") is None:
         horizons = expanded.get("horizons")
         if isinstance(horizons, (list, tuple)) and horizons:
             try:

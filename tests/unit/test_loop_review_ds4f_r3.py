@@ -593,3 +593,31 @@ def test_falsy_defaults_are_normalized(test_db, registry, topic, human_session):
             {"base": "b@1", "diff": [], **spec}, module,
         )
         assert out[key] == expected, (key, out)
+
+
+# ----------------------------------------------------------------------
+# V9 复核 R1：退役种子线不得被 seed 流程复活（否则所有回测都 failed）
+# ----------------------------------------------------------------------
+
+
+def test_retired_seed_line_does_not_break_every_backtest(test_db, registry):
+    """V9-R1：退役任一种子线后，seed 流程必须跳过它而不是抛错——
+    `add_version` 对退役线显式拒绝，而 seed 每次 run 前都跑（幂等），
+    此前会让**所有** portfolio_backtest 在 seed 处失败（含既有实验复现）。"""
+    from portfolio import library
+    from portfolio.slots import REGISTRY, ensure_builtins
+    from portfolio.seed import seed_default_library
+
+    ensure_builtins()
+    seeded = seed_default_library(test_db, REGISTRY)
+    assert seeded, "种子库必须可入库"
+    victim = "bench-60-40"
+    assert victim in seeded
+    library.retire_strategy(test_db, victim)
+    # 再次 seed（= 每次 run 前的幂等步骤）不得抛错，且不复活退役线
+    again = seed_default_library(test_db, REGISTRY)
+    assert victim not in again, "退役的种子线不得被 seed 复活"
+    assert "base-v1" in again, "其余种子线照常"
+    line = library.get_strategy(test_db, victim)
+    assert line.get("retired_at"), "退役标记必须保留"
+    assert library.list_versions(test_db, victim), "已发布的版本行必须仍在（历史可复现）"

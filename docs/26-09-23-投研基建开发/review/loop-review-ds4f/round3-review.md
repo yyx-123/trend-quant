@@ -1,6 +1,12 @@
 # Round 3 审查报告（loop-review-ds4f）
 
-> **状态：OPEN（待修复验收）**
+> **状态：CLOSED（2026-09-25 闭合）**
+> - 修复清单与验收记录：`round3-fixes.md`；验收代理 V7 **FAIL**（3 项阻断 + 3 项残留）
+>   → 修复 → V8 **FAIL**（2 项阻断：服务面未透传 topics_dir；primary_horizon 误杀
+>   bucket_analysis）→ 修复 → V9 **PASS**（含负向 A/B 对照；并抓到 1 项**既有**中等
+>   缺陷：退役种子线会让所有回测 failed → 本轮一并修掉）；
+> - 全量回归：1615 passed / 2 failed（失败全部为改动前即 flaky 的 Windows 临时文件用例）；
+> - ruff：(file, rule) 集合与基线完全一致（新增 0 条）。
 >
 > 日期：2026-09-25
 > 审查对象：commit `0a6bfe7`（Round 2 闭合后全量代码）

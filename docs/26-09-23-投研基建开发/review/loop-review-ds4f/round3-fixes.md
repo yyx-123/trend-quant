@@ -1,5 +1,10 @@
 # Round 3 修复与回归（loop-review-ds4f）
 
+> **状态：CLOSED（2026-09-25 闭合）**——验收代理 V7/V8 各判 FAIL（共 5 项阻断，
+> 全部为我的实现/钉子问题）→ 三轮修复 → V9 确认 **PASS**（两项阻断端到端闭合 +
+> 负向 A/B 对照，并抓到 1 项**既有**中等缺陷 R1：退役种子线会让所有回测 failed，
+> 本轮一并修掉）。详见文末"V7/V8/V9 独立验收"节。
+>
 > 日期：2026-09-25
 > 对应审查：`round3-review.md`（4 项 P2 + 10 项 P3，全部集中在**平台/纪律/通道层**）
 
@@ -78,9 +83,31 @@ V8 逐项复核，确认 ND-2/ND-3(a)机制与声明字段矩阵/ND-4 四条腿/
 仓库 `research/topics/`——阻断 1 修好后该路径也归位（`research/topics/` 在
 `.gitignore`，无版本库污染）。
 
+
+## V9 确认轮（第 9 个代理）：PASS + 抓出 1 项既有中等缺陷
+
+V9 以端到端探针 + **负向 A/B 对照**逐项确认：V8 的两项阻断均**真闭合**
+（①服务面 topics_dir 透传：产物落在服务根、仓库 `research/topics` 前后快照 0 变化，
+对照 `c9a006d` 的服务方法体则 4 文件落默认根；②`primary_horizon` 模块感知：
+bucket 不再注入该键、同 subject_key 第二个分桶实验 ACCEPTED，对照旧版注入则
+`similar_to`）；falsy 归一、无过度拦截（12 个真差异 spec 全 ACCEPTED，跨 5 模块）、
+全字段矩阵（24 个声明字段的显式缺省全部 `duplicate_of`）、套件/ruff/工件状态全部吻合。
+
+**V9 抓到的既有缺陷 R1（中，`c9a006d` 上同样失败）**：退役**任一种子策略线**
+会让**所有** `portfolio_backtest` 失败——`run_portfolio_backtest` 每次 run 前调
+`seed_default_library`（幂等），而种子线退役后 `add_version` 显式拒绝 → 在 seed
+处抛错 → run 落 failed（含既有实验的复现；DSR 计数被污染）。**本轮已修**：
+seed 流程跳过退役线（退役即"不再生长"，已有版本行保留、历史仍可复现），并配钉子
+（退役后再次 seed 不抛错、不复活、版本行仍在）。
+
+R2/R3（文档）已修；R4（`primary_horizon` 现算范围）已收紧为仅 `event_study`
+（backtest 登记了该字段但 runner 不消费，同样不现算）。
+
 ## 回归结果
 
 - 全量：**1605 passed / 1 failed**（唯一失败仍是改动前即 flaky 的 Windows 临时文件用例，在父提交上同样失败）；修复过程中另有一次全量 **1606 passed / 0 failed**。
 - 新增钉子：`tests/unit/test_loop_review_ds4f_r3.py` 11 项；
-- ruff：与基线逐条对比新增 0 条（并把 `src/portfolio/service.py` 的存量 I001/PLC3002
-  与 `src/research/recompute.py` 的 I001 一并修掉，属顺手收口）。
+- ruff：与基线逐条对比新增 0 条（V9 逐条核对：`(file, rule)` 集合与 `c9a006d`
+  完全一致；先前"顺手收口 service.py/recompute.py 存量 lint"的说法归因有误——
+  `service.py` 在 `c9a006d` 就没有 I/PLC 诊断，`recompute.py` 的 I001 是我自己
+  新增 import 引入的、已修掉）。
