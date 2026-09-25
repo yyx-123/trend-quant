@@ -33,6 +33,8 @@ confirmed 门里有两个不同的 ΔSharpe，勿混——
 
 from __future__ import annotations
 
+import math
+
 # 平台判定阈值（默认值；运行期可由 app_config 的 research.rules.* 覆盖，
 # 调整走架构稿修订流程）
 DEFAULT_RULES = {
@@ -134,7 +136,7 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
     #    （与噪声尺度无关）→ 真高原半数被挡、且把"疑似过拟合"写进 append-only 台账。
     # 统一按"证据不足 = unknown + 可见告警"处理（与该函数对"无邻域点"的既有口径一致）。
     distinct = np.unique(arr)
-    if distinct.size < 3:
+    if distinct.size < 2:
         return {
             "verdict": "unknown",
             "reason": f"neighbor_points_insufficient({distinct.size})",
@@ -150,7 +152,13 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
     same_direction = all(
         (d > 0) == (selected_delta > 0) for d in arr
     )
-    deviates = std > 0 and abs(selected_delta - mean) > rules["plateau_sigma"] * std
+    # 判据 = 设计口径（Alvarez 1σ）。小邻域（去重后 2~4 点）时 σ̂ 由很少的点估计，
+    # 结论**必须标注低置信**（R18B-P2-2 + R19A-F2 的收敛口径）：
+    #  - 不改成 unknown：那会让"非孤峰"条件对单参数实验永远不阻断（假安全）；
+    #  - 不换 t 预测区间：2 点时比值统计量重尾（H0 误判率实测 78%），换汤不换药；
+    #  - 因此保留阻断力 + 如实标注，并把"扩邻域（±10/20/30%）"作为口径决策项。
+    low_confidence = distinct.size < 5
+    deviates = std > 0 and abs(selected_delta - mean) > float(rules["plateau_sigma"]) * std
     verdict = "plateau" if (same_direction and not deviates) else "peak"
     return {
         "verdict": verdict,
@@ -159,6 +167,8 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
         "selected": selected_delta,
         "same_direction": same_direction,
         "deviates_over_1sigma": deviates,
+        "neighbor_points": int(distinct.size),
+        "low_confidence": bool(low_confidence),
         "skipped": int(skipped),
     }
 

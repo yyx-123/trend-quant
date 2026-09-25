@@ -949,7 +949,18 @@ def plateau_warnings(plateau: dict | None, *, is_creation: bool) -> list[str]:
             + f"{reason}——高原/孤峰检查实际缺席，勿当作已通过)"
         ]
     if plateau.get("verdict") == "peak":
-        return ["plateau_peak(参数孤峰，疑似过拟合)"]
+        pts = plateau.get("neighbor_points")
+        suffix = (
+            f"；注意：邻域仅 {pts} 个点，σ 估计低置信（<5 点），结论按低置信处理"
+            if plateau.get("low_confidence") else ""
+        )
+        return [f"plateau_peak(参数孤峰，疑似过拟合{suffix})"]
+    if plateau.get("low_confidence"):
+        pts = plateau.get("neighbor_points")
+        return [
+            f"plateau_low_confidence(邻域仅 {pts} 个点 <5，σ 估计低置信——"
+            "本次孤峰检查的结论按低置信处理，勿当作已通过)"
+        ]
     return []
 
 

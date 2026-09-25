@@ -137,14 +137,14 @@ def test_plateau_verdict_reports_skipped_neighbors():
     assert out["verdict"] == "unknown"
     assert out["skipped"] == 3
     assert "skipped 3" in out["reason"]
-    # 2 点邻域：σ 由 df=1 估计不可靠 → 按"证据不足"处理（R18B-P2-2），
-    # 但 skipped 仍必须如实可见
+    # 2 点邻域：仍按设计口径判定但标注**低置信**（R18B-P2-2 + R19A-F2 的收敛口径），
+    # 且 skipped 必须如实可见
     ok = plateau_verdict(0.4, [0.3, 0.5], skipped=1)
-    assert ok["skipped"] == 1 and ok["verdict"] == "unknown"
-    assert ok["insufficient_neighbors"] is True
-    # ≥3 点才行使 1σ 判据
-    enough = plateau_verdict(0.4, [0.38, 0.42, 0.40], skipped=1)
-    assert enough["skipped"] == 1 and enough["verdict"] in ("plateau", "peak")
+    assert ok["skipped"] == 1 and ok["verdict"] in ("plateau", "peak")
+    assert ok["low_confidence"] is True and ok["neighbor_points"] == 2
+    # ≥5 点：设计口径、无低置信标注
+    enough = plateau_verdict(0.4, [0.38, 0.42, 0.40, 0.39, 0.41], skipped=1)
+    assert enough["skipped"] == 1 and enough["low_confidence"] is False
 
 
 def _strategy_version(db, line):

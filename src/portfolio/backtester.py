@@ -131,6 +131,31 @@ def instantiate_modules(config: StrategyConfig, registry) -> dict[str, Any]:
     return modules
 
 
+def heat_cap_ex_post_warning(nav_rows: list[dict], cap: float) -> str | None:
+    """事后 heat 越线告警（纯函数，便于直接断言；R19B-F1）。
+
+    `heat_cap` 只在**准入时刻**校验组合热；已持仓的 heat 随收盘价上涨自然增长
+    （止损价固定、MVP 无部分卖出）→ 日结 heat 可长期高于 cap。实测（12 只真实
+    标的 · cap 6% · 一年）264/365 天越线、峰值 4.15×cap，而旧实现无任何留痕。
+    返回 None 表示未越线。
+    """
+    over = [
+        float(r["heat"]) / float(r["equity"])
+        for r in nav_rows
+        if r.get("heat") is not None and r.get("equity")
+        and float(r["equity"]) > 0 and float(r["heat"]) > float(r["equity"]) * float(cap)
+    ]
+    if not over:
+        return None
+    peak = max(over)
+    return (
+        f"heat_cap_exceeded(事后口径): {len(over)}/{len(nav_rows)} 个日结 heat 超"
+        f"cap={float(cap):.2%}，峰值 {peak:.2%}（{peak / float(cap):.2f}×cap）——"
+        "cap 仅在准入时刻卡控，已持仓 heat 随价格增长不受约束；"
+        "不要把该 run 的敞口读作受 cap 约束"
+    )
+
+
 def run_backtest(
     db,
     *,
@@ -372,6 +397,20 @@ def run_backtest(
         gateway.flush_audit()
 
     round_trips = _round_trips_enriched(trades, panel)
+
+    # heat_cap 的**事后**口径如实可见（R19B-F1）：cap 只在准入时刻卡控，已持仓的
+    # heat 会随收盘价上涨自然增长（stop 固定，MVP 无部分卖出）→ 日结 heat 可长期
+    # 高于 cap，而旧实现无任何留痕。实测（12 只真实标的 · heat_cap 6% · 一年）
+    # 264/365 天越线、峰值 4.15×cap。这里只**告警**不改行为（硬上限需要部分卖出）。
+    if uses_heat_cap:
+        _cap = 0.06
+        for g in config.gates:
+            if (g.module or "").startswith("heat_cap"):
+                _cap = float((g.params or {}).get("cap", _cap))
+                break
+        _msg = heat_cap_ex_post_warning(nav_rows, _cap)
+        if _msg:
+            run_warnings.append(_msg)
 
     return {
         "run_id": run_id,

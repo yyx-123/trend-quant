@@ -100,6 +100,11 @@ class BufferedRotationExecution(TailSessionExecution):
     def rotation_policy(self, ctx, candidates, holdings) -> list[ExitOrderIntent]:
         if not candidates or not holdings:
             return []
+        # 频率门（§5.11 缺口①：频率参数决定哪些日子允许行动，覆盖**新开仓/轮换/再平衡**）：
+        # 此前只有入场面与 rebalance_band 查了门，本模块不查 → `action_gate: monthly`
+        # 的实验臂会在月中做轮换卖出（R19B-F3 实测 26 天非月首）
+        if not self.allows_action(ctx):
+            return []
         # max_swaps：单行动日至多换 N 只（参数此前
         # 声明未用，恒至多换 1 只——现按声明的参数域真实生效）
         ranked_holdings = sorted(holdings, key=lambda s: self._momentum(ctx, s))
@@ -239,7 +244,7 @@ class AnyOfSignal(_MetaBase):
 
 
 class AllOfSignal(_MetaBase):
-    """全部子模块同时成立才生效（入场条件叠加；exit 任一成立即退）。"""
+    """全部子模块同时成立才生效（入场条件叠加；**离场同样要求全部确认**，§5.2.8）。"""
 
     def __init__(self, params: dict, registry: ModuleRegistry) -> None:
         super().__init__(params, registry, "signal")
@@ -263,11 +268,13 @@ class AllOfSignal(_MetaBase):
             latest = max(entry_sets[i][symbol].date for i in range(len(entry_sets)))
             out.append(SignalEvent(symbol=symbol, kind="entry", date=latest,
                                    meta={"event_date": latest.isoformat(), "all_of": True}))
-        any_exit = set()
-        for s in exit_sets:
-            any_exit |= set(s)
-        for symbol in sorted(any_exit):
-            out.append(SignalEvent(symbol=symbol, kind="exit", date=ctx.date, meta={}))
+        # 离场语义 = **全部**子模块同时给出离场信号（§5.2.8：all_of "全部子模块
+        # 同时成立才生效——用于入场条件叠加…或收盘确认型复合离场"）。此前实现取并集
+        # （任一腿离场即离场，R19B-F2 实测 9 次卖出里 7 次只有单腿确认），与文档相反。
+        if exit_sets:
+            common_exit = set.intersection(*[set(s) for s in exit_sets])
+            for symbol in sorted(common_exit):
+                out.append(SignalEvent(symbol=symbol, kind="exit", date=ctx.date, meta={"all_of": True}))
         return out
 
 

@@ -66,12 +66,19 @@ def test_plateau_insufficient_neighbors_is_not_a_verdict():
     """R18B-P2-2：邻域点 <3 时不得给随机答案（1 点曾静默判高原、2 点 56% 误判孤峰）。"""
     from research.verdict_rules import plateau_verdict
 
-    for neighbors in ([0.5], [0.1, 0.2]):
-        out = plateau_verdict(3.0, neighbors)
-        assert out["verdict"] == "unknown", out
-        assert out["insufficient_neighbors"] is True
-        assert "neighbor_points_insufficient" in out["reason"]
-    # 3 点起恢复正常判定：邻域同向且未偏离 1σ → 高原
-    assert plateau_verdict(3.0, [2.9, 3.05, 2.95])["verdict"] == "plateau"
-    # 孤立峰（选定值远超邻域）→ peak
+    # 1 点：σ 无从估计 → 拒绝给结论（旧实现会把它静默判成"高原"）
+    one = plateau_verdict(3.0, [0.5])
+    assert one["verdict"] == "unknown" and one["insufficient_neighbors"] is True
+    assert "neighbor_points_insufficient" in one["reason"]
+    # 2 点：保留阻断力（不再抛硬币式 unknown），但**必须标注低置信**（R19A-F2：
+    # 一刀切 unknown 会让"非孤峰"对单参数实验永不阻断 = 假安全）
+    peak2 = plateau_verdict(9.0, [0.1, 0.12])
+    assert peak2["verdict"] == "peak" and peak2["low_confidence"] is True
+    assert peak2["neighbor_points"] == 2
+    flat2 = plateau_verdict(0.4, [0.38, 0.42])
+    assert flat2["verdict"] == "plateau" and flat2["low_confidence"] is True
+    # ≥5 点：设计口径、无低置信标注
+    many = plateau_verdict(3.0, [2.9, 3.05, 2.95, 2.88, 3.02])
+    assert many["verdict"] == "plateau" and many["low_confidence"] is False
+    # 3 点孤立峰仍按设计口径判 peak
     assert plateau_verdict(9.0, [0.1, 0.12, 0.11])["verdict"] == "peak"

@@ -706,13 +706,19 @@ def test_plateau_unknown_verdict_is_surfaced_as_absent():
     peak = plateau_verdict(1.0, [0.1, 0.12, 0.11])
     assert peak["verdict"] == "peak"
     assert plateau_warnings(peak, is_creation=False)[0].startswith("plateau_peak")
-    # 2 点/1 点邻域：不再是随机答案，而是**证据不足**（unknown + 可见告警）
-    for neighbors in ([0.1, 0.2], [0.5]):
-        insuf = plateau_verdict(1.0, neighbors)
-        assert insuf["verdict"] == "unknown" and insuf["insufficient_neighbors"] is True
-        assert "neighbor_points_insufficient" in insuf["reason"]
-        warn = plateau_warnings(insuf, is_creation=False)
-        assert warn and warn[0].startswith("plateau_evidence_absent")
+    # 1 点邻域：σ 无从估计 → 证据不足（unknown + 可见告警）
+    insuf = plateau_verdict(1.0, [0.5])
+    assert insuf["verdict"] == "unknown" and insuf["insufficient_neighbors"] is True
+    warn = plateau_warnings(insuf, is_creation=False)
+    assert warn and warn[0].startswith("plateau_evidence_absent")
+    # 2 点邻域：保留判定但标注低置信，告警里必须说明邻域点数
+    low = plateau_verdict(1.0, [0.1, 0.2])
+    assert low["verdict"] in ("plateau", "peak") and low["low_confidence"] is True
+    lw = plateau_warnings(low, is_creation=False)
+    assert len(lw) == 1 and lw[0].startswith("plateau_peak")
+    assert "邻域仅 2 个点" in lw[0]
+    quiet = plateau_verdict(0.4, [0.38, 0.42])
+    assert plateau_warnings(quiet, is_creation=False)[0].startswith("plateau_low_confidence")
 
 
 # ----------------------------------------------------------------------

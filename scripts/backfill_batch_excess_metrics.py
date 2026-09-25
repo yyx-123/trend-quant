@@ -105,7 +105,7 @@ def backfill(batch_id: str | None, dry_run: bool) -> None:
     with db._connect() as conn:
         cells = conn.execute(
             f"""SELECT batch_id, symbol, strategy_id, start_date, end_date,
-                       sharpe, calmar, trades_json
+                       sharpe, calmar, trades_json, asset_type
                 FROM batch_backtest_cells WHERE {where}""",
             params,
         ).fetchall()
@@ -144,7 +144,9 @@ def backfill(batch_id: str | None, dry_run: bool) -> None:
                 continue
             bench_sharpe, bench_calmar = _benchmark_sharpe_calmar(
                 window, capital, lot,
-                symbol=cell.get("symbol"), asset_type=cell.get("asset_type"),
+                # sqlite3.Row 没有 .get（R19A-F1 的回归根因）——按列名下标取；
+                # asset_type 已加进上面的 SELECT
+                symbol=str(cell["symbol"]), asset_type=cell["asset_type"],
             )
             flat_days = _avg_flat_days(cell["trades_json"], window)
             sharpe, calmar = cell["sharpe"], cell["calmar"]
