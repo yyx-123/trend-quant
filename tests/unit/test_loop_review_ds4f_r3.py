@@ -314,14 +314,35 @@ def test_engine_sub_tables_are_append_only(test_db):
             f"INSERT INTO engine_daily_nav ({cols['engine_daily_nav']}) VALUES "
             "('R-guard','2024-01-02',1000,0,1000,0,0)"
         )
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE engine_fills SET quantity=1")
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("DELETE FROM engine_fills")
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE engine_daily_nav SET equity=999999")
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("DELETE FROM engine_daily_nav")
+        # 五张子表各插入一行，逐表验证 UPDATE/DELETE 都被拒（R6 复核：此前只钉
+        # 了 fills/daily_nav 两张，orders/unfilled/positions 的守卫可被删而测试仍绿）
+        conn.execute(
+            "INSERT INTO engine_orders (run_id, order_id, decision_date, "
+            "target_fill_date, symbol, side, order_type, intent_type, intent_value, "
+            "source, status) VALUES ('R-guard','O-guard','2024-01-02','2024-01-02',"
+            "'X.SS','buy','tail_market','quantity',100,'signal','filled')"
+        )
+        conn.execute(
+            "INSERT INTO engine_unfilled (run_id, order_id, symbol, decision_date, "
+            "reason, intent_snapshot_json) VALUES ('R-guard','O-u','X.SS','2024-01-02',"
+            "'limit_up','{}')"
+        )
+        conn.execute(
+            "INSERT INTO engine_positions (run_id, date, symbol, quantity, "
+            "sellable_quantity, avg_cost, entry_price, stop_price, highest_since_buy, "
+            "atr_at_entry) VALUES ('R-guard','2024-01-02','X.SS',100,0,10.0,10.0,9.0,10.0,0.2)"
+        )
+        for table, update_sql in (
+            ("engine_orders", "UPDATE engine_orders SET status='x'"),
+            ("engine_fills", "UPDATE engine_fills SET quantity=1"),
+            ("engine_unfilled", "UPDATE engine_unfilled SET reason='x'"),
+            ("engine_positions", "UPDATE engine_positions SET quantity=1"),
+            ("engine_daily_nav", "UPDATE engine_daily_nav SET equity=999999"),
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(update_sql)
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(f"DELETE FROM {table}")
         # engine_runs 的白名单更新（status 收口）必须仍然可用
         conn.execute("UPDATE engine_runs SET status='finished' WHERE run_id='R-guard'")
 
@@ -621,3 +642,44 @@ def test_retired_seed_line_does_not_break_every_backtest(test_db, registry):
     line = library.get_strategy(test_db, victim)
     assert line.get("retired_at"), "退役标记必须保留"
     assert library.list_versions(test_db, victim), "已发布的版本行必须仍在（历史可复现）"
+
+
+def test_settled_final_verdict_is_immutable_at_db_level(test_db):
+    """R6 复核（M24 survivor）：`已落定 final_verdict 不可改写`这条**库层**守卫
+    必须由**行为**钉住——此前只有源码注释里出现 "final_verdict" 字样，删掉 WHEN
+    子句后 3 条相关钉子仍绿（实测可改写已定论行）。"""
+    from research import sessions, verdict
+
+    session = sessions.get_or_create_default_human_session(test_db)
+    topic = topics.create_topic(test_db, session_id=session["session_id"],
+                                title="定论不可改写", question="?")
+    with test_db.connect() as conn:
+        conn.execute(
+            """INSERT INTO research_experiments
+               (id, title, owner_session, created_by, topic_id, subject_key,
+                evaluation_module, spec_json, hypothesis, status, attempt_index,
+                is_reproduction)
+               VALUES ('E-IMM','定论','human-default','human',?,'imm',
+                       'portfolio_backtest@1','{}','h','verdicted',1,0)""",
+            (topic["id"],),
+        )
+    row = verdict.insert_platform_verdict(
+        test_db, experiment_id="E-IMM", baseline={}, evidence={}, warnings=[],
+        report={}, suggested_verdict="confirmed",
+    )
+    with test_db.connect() as conn:
+        conn.execute(
+            "UPDATE research_verdicts SET final_verdict='inconclusive' WHERE id=?",
+            (row["id"],),
+        )
+    # 已落定后：直改 final_verdict 必须被库层拒绝
+    with test_db.connect() as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE research_verdicts SET final_verdict='rejected' WHERE id=?",
+                (row["id"],),
+            )
+        # 白名单列（reasoning/confirmed_by/时间戳）仍可写
+        conn.execute(
+            "UPDATE research_verdicts SET reasoning='改理由' WHERE id=?", (row["id"],)
+        )

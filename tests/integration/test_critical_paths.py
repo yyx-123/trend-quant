@@ -10,9 +10,8 @@
 
 from __future__ import annotations
 
-import sys
-
 import json
+import sys
 from datetime import date
 from pathlib import Path
 

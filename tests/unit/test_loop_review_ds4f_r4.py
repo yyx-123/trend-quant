@@ -250,12 +250,22 @@ def test_worker_stop_requeues_cancelled_dispatches(test_db, monkeypatch):
     # (a) 会话计数不得泄漏：4 个被派发（1 完成 + 3 被取消回灌）后必须归零
     assert sum(st.get("active_by_session", {}).values()) == 0, f"会话计数泄漏（{st}）"
     # (b) 不得丢派发：5 个实验里恰好 1 个被 worker 跑过（桩 runner 不改状态机），
-    # 其余 4 个必须回到队列等待重派——既不在跑也不在队列即"静默丢失"。
+    # 其余 4 个必须回到**队列**（不只是回集合——R6 复核：只 `_queued_ids.add`
+    # 而漏 `_queue.put` 时本断言仍会绿，而实验其实再也派发不出去）。
     assert len(worker._queued_ids) == len(exp_ids) - 1, (
         f"被取消的派发未全部回灌队列：queued_ids={sorted(worker._queued_ids)} "
         f"（status={st}）"
     )
     assert all(e in worker._queued_ids for e in exp_ids[1:]),         "除首个（在跑）外都应回到队列"
+    queued_in_fifo = set()
+    while not worker._queue.empty():
+        queued_in_fifo.add(worker._queue.get_nowait())
+    assert queued_in_fifo == set(exp_ids[1:]), (
+        f"回灌必须落回 `_queue`（只进集合 = 监控说谎且再也派发不出去）："
+        f"fifo={sorted(queued_in_fifo)} vs 期望 {sorted(exp_ids[1:])}"
+    )
+    for e in queued_in_fifo:
+        worker._queue.put(e)  # 复位，避免影响后续断言"
 
 
 def test_worker_start_refuses_second_live_dispatcher(test_db):

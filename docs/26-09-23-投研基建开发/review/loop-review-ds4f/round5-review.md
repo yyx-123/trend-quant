@@ -1,6 +1,9 @@
 # Round 5 审查报告（loop-review-ds4f）
 
-> **状态：OPEN（待修复验收）**
+> **状态：CLOSED（2026-09-25 闭合）**
+> - 修复清单与验收记录：`round5-fixes.md`（含 Round 6 两个确认代理的复核结论与后续修复）；
+> - 全量回归：1637 passed / 2 failed（失败均为既有 Windows 临时文件 flake）；
+> - ruff：(file, rule) 集合与基线完全一致。
 >
 > 日期：2026-09-25
 > 审查对象：commit `ebcd0f6`（Round 4 闭合后全量代码）

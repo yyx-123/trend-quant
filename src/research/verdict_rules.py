@@ -103,12 +103,17 @@ def plateau_neighbors(param: str, value: float) -> list[float]:
 
 
 def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
-                    rules: dict | None = None) -> dict:
+                    rules: dict | None = None, *, skipped: int = 0) -> dict:
     """高原/孤峰判定：邻域同向 + Alvarez 1σ 检查（选定参数偏离邻域均值
-    1σ 以上 → 疑似过拟合）。"""
+    1σ 以上 → 疑似过拟合）。
+
+    ``skipped``：因退化腿（Sharpe 不可用）被剔除的邻域点数——必须显式可见，
+    否则"邻域点变少"会静默降低判定的可信度（R6-P1-1 的连带修）。
+    """
     rules = rules or DEFAULT_RULES
     if not neighbor_deltas:
-        return {"verdict": "unknown", "reason": "no neighbors"}
+        reason = "no neighbors" if not skipped else f"no usable neighbors (skipped {skipped})"
+        return {"verdict": "unknown", "reason": reason, "skipped": int(skipped)}
     import numpy as np
 
     arr = np.asarray(neighbor_deltas, dtype=float)
@@ -126,6 +131,7 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
         "selected": selected_delta,
         "same_direction": same_direction,
         "deviates_over_1sigma": deviates,
+        "skipped": int(skipped),
     }
 
 

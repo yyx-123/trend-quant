@@ -100,3 +100,64 @@ def test_macd_warmup_docstring_states_the_seed_difference():
 
     doc = inspect.getdoc(indicators.macd) or ""
     assert "DEA" in doc and ("种子" in doc or "seed" in doc.lower()), doc[:200]
+
+
+# ----------------------------------------------------------------------
+# R6-P1-1 / R6-P2-2 / R6-P3-3：退化腿在**所有**消费点都必须 None-safe
+# ----------------------------------------------------------------------
+
+
+def _flat_nav(n=30, equity=1_000_000.0):
+    return [{"date": f"2024-01-{i + 1:02d}",
+             "equity": equity * (1.0 + 0.01 / 252.0) ** i} for i in range(n)]
+
+
+def _normal_nav(n=30, equity=1_000_000.0):
+    return [{"date": f"2024-01-{i + 1:02d}",
+             "equity": equity * (1.004 if i % 2 else 0.997) ** 1} for i in range(n)]
+
+
+def test_none_safe_delta_helper():
+    """R6-P1-1：Δ 助手对退化腿必须返回 None 而不是抛 TypeError。"""
+    from research.evaluations.backtest import _delta_or_none, _nav_summary
+
+    flat, normal = _nav_summary(_flat_nav()), _nav_summary(_normal_nav())
+    assert flat.get("degenerate_leg") is True
+    assert _delta_or_none(normal, flat) is None
+    assert _delta_or_none(flat, normal) is None
+    assert _delta_or_none(normal, normal) == pytest.approx(0.0)
+    assert _delta_or_none({"sharpe": 1.5}, {"sharpe": 0.5}) == pytest.approx(1.0)
+
+
+def test_plateau_verdict_reports_skipped_neighbors():
+    """R6-P1-1：被剔除的退化邻域点必须显式可见（`skipped`），不能静默变少。"""
+    from research.verdict_rules import plateau_verdict
+
+    out = plateau_verdict(0.4, [], skipped=3)
+    assert out["verdict"] == "unknown"
+    assert out["skipped"] == 3
+    assert "skipped 3" in out["reason"]
+    ok = plateau_verdict(0.4, [0.3, 0.5], skipped=1)
+    assert ok["skipped"] == 1 and ok["verdict"] in ("plateau", "peak")
+
+
+def test_degenerate_leg_warning_is_persisted_in_verdict_record():
+    """R6-P3-3：退化腿必须落进 verdict 记录的 warnings（不能只有 null 无解释）。"""
+    import inspect
+
+    from research.evaluations import backtest as bt
+
+    src = inspect.getsource(bt._assemble_result)
+    assert "degenerate_leg(" in src, "退化腿必须落 warnings"
+
+
+def test_head_to_head_marks_degenerate_legs():
+    """R6-P2-2：head_to_head 也必须判退化腿（否则噪声决定其判定）。"""
+    import inspect
+
+    from research.evaluations import head_to_head as h2h
+
+    src = inspect.getsource(h2h.run_head_to_head)
+    assert "degenerate_legs" in src
+    assert "degenerate_leg(" in src
+    assert "d_band = None" in src, "退化时不得输出置信带/判定"

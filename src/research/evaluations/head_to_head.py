@@ -140,12 +140,38 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
     summary_a = compute_summary(result_a["daily_nav"], trades=[], turnover_total=_real_turnover(result_a))
     summary_b = compute_summary(result_b["daily_nav"], trades=[], turnover_total=_real_turnover(result_b))
 
+    # R6-P2-2（Round 6 复核）：与 backtest 路径同口径——**任一腿退化**（零成交/全现金，
+    # 日收益只有计息浮点残差）时 Sharpe 是噪声（实测 ≈6e12），作差会把正常腿判成
+    # rejected。这里同样判定退化并显式标注，绝不让噪声决定判定。
+    _degenerate_legs = []
+    for _name, _summary in (("a", summary_a), ("b", summary_b)):
+        _eq = [float(r["equity"]) for r in (
+            result_a["daily_nav"] if _name == "a" else result_b["daily_nav"]
+        ) if r.get("equity")]
+        if len(_eq) >= 3:
+            _rets = [_eq[i] / _eq[i - 1] - 1.0 for i in range(1, len(_eq)) if _eq[i - 1]]
+            if _rets:
+                _m = sum(_rets) / len(_rets)
+                _v = (sum((x - _m) ** 2 for x in _rets) / (len(_rets) - 1)
+                      if len(_rets) > 1 else 0.0)
+                if _v ** 0.5 <= max(abs(_m), 1e-12) * 1e-6:
+                    _degenerate_legs.append(_name)
+    _degenerate = bool(_degenerate_legs)
+
+    def _d(key: str, a_val, b_val):
+        if _degenerate and key == "delta_sharpe":
+            return None
+        return float(a_val - b_val)
+
     evidence = {
         "deltas": {
-            "delta_annual_return": float(summary_a["annual_return"] - summary_b["annual_return"]),
-            "delta_sharpe": float(summary_a["sharpe"] - summary_b["sharpe"]),
-            "delta_max_drawdown": float(summary_a["max_drawdown"] - summary_b["max_drawdown"]),
+            "delta_annual_return": _d("delta_annual_return",
+                                     summary_a["annual_return"], summary_b["annual_return"]),
+            "delta_sharpe": _d("delta_sharpe", summary_a["sharpe"], summary_b["sharpe"]),
+            "delta_max_drawdown": _d("delta_max_drawdown",
+                                    summary_a["max_drawdown"], summary_b["max_drawdown"]),
         },
+        "degenerate_legs": _degenerate_legs,
         "paired": {
             "n_days": len(joined),
             "mean_daily_diff": float(diff.mean()) if len(diff) else None,
@@ -163,7 +189,15 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
         warnings.append("holdout_touched")
 
     suggested = "inconclusive"
-    if d_band is not None and len(joined) >= 30:
+    if _degenerate:
+        # R6-P2-2：退化腿（零成交/全现金）时 ΔSharpe/置信带/PSR 全是噪声 →
+        # **不判定**，并如实告警（此前会把正常腿判成 rejected）
+        warnings.append(
+            "degenerate_leg(" + "/".join(_degenerate_legs)
+            + " 腿零成交或全现金：Sharpe 及其差值为浮点噪声，判定按 inconclusive)"
+        )
+        d_band = None
+    elif d_band is not None and len(joined) >= 30:
         if d_band["low"] > 0 and psr_ab >= 0.95:
             suggested = "confirmed"   # A 显著优于 B
         elif d_band["high"] < 0 and psr_ab <= 0.05:

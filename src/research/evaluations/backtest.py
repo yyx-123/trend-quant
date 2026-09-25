@@ -220,6 +220,20 @@ def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict
     return summary
 
 
+def _delta_or_none(a, b) -> float | None:
+    """两腿指标作差；任一为 None（退化腿/不可用）即记 None。
+
+    R6-P1-1（Round 6 复核）：退化腿修复把 sharpe 记成 None，但 wf 折 Δ 与高原探针
+    Δ 仍直接 float() 相减 → 恰好把"全现金/零成交腿"这条被修的场景打成
+    `status=failed`（TypeError）。这里统一 None 语义。
+    """
+    a_val = a.get("sharpe") if isinstance(a, dict) else a
+    b_val = b.get("sharpe") if isinstance(b, dict) else b
+    if a_val is None or b_val is None:
+        return None
+    return float(a_val) - float(b_val)
+
+
 def _deltas_from_summaries(exp_summary: dict, base_summary: dict | None) -> dict:
     """Δ 指标（任一腿退化 → 该指标记 None 并落警告，绝不用噪声值作差）。
 
@@ -455,10 +469,14 @@ def run_portfolio_backtest(db, experiment: dict, ctx: dict) -> dict:
             })
             m_e = _nav_summary(exp_r["daily_nav"])
             m_b = _nav_summary(base_r["daily_nav"])
+            _fold_sharpe = _delta_or_none(m_e, m_b)
+            _fold_annual = _delta_or_none(
+                {"sharpe": m_e.get("annual_return")}, {"sharpe": m_b.get("annual_return")}
+            )
             wf_folds.append({
                 "fold": k, "window": [f_start, f_end],
-                "delta_sharpe": float(m_e.get("sharpe", 0.0) - m_b.get("sharpe", 0.0)),
-                "delta_annual_return": float(m_e.get("annual_return", 0.0) - m_b.get("annual_return", 0.0)),
+                "delta_sharpe": _fold_sharpe,
+                "delta_annual_return": _fold_annual,
             })
             stitched_exp_navs.append(exp_r["daily_nav"])
             stitched_base_navs.append(base_r["daily_nav"])
@@ -724,19 +742,21 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
                         "holdout_touched": touched,
                     })
                 probe_summary = _nav_summary(probe_nav)
-                d = float(probe_summary.get("sharpe", 0.0)) - (
-                    float(base_summary.get("sharpe", 0.0)) if base_summary else 0.0
-                )
+                d = _delta_or_none(probe_summary, base_summary or {})
                 neighbor_deltas.append(d)
                 probes.append({"slot": slot, "param": param, "value": neighbor,
                                "delta_sharpe": d, "run_id": probe_run_id,
                                "window_mode": window_mode,
                                "_nav": probe_nav})
-        selected_delta = (exp_summary.get("sharpe", 0.0) or 0.0) - (
-            base_summary.get("sharpe", 0.0) if base_summary else 0.0
-        )
+        selected_delta = _delta_or_none(exp_summary, base_summary or {})
+        _usable_neighbors = [d for d in neighbor_deltas if d is not None]
         plateau = {
-            **plateau_verdict(float(selected_delta), neighbor_deltas),
+            **(plateau_verdict(
+                selected_delta,
+                _usable_neighbors,
+                skipped=int(len(neighbor_deltas) - len(_usable_neighbors)),
+            ) if selected_delta is not None
+               else {"verdict": "unknown", "reason": "degenerate leg (sharpe unavailable)"}),
             "probes": [{k: v for k, v in p.items() if k != "_nav"} for p in probes],
         }
         # PBO（审计 B 项，阶段 5）：变体矩阵 = 主选 + 邻域探针的日收益，
@@ -760,6 +780,16 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
 
     warnings: list[str] = list(extra_warnings)
     warnings.extend(exp_result.get("warnings") or [])  # 运行级告警（heat_cap 退化等）
+    # R6-P3-3：退化腿必须落进持久化记录的 warnings（否则记录里只有 null 无解释）
+    _degen_legs = [
+        name for name, summary in (("实验腿", exp_summary), ("基准腿", base_summary or {}))
+        if summary.get("degenerate_leg")
+    ]
+    if _degen_legs:
+        warnings.append(
+            "degenerate_leg(" + "/".join(_degen_legs)
+            + " 零成交或全现金：Sharpe/Sortino 为浮点噪声，已记 None 且不参与 Δ 判定)"
+        )
     # 长窗口三注记（详设 §6.6.4，评审 DS-P2-5：进实验路径，不只进脚本产物；
     # DS-复审-R2 §4-1：共享件，event/bucket/distribution 同口径）
     warnings.extend(long_window_annotations(start))
