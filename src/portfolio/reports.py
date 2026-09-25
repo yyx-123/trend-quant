@@ -20,6 +20,8 @@ import pandas as pd
 
 from rule_backtest.metrics import (
     DEGENERATE_SHARPE_ABS_LIMIT as _SHARPE_GATE,
+)
+from rule_backtest.metrics import (
     compute_summary,
     is_degenerate_summary,
 )

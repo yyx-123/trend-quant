@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-
 from collections import defaultdict
 
 import numpy as np
@@ -123,8 +122,6 @@ def is_degenerate_nav(nav_rows, *, sharpe: float | None = None) -> bool:
 
     调用方优先用 :func:`is_degenerate_summary`（自动取 NAV + Sharpe 两条腿）。
     """
-    import math
-
     if sharpe is not None and (
         not math.isfinite(float(sharpe))
         or abs(float(sharpe)) > DEGENERATE_SHARPE_ABS_LIMIT
