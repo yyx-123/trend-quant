@@ -172,6 +172,26 @@ def compute_manual_trade(
     # daily_nav（交易日计数语义不变）。
     metric_nav = [{"date": str(buy_ts.date()), "equity": 1.0}] + daily_nav
     summary = compute_summary(metric_nav, trades=[], turnover_total=0.0)
+    # 退化腿闸门：极短/近零方差的持有窗口会给出 1e2~1e14 级"夏普"（实测按本函数
+    # 构造的 metric_nav 对 300496.SZ 2015-12 得到 sharpe=57.4），旧实现在这里
+    # round() 后直接进 HTTP 响应（前端不渲染，但 API/MCP 消费者会拿到）。
+    # 只闸 `_RATIO_METRIC_KEYS`（sharpe/sortino）：calmar 低回撤/短窗口可合法 > 50。
+    from rule_backtest.metrics import DEGENERATE_SHARPE_ABS_LIMIT as _GATE
+    from rule_backtest.metrics import is_degenerate_summary as _is_degen
+
+    _degenerate = bool(_is_degen(metric_nav, summary))
+    if not _degenerate:
+        # 判据只按 NAV 相对方差/幅值触发；这里再补"摘要里任一比值超幅值闸门"的兜底，
+        # 与 `is_degenerate_summary` 的键位保持同一口径
+        _degenerate = any(
+            summary.get(k) is not None and abs(float(summary[k])) > _GATE
+            for k in ("sharpe", "sortino")
+        )
+    metrics_out = {
+        "sharpe": None if _degenerate else round(summary["sharpe"], 2),
+        "sortino": None if _degenerate else round(summary["sortino"], 2),
+        "calmar": round(summary["calmar"], 2),
+    }
 
     latest_close = stops["latest_price"]
     pnl_points = round(latest_close - buy_price, 4)
@@ -284,9 +304,9 @@ def compute_manual_trade(
             "max_dd_peak_equity": summary["max_dd_peak_equity"],
             "max_dd_trough_date": summary["max_dd_trough_date"],
             "max_dd_trough_equity": summary["max_dd_trough_equity"],
-            "sharpe": round(summary["sharpe"], 2),
-            "sortino": round(summary["sortino"], 2),
-            "calmar": round(summary["calmar"], 2),
+            "sharpe": metrics_out["sharpe"],
+            "sortino": metrics_out["sortino"],
+            "calmar": metrics_out["calmar"],
             "n_returns": summary["n_returns"],
             "mean_daily_return": round(summary["mean_daily_return"] * 100, 4),
             "std_daily_return": round(summary["std_daily_return"] * 100, 4),

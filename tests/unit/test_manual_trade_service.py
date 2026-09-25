@@ -383,3 +383,29 @@ class TestTriggerExcludesBuyDay:
         assert synth["low"] <= stops["hard_stop_price"]  # 前置：旧逻辑会误报
         assert stops["hard_stop_triggered"] is False
         assert stops["hard_stop_trigger_date"] is None
+
+
+def test_noise_ratio_metrics_are_gated(bull_db, monkeypatch) -> None:
+    """退化窗口的比值型指标不得进 HTTP 响应（R11A-F5）。
+
+    手工持仓窗口可以极短/近零方差：按本函数的 metric_nav 构造实测
+    sharpe=57.4（> 闸门 50），旧实现 round() 后直接进 `/manual-trade/api/evaluate`
+    响应。合法波动下必须照常给出（`test_holding_metrics` 已断言 float 一侧）。
+    """
+    db, bars = bull_db
+    row = bars.iloc[-3]
+    buy_price = round((float(row["low"]) + float(row["close"])) / 2, 4)
+    buy_date = str(row["time"])[:10]
+
+    import services.manual_trade as _mt
+
+    real = _mt.compute_summary
+    monkeypatch.setattr(
+        _mt, "compute_summary",
+        lambda *a, **kw: {**real(*a, **kw), "sharpe": 17022.0, "sortino": 1.4e14},
+    )
+    out = _mt.compute_manual_trade("510300", buy_date, buy_price, db=db)
+    holding = out["holding"]
+    assert holding["sharpe"] is None, "噪声 Sharpe 不得进 HTTP 响应"
+    assert holding["sortino"] is None
+    assert isinstance(holding["calmar"], float), "calmar 不入闸"

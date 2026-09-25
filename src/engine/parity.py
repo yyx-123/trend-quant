@@ -200,6 +200,13 @@ def diff_against_legacy(new_result: dict, legacy_result: dict) -> dict:
 # 阶段 1 验收白名单（详设 §8 人类介入点）：差异只允许来自这三类 + 空仓计息。
 ATTRIBUTION_WHITELIST = ("limit_card", "t_plus", "tail_slippage", "cash_interest")
 
+# 方向判定的价格容差：半个最小变动单位（覆盖价格舍入噪声）。合法尾滑点只能让
+# 成交**更差**（买价抬升、卖价压低），"更有利"的系统性价差不可能来自任何合法
+# 参数（滑点符号写反/取错参考价的典型形态）——此前用 `abs(价差)` 判带对方向
+# 盲，这类真实错误会在 ≤1.1% 带内被静默归入白名单。真实 run 实测（510300.SS
+# 2015-2024，191 笔）：不利 191 / 有利 0。
+_PRICE_TICK_EPS = 5e-4
+
 
 def attribute_diffs(
     new_result: dict, legacy_result: dict, cards: dict | None = None,
@@ -306,7 +313,14 @@ def attribute_diffs(
                 continue
             if nt["date"] == ot["date"] and nt["side"] == ot["side"] and ot_price > 0:
                 slip_ratio = abs(nt_price / ot_price - 1.0)
-                if 0 < slip_ratio <= max_tail_slippage:
+                # 方向敏感：合法尾滑点只能更差（买价 ≥、卖价 ≤）；系统性"更有利"
+                # 的价差判超纲（见 _PRICE_TICK_EPS 注）
+                _drift = nt_price - ot_price
+                _favorable = (
+                    (nt["side"] == "BUY" and _drift < -_PRICE_TICK_EPS)
+                    or (nt["side"] == "SELL" and _drift > _PRICE_TICK_EPS)
+                )
+                if not _favorable and 0 < slip_ratio <= max_tail_slippage:
                     ref_price = nt_price if nt_price > 0 else ot_price
                     lot = int(lot_size)
                     qty_bound = (

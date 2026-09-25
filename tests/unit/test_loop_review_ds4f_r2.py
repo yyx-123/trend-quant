@@ -198,16 +198,46 @@ def test_plateau_items_matches_apply_diff_param_semantics():
 # ----------------------------------------------------------------------
 
 
-def test_wf_plateau_probe_records_window_kind():
-    import inspect
+def test_wf_plateau_probe_records_window_kind(monkeypatch):
+    """探针腿必须**真的**把 `window_kind="plateau_probe"` 传给回测服务。
 
+    行为级（打桩数据源）：捕获 `portfolio_service.run_backtest` 收到的
+    run_params，断言每一折都带 `window_kind="plateau_probe"` 与该折窗口——
+    此前只断言源码里出现过那串字面量，把 `if window_kind:` 改成 `if False:`
+    （覆盖失效、引擎侧又记回 sample）后 119 条钉子仍全绿。
+    """
+    from portfolio import service as portfolio_service
     from research.evaluations import backtest as bt
 
-    src = inspect.getsource(bt._run_walk_forward_exp_leg)
-    assert "window_kind" in src, "探针腿必须能覆盖 window_kind"
-    call_src = inspect.getsource(bt._assemble_result)
-    assert 'window_kind="plateau_probe"' in call_src, \
-        "wf 探针必须显式覆盖 window_kind（否则 engine_runs 记 sample，与 research_runs 矛盾）"
+    seen: list[dict] = []
+
+    def fake_run(db, *, config, registry, run_params, strategy_ref):
+        seen.append(dict(run_params))
+        d0, d1 = run_params["window"]
+        return {"run_id": f"R-{len(seen)}", "daily_nav": [
+            {"date": d0, "equity": 1_000_000.0},
+            {"date": d1, "equity": 1_010_000.0},
+        ]}
+
+    monkeypatch.setattr(portfolio_service, "run_backtest", fake_run)
+    folds = [("2024-01-02", "2024-03-29"), ("2024-04-01", "2024-06-28")]
+    res = bt._run_walk_forward_exp_leg(
+        None, config=None, registry=None, run_params={"window": ["x", "y"]},
+        strategy_ref="s@1", folds=folds, window_kind="plateau_probe",
+    )
+    assert len(seen) == 2, "两折必须各跑一次"
+    for params, (f0, f1) in zip(seen, folds):
+        assert params["window_kind"] == "plateau_probe", \
+            "探针腿必须覆盖 window_kind（否则 engine_runs 记 sample，与 research_runs 矛盾）"
+        assert params["window"] == [f0, f1], "每折的窗口必须落到该折区间"
+    assert res["runs"] and all(r["run_id"].startswith("R-") for r in res["runs"])
+    # 不给 window_kind 时不得凭空写入该键（避免把普通腿误标成探针）
+    seen.clear()
+    bt._run_walk_forward_exp_leg(
+        None, config=None, registry=None, run_params={"window": ["x", "y"]},
+        strategy_ref="s@1", folds=folds[:1],
+    )
+    assert "window_kind" not in seen[0]
 
 
 # ----------------------------------------------------------------------

@@ -140,6 +140,16 @@ WHEN OLD.run_id <> NEW.run_id
   OR OLD.started_at <> NEW.started_at
 BEGIN SELECT RAISE(ABORT, 'engine_runs content is append-only'); END;
 
+-- engine_runs 禁删守卫：run 头里的 config_hash/data_version/git_hash/
+-- resolved_config_yaml 是 §5.6 可复现性锚点，子证据表（orders/fills/nav/…）
+-- 已各有 no_delete 守卫，唯独 run 头此前只挡 UPDATE——一条 DELETE 即可抹掉
+-- 该 run 的口径来源而证据行仍在，事后无法复核（R11B 独立审计实测：
+-- DELETE 成功，而其余 13 张兄弟表全部 ABORT）。与兄弟表同制补上。
+DROP TRIGGER IF EXISTS trg_engine_runs_no_delete;
+CREATE TRIGGER trg_engine_runs_no_delete
+BEFORE DELETE ON engine_runs
+BEGIN SELECT RAISE(ABORT, 'engine_runs is append-only'); END;
+
 CREATE INDEX IF NOT EXISTS idx_engine_runs_status ON engine_runs(status, started_at);
 
 CREATE TABLE IF NOT EXISTS engine_orders (

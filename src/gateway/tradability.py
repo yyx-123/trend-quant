@@ -20,7 +20,8 @@
   - 新股上市初期无涨跌幅限制的天数分板块/分时代（GLM53F-P2-17）：注册制
     （科创全程/创业板 2020-08-24 起/主板 2023-04-10 起）前 5 个交易日；
     旧规仅首日（首日 44% 上限按 no_limit 近似）；ETF 上市首日即有限制；
-  - 价格按分（0.01）四舍五入（ROUND_HALF_UP，交易所口径）；
+  - 价格按最小变动单位四舍五入（ROUND_HALF_UP，交易所口径）：**ETF 0.001**、
+    股票 0.01（见 `_TICK_ETF`；按 0.01 舍入 ETF 会产出假涨停/假跌停）；
 - 一字板近似：is_limit_up 用收盘价判定（尾盘口径下，收盘封板 ≈ 尾盘不可买，
   与决策 1 口径自洽）。
 """
@@ -28,7 +29,6 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
 
 import numpy as np
 import pandas as pd
@@ -40,6 +40,12 @@ from core.symbols import symbol_suffix, symbol_to_code
 _LIMIT_MAIN = 0.10
 _LIMIT_CHINEXT_STAR = 0.20
 _IPO_NO_LIMIT_DAYS = 5  # 注册制新股上市初期无涨跌幅限制的交易日数（近似）
+# 最小变动单位：沪深 ETF 报价到 0.001（价格第 3 位小数），股票/主板到 0.01。
+# 生产库实证：2024-01 起 ETF 的 close 第 3 位小数 0~9 均匀分布（各约 1.15 万条），
+# 同期股票 close 第 3 位恒为 0。按 0.01 舍入 ETF 限价会把涨停价压低、
+# 跌停价抬高 → 假涨停（买不进）/假跌停（卖不掉、盘中止损被阻塞）。
+_TICK_ETF = 0.001
+_TICK_STOCK = 0.01
 
 
 def board_limit_pct(symbol: str, *, asset_type: str | None = None,
@@ -48,7 +54,10 @@ def board_limit_pct(symbol: str, *, asset_type: str | None = None,
 
     GLM53F-P1-1：ETF 的涨跌幅跟随其**标的板块**，不能一律按主板 ±10%——
     科创板 ETF（沪 588xxx）±20%；深市跟踪创业板/科创板指数的 ETF（名称含
-    "创业板"/"科创"，如 159915 创业板ETF）±20%；其余 ETF ±10%。
+    "创业板"/"创业"/"科创"，如 159915 创业板ETF、159814 创业大盘ETF）±20%；
+    其余 ETF ±10%。名称关键词含"创业"（而非只有"创业板"）：生产库 enabled 池里
+    名称含"创业"的 10 只 ETF 跟踪的都是创业板系指数，实测日内幅度上限 0.2005
+    （159814.SZ 2024-09-30：前收 0.364 → 涨停 0.437），按 ±10% 会产出 4 天假信号。
     asset_type 缺省时按股票代码前缀规则（历史口径）。
     """
     suffix = symbol_suffix(symbol)
@@ -56,7 +65,7 @@ def board_limit_pct(symbol: str, *, asset_type: str | None = None,
     if asset_type == "etf":
         if suffix == "SS" and code.startswith("588"):
             return _LIMIT_CHINEXT_STAR  # 科创板 ETF
-        if name and ("创业板" in name or "科创" in name):
+        if name and ("创业板" in name or "创业" in name or "科创" in name):
             return _LIMIT_CHINEXT_STAR  # 跟踪创业板/科创板指数的 ETF
         return _LIMIT_MAIN
     if suffix == "SS" and code.startswith("68"):
@@ -86,8 +95,9 @@ def _ipo_no_limit_days(symbol: str, asset_type: str | None, listing_day: date) -
     return _IPO_NO_LIMIT_DAYS if listing_day >= date(2023, 4, 10) else 1
 
 
-def _round_fen(price: float) -> float:
-    return float(Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+def _tick_for(asset_type: str | None) -> float:
+    """最小变动单位：ETF 0.001，其余 0.01（见 _TICK_ETF 注释）。"""
+    return _TICK_ETF if asset_type == "etf" else _TICK_STOCK
 
 
 def compute_tradability(
@@ -196,9 +206,10 @@ def compute_tradability(
     is_trading_arr = np.array([trading_day_cache[d] for d in dates])
     day_ordinals = np.array([d.toordinal() for d in dates], dtype=np.int64)
 
-    def _round_fen_vec(x: np.ndarray) -> np.ndarray:
-        # 分位四舍五入（ROUND_HALF_UP 语义；eps 抵消二进制浮点误差）
-        return np.floor(x * 100.0 + 0.5 + 1e-9) / 100.0
+    def _round_tick_vec(x: np.ndarray, tick: float) -> np.ndarray:
+        # 按最小变动单位四舍五入（ROUND_HALF_UP 语义；eps 抵消二进制浮点误差）
+        scale = 1.0 / tick
+        return np.floor(x * scale + 0.5 + 1e-9) / scale
 
     rows: list[dict] = []
     for symbol in symbols:
@@ -269,7 +280,11 @@ def compute_tradability(
                         f = float(factor)
                     except (TypeError, ValueError):
                         continue
-                    if not np.isfinite(f) or f <= 0:
+                    # 合理性范围守卫：非有限/≤0 之外的**极端值**（如 1e12、1e-12）
+                    # 会通过"合法数值"检查并产出 limit_up=0.0 且 is_limit_up=True
+                    # 这类"像真值的坏数字"；生产库实测 f∈[0.2, 9.97]，取 [1e-3, 1e3]
+                    # 为宽松带（越界视为脏数据，跳过该因子）。
+                    if not np.isfinite(f) or not (1e-3 <= f <= 1e3):
                         continue
                     # 第一根「日期严格晚于 E 且有 bar」的轴日 = 除权除息日。
                     # **累乘**而非覆盖（残留）：停牌跨越两个除权日时
@@ -293,11 +308,15 @@ def compute_tradability(
         with np.errstate(all="ignore"):
             base = prev / f_t
             valid = np.isfinite(base) & (base > 0) & ~no_limit
-            limit_up = np.where(valid, _round_fen_vec(base * (1.0 + limit_pct)), np.nan)
-            limit_down = np.where(valid, _round_fen_vec(base * (1.0 - limit_pct)), np.nan)
-            close_rounded = _round_fen_vec(close_v)
-            is_limit_up = has_bar & valid & (close_rounded >= limit_up)
-            is_limit_down = has_bar & valid & (close_rounded <= limit_down)
+            tick = _tick_for(asset_type)
+            limit_up = np.where(valid, _round_tick_vec(base * (1.0 + limit_pct), tick), np.nan)
+            limit_down = np.where(valid, _round_tick_vec(base * (1.0 - limit_pct), tick), np.nan)
+            close_rounded = _round_tick_vec(close_v, tick)
+            # 价格必须为正才参与比较：close<=0 是坏数据，不得据此产出
+            # is_limit_down=True（0 <= 跌停价恒真）这类"像真值的坏数字"。
+            close_ok = has_bar & (close_v > 0)
+            is_limit_up = close_ok & valid & (close_rounded >= limit_up)
+            is_limit_down = close_ok & valid & (close_rounded <= limit_down)
 
         for i, day in enumerate(dates):
             if not is_trading_arr[i]:

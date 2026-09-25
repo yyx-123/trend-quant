@@ -31,7 +31,7 @@ from data.storage.db import Database
 from data.storage.market_store import MarketStore
 from rule_backtest.engine import SingleSymbolAllInBacktestEngine
 from rule_backtest.loader import StrategyLoader
-from rule_backtest.metrics import compute_roundtrip_stats
+from rule_backtest.metrics import compute_roundtrip_stats, sanitize_annual_blocks
 from rule_backtest.models import DEFAULT_FEE_RATE, BacktestExecutionConfig, RuleBacktestRequest
 
 logger = get_logger(__name__)
@@ -319,6 +319,25 @@ def extract_cell(result: dict, monthly_nav: list[dict]) -> dict:
     """
     summary = result.get("summary") or {}
     bench = result.get("benchmark_summary") or {}
+    # 退化腿闸门（第 8 次复发面）：零成交/全现金/极短窗口腿的比值型指标是浮点噪声
+    # （真实构造实测 |sharpe| = 17022），旧实现把它们当"策略指标/超额夏普"平铺落库
+    # 并经 HTTP/前端/CSV 外显。任一腿的 **sharpe/sortino** 超闸 → 该腿这两项记 None，
+    # 且 excess_sharpe **必须**记 None（不得用噪声作差——正是判据注释明文禁止的形态）。
+    # 只施加**幅值**闸门、且只作用于 `_RATIO_METRIC_KEYS`：
+    # - 不用相对方差判据：旧栈对零方差腿的既有语义是报 0.0（R5-D-4 记录在案），
+    #   完整判据会把这类合法 0.0 一并置 None＝顺手改存量口径；
+    # - 不含 calmar：低回撤/短窗口上可以合法 > 50（R10 结论），同一腿的 sharpe 是
+    #   噪声并不使 calmar 失去意义（其输入是真实收益与真实回撤）。
+    from rule_backtest.metrics import _RATIO_METRIC_KEYS, DEGENERATE_SHARPE_ABS_LIMIT
+
+    def _noise(value) -> bool:
+        try:
+            return value is not None and abs(float(value)) > DEGENERATE_SHARPE_ABS_LIMIT
+        except (TypeError, ValueError):
+            return False
+
+    strat_degenerate = any(_noise(summary.get(k)) for k in _RATIO_METRIC_KEYS)
+    bench_degenerate = any(_noise(bench.get(k)) for k in _RATIO_METRIC_KEYS)
     annual = summary.get("annual_return")
     bench_annual = bench.get("annual_return")
     excess = (
@@ -326,8 +345,8 @@ def extract_cell(result: dict, monthly_nav: list[dict]) -> dict:
         if annual is not None and bench_annual is not None
         else None
     )
-    sharpe = summary.get("sharpe")
-    bench_sharpe = bench.get("sharpe")
+    sharpe = None if strat_degenerate else summary.get("sharpe")
+    bench_sharpe = None if bench_degenerate else bench.get("sharpe")
     excess_sharpe = (
         float(sharpe) - float(bench_sharpe)
         if sharpe is not None and bench_sharpe is not None
@@ -349,7 +368,7 @@ def extract_cell(result: dict, monthly_nav: list[dict]) -> dict:
         "annual_return": annual,
         "max_drawdown": summary.get("max_drawdown"),
         "sharpe": sharpe,
-        "sortino": summary.get("sortino"),
+        "sortino": None if strat_degenerate else summary.get("sortino"),
         "calmar": calmar,
         "win_rate": summary.get("win_rate"),
         "profit_factor": summary.get("profit_factor"),
@@ -420,7 +439,7 @@ def aggregate_annual_returns(rows: list[dict]) -> list[dict]:
     for row in rows:
         strategy = str(row.get("strategy_name") or row.get("strategy_id") or "")
         try:
-            annual = json.loads(row.get("annual_returns_json") or "[]")
+            annual = sanitize_annual_blocks(json.loads(row.get("annual_returns_json") or "[]"))
         except (ValueError, TypeError):
             continue
         for entry in annual or []:

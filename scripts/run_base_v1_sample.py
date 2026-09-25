@@ -62,12 +62,22 @@ def _nav_from_db(db, run_id: str) -> list[dict]:
 
 def _summarize(nav: list[dict]) -> dict:
     summary = compute_summary(nav, trades=[], turnover_total=0.0)
+    # 退化腿闸门：本脚本把指标写进 data/research/base_v1_sample/comparison.json
+    # 与 comparison.md（落盘物化产物），单调/极短腿的年化 sharpe 是浮点残差噪声
+    # → 超幅值闸门即记 None。calmar 不入闸（低回撤/短窗口可合法 > 50）。
+    from rule_backtest.metrics import DEGENERATE_SHARPE_ABS_LIMIT
+
+    def _gated(value):
+        if value is None:
+            return None
+        return None if abs(float(value)) > DEGENERATE_SHARPE_ABS_LIMIT else round(value, 3)
+
     return {
         "annual_return": round(summary["annual_return"], 4),
         "total_return": round(summary["total_return"], 4),
         "max_drawdown": round(summary["max_drawdown"], 4),
-        "sharpe": round(summary["sharpe"], 3),
-        "sortino": round(summary["sortino"], 3),
+        "sharpe": _gated(summary["sharpe"]),
+        "sortino": _gated(summary["sortino"]),
         "calmar": round(summary["calmar"], 3),
     }
 

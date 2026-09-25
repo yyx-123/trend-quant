@@ -141,73 +141,178 @@ def test_plateau_verdict_reports_skipped_neighbors():
     assert ok["skipped"] == 1 and ok["verdict"] in ("plateau", "peak")
 
 
-def test_degenerate_leg_warning_is_persisted_in_verdict_record():
-    """R6-P3-3：退化腿必须落进 verdict 记录的 warnings（不能只有 null 无解释）。"""
-    import inspect
+def _strategy_version(db, line):
+    from portfolio.library import add_version_yaml, ensure_strategy
+    from portfolio.registry import REGISTRY
 
+    ensure_strategy(db, line, name=line)
+    return add_version_yaml(
+        db, line,
+        f"name: {line}\nuniverse: {{module: category_filter@1}}\n"
+        "signal: {module: macd_cross@1}\nrank: {module: by_freshness@1}\n"
+        "sizing: {module: all_in@1}\nportfolio_risk: []\n"
+        "position_risk: {module: hard_stop@1}\nexecution: {module: tail_session@1}\n",
+        REGISTRY, created_by="human",
+    )
+
+
+def _nav_series(degenerate: bool, n: int = 260):
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    days = [_date(2021, 1, 4) + _td(days=i) for i in range(n)]
+    if degenerate:  # 全现金/零成交腿的真实形态：只有计息的浮点残差
+        return [{"date": d.isoformat(), "equity": 1_000_000.0 * (1 + 1e-9 * i)}
+                for i, d in enumerate(days)]
+    return [{"date": d.isoformat(),
+             "equity": 1_000_000.0 * (1 + 0.0003 * i) + (3000.0 if i % 2 else -2500.0)}
+            for i, d in enumerate(days)]
+
+
+def test_degenerate_leg_warning_is_persisted_in_verdict_record(test_db, monkeypatch):
+    """R6-P3-3：退化腿必须落进**组装结果的 warnings**（行为级）。
+
+    此前只断言源码里出现过 `degenerate_leg(` 字样——把 `if _degen_labels:`
+    改成 `if False:`（警告永不落）后 119 条钉子仍全绿，而持久化记录里
+    sharpe/sortino/psr 全是 null 却没有任何解释。
+    """
+    import json
+
+    from portfolio import service as portfolio_service
     from research.evaluations import backtest as bt
 
-    src = inspect.getsource(bt._assemble_result)
-    assert "degenerate_leg(" in src, "退化腿必须落 warnings"
+    version = _strategy_version(test_db, "degen-warning-line")
+    flat, normal = _nav_series(True), _nav_series(False)
+
+    def fake_run(db, *, config, registry, run_params, strategy_ref):
+        deg = str(strategy_ref).startswith("experiment:")
+        return {"run_id": None, "daily_nav": flat if deg else normal, "trades": [],
+                "orders": [], "unfilled": [], "warnings": []}
+
+    monkeypatch.setattr(portfolio_service, "run_backtest", fake_run)
+    experiment = {"id": "E-degen-warning", "spec_json": json.dumps(
+        {"base": version["id"], "diff": [], "window": ["2021-01-04", "2021-12-31"]})}
+    out = bt.run_portfolio_backtest(test_db, experiment, {})
+    joined = " ".join(out.get("warnings") or [])
+    assert "degenerate_leg(" in joined, "退化腿必须落 warnings（否则记录里只有 null 无解释）"
+    assert "实验腿" in joined
+    assert out["evidence"]["degenerate_legs"] == ["experiment"], "机器可读标记必须落 evidence"
+    assert (out.get("report") or {}).get("experiment_summary", {}).get("sharpe") is None
 
 
-def test_head_to_head_marks_degenerate_legs():
-    """R6-P2-2：head_to_head 也必须判退化腿（否则噪声决定其判定）。"""
-    import inspect
+def test_head_to_head_degenerate_payload_has_no_noise(test_db, monkeypatch):
+    """R6-P2-2 / R7-F1：h2h 退化腿时噪声不得进证据与报告（行为级）。
 
+    断言**载荷**：`evidence.paired.delta_sharpe_band`/`psr_a_over_b` 必须是
+    None、两侧 summary 的 Sharpe 必须清零、建议必须 inconclusive。
+    此前钉子只按"文本出现顺序"检查源码，把 `if _degenerate:` 改成
+    `if False:` 后噪声（6e12 级）原样持久化而钉子全绿。
+    """
+    import json
+
+    from portfolio import service as portfolio_service
     from research.evaluations import head_to_head as h2h
 
-    src = inspect.getsource(h2h.run_head_to_head)
-    assert "degenerate_legs" in src
-    assert "degenerate_leg(" in src
-    assert "d_band = None" in src, "退化时不得输出置信带/判定"
+    a = _strategy_version(test_db, "h2h-line-a")
+    b = _strategy_version(test_db, "h2h-line-b")
+    flat, normal = _nav_series(True), _nav_series(False)
+
+    def fake_run(db, *, config, registry, run_params, strategy_ref):
+        deg = str(strategy_ref).endswith("b@1")  # b 腿退化
+        return {"run_id": None, "daily_nav": flat if deg else normal, "trades": [],
+                "orders": [], "unfilled": [], "warnings": []}
+
+    monkeypatch.setattr(portfolio_service, "run_backtest", fake_run)
+    experiment = {"id": "E-h2h-degen", "spec_json": json.dumps(
+        {"base": a["id"], "ref": b["id"], "window": ["2021-01-04", "2021-12-31"],
+         "initial_capital": 1_000_000})}
+    out = h2h.run_head_to_head(test_db, experiment, {})
+    paired = (out.get("evidence") or {}).get("paired") or {}
+    assert paired.get("delta_sharpe_band") is None, "退化腿的噪声置信带不得持久化"
+    assert paired.get("psr_a_over_b") is None
+    report = out.get("report") or {}
+    for side in ("summary_a", "summary_b"):
+        assert (report.get(side) or {}).get("sharpe") is None, f"{side} 的 Sharpe 必须清零"
+    assert out["suggested_verdict"] == "inconclusive", "退化腿必须强制 inconclusive"
+    assert "degenerate_leg(" in " ".join(out.get("warnings") or [])
 
 
-# ----------------------------------------------------------------------
-# R7 复核后的补钉：退化腿噪声不得残留于任何持久化面（F1/F2/F3）+ 合法值守卫（F4）
-# ----------------------------------------------------------------------
+def test_topic_fdr_skips_degenerate_legs(test_db):
+    """R7-F2：课题 BH-FDR 必须跳过退化腿（行为级）。
 
+    此前只断言源码里出现 `evidence_all.get("degenerate_legs")`——把该条件
+    改成 `... and False` 后，退化腿的 `1-psr` 浮点噪声重新进 FDR 家族，
+    零成交实验可再次被算成显著，而钉子全绿。
+    """
+    import json
 
-def test_head_to_head_degenerate_payload_has_no_noise():
-    """R7-F1：退化腿时 `evidence.paired.delta_sharpe_band` 与两侧 summary 的
-    Sharpe 都必须是 None（此前只改局部变量，噪声仍被持久化）。"""
-    import inspect
+    from research import conclusion, sessions, topics
 
-    from research.evaluations import head_to_head as h2h
-    from research.evaluations.head_to_head import run_head_to_head  # noqa: F401
-
-    src = inspect.getsource(h2h.run_head_to_head)
-    # 必须在组装 evidence **之前**清零（源码顺序断言：清零语句出现在 evidence 之前）
-    clear_at = src.index("d_band = None")
-    build_at = src.index('"delta_sharpe_band": d_band')
-    assert clear_at < build_at, "清零必须发生在 evidence 组装之前（R7-F1 的根因）"
-    assert '_summary["sharpe"] = None' in src, "两侧 summary 的 Sharpe 必须清空"
-    assert "psr_ab = None" in src
-
-
-def test_degenerate_legs_flag_reaches_evidence_and_conclusion():
-    """R7-F2：退化腿必须落机器可读标记，课题 FDR 必须跳过它。"""
-    import inspect
-
-    from research import conclusion
-    from research.evaluations import backtest as bt
-
-    assert '"degenerate_legs": _degenerate_legs' in inspect.getsource(bt._assemble_result)
-    csrc = inspect.getsource(conclusion.build_conclusion_summary)
-    assert 'evidence_all.get("degenerate_legs")' in csrc, \
-        "课题 FDR 必须跳过退化腿（否则零成交实验被算成显著）"
+    session = sessions.get_or_create_default_human_session(test_db)
+    topic = topics.create_topic(test_db, session_id=session["session_id"],
+                                title="FDR 跳过退化腿", question="零成交实验不得算显著")
+    noise = {"stats": {"psr": 0.99999}}  # 1-psr ≈ 1e-5：不跳过就会被算成显著
+    with test_db.connect() as conn:
+        for eid, evidence in (("E-fdr-norm", noise),
+                              ("E-fdr-degen", {**noise, "degenerate_legs": ["experiment"]})):
+            conn.execute(
+                "INSERT INTO research_experiments (id, title, owner_session, created_by,"
+                " topic_id, evaluation_module, subject_key, spec_json, hypothesis)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (eid, "t", session["session_id"], "human", topic["id"],
+                 "portfolio_backtest@1", "k-" + eid,
+                 json.dumps({"expect": "positive"}), "h"),
+            )
+            conn.execute(
+                "INSERT INTO research_verdicts (id, experiment_id, evidence_json,"
+                " suggested_verdict, final_verdict) VALUES (?,?,?,?,?)",
+                ("V-" + eid, eid, json.dumps(evidence), "confirmed", "confirmed"),
+            )
+    out = conclusion.build_conclusion_summary(test_db, topic["id"])
+    assert out["fdr"]["n_tested"] == 1, "退化腿的 p 值噪声不得进课题 FDR 家族"
+    assert out["fdr"]["still_significant"] == 1
 
 
 def test_regime_segment_marks_degenerate_segments():
-    """R7-F3：段内噪声（该腿整段零成交）不得进 collapse 门的 ΔSharpe。"""
-    import inspect
+    """R7-F3：段内噪声（该腿整段零成交/全现金）不得进 collapse 门的 ΔSharpe。
 
-    from research.evaluations import backtest as bt
+    行为级：把"整段零成交"的两条腿喂进 `_regime_segment_metrics` 与
+    `_regime_split`，断言段内 Sharpe 记 None、`sufficient_sample` 为 False、
+    ΔSharpe 记 None——此前只断言源码里出现过 "degenerate_segment" 字样，
+    把 `_degenerate_segment = bool(` 改成 `bool(False) and bool(` 后钉子仍全绿。
+    """
+    from datetime import date as _date
+    from datetime import timedelta as _td
 
-    src = inspect.getsource(bt._regime_segment_metrics)
-    assert "degenerate_segment" in src
-    src2 = inspect.getsource(bt._regime_split)
-    assert "_seg_degenerate" in src2 and "sufficient_sample" in src2
+    from research.evaluations.backtest import _regime_segment_metrics, _regime_split
+
+    n = 320
+    days = [_date(2021, 1, 4) + _td(days=i) for i in range(n)]
+
+    def nav(equity_fn):
+        return [{"date": d.isoformat(), "equity": float(equity_fn(i))} for i, d in enumerate(days)]
+
+    # ① 恒定微小收益（std 恰为 0）+ ② 近零方差但带微小漂移（幅值闸门口径）——
+    #    两者都是真实退化腿的形态（零成交全现金：只有空仓计息的浮点残差）
+    flat = nav(lambda i: 1_000_000.0 * (1 + 1e-9 * i))
+    jitter = nav(lambda i: 1_000_000.0 * (1 + 1e-6 * i) + (1e-9 if i % 2 else -1e-9))
+    seg_days = set(days[200:])
+    for label, leg in (("恒定收益", flat), ("近零方差", jitter)):
+        m = _regime_segment_metrics(leg, seg_days)
+        assert m["degenerate_segment"] is True, f"{label}腿必须判段内退化"
+        assert m["sharpe"] is None, f"{label}腿的段内 Sharpe 必须记 None（不得是 1e12 级噪声）"
+    # 对照：正常波动的腿不得被判退化（防过拦截）
+    normal = nav(lambda i: 1_000_000.0 * (1 + 0.0003 * i) + (3000.0 if i % 3 else -2500.0))
+    m_ok = _regime_segment_metrics(normal, seg_days)
+    assert m_ok["degenerate_segment"] is False and m_ok["sharpe"] is not None
+
+    # 整链：退化实验腿 × 正常基准腿 → ΔSharpe 记 None 且 sufficient_sample=False
+    bench = nav(lambda i: 1_000_000.0 * (1 + 0.0008 * i) + (5000.0 if i % 2 else -4000.0))
+    out = _regime_split(flat, normal, bench)
+    assert out, "基准有 MA200 后应至少产出一个 regime 段"
+    for label, seg in out.items():
+        assert seg["delta_sharpe"] is None, f"{label} 段：退化腿不得给出 ΔSharpe"
+        assert seg["sufficient_sample"] is False, f"{label} 段：退化段的样本不可用标记必须如实"
 
 
 def test_benchmark_relative_refuses_noisy_beta():
@@ -444,11 +549,21 @@ def test_sortino_noise_is_gated_alongside_sharpe():
     assert is_degenerate_summary(rows, {"sharpe": 2.2, "sortino": 1.4e14}) is True
     assert is_degenerate_summary(rows, {"sharpe": 2.2, "sortino": 3.1}) is False
     assert is_degenerate_summary(rows, {"sharpe": 1e9, "sortino": 3.1}) is True
-    # 端到端：噪声 sortino 不得落进摘要
+    # 端到端：噪声 sortino 不得落进摘要。夹具是**正常波动**序列（上/下 0.4%）
+    # → 判据不触发退化，此时只有"同一摘要里带噪声 sortino"才该被清——
+    # 旧断言 `assert degenerate is None or sortino is None` 在正常序列上第一支恒真，
+    # 属空钉（R11C 变异实证：把 _nav_summary 的闸门改成 `if False` 仍通过）。
     from research.evaluations.backtest import _nav_summary
 
     summary = _nav_summary(rows)
-    assert summary.get("degenerate_leg") is None or summary["sortino"] is None
+    assert summary.get("sharpe") is not None, "正常腿的 Sharpe 必须可用（对照）"
+    assert summary.get("degenerate_leg") is None
+    noisy = _nav_summary([{**r} for r in rows])
+    assert noisy.get("sortino") is not None, "正常腿的 sortino 必须保留（防过拦截）"
+    # 直接给判据喂带噪声 sortino 的摘要：必须把该腿判为退化并清掉 sortino
+    from rule_backtest.metrics import is_degenerate_summary
+
+    assert is_degenerate_summary(rows, {"sharpe": summary["sharpe"], "sortino": 1.4e14}) is True
 
 
 def test_information_ratio_is_gated():

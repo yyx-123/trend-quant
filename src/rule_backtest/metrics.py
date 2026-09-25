@@ -98,8 +98,11 @@ def is_degenerate_summary(nav_rows, summary: dict | None) -> bool:
 
     R9/R10 复核（第 6/7 次复发）的根因是"判据有两条腿、每个调用点都要记得传全"
     且"只闸了 Sharpe 忘了同源的 Sortino"。本函数把判据打包成一次调用：
-    ① NAV 的方差/均值可分辨性；② 摘要里**任一**比值型指标（sharpe/sortino/calmar）
+    ① NAV 的方差/均值可分辨性；② 摘要里**任一**比值型指标（sharpe/sortino）
     的幅值超闸；③ 摘要没给指标时**自行从 NAV 现算 Sharpe**。
+
+    刻意**不含 calmar**：`annual_return/|maxDD|` 在低回撤/短窗口上可以合法超过
+    闸门（实测正常序列 calmar=52.8），纳入会误杀诚实策略（R10 复核结论）。
     """
     sharpe = None
     if isinstance(summary, dict):
@@ -578,4 +581,37 @@ def compute_annual_returns(
                 "benchmark_calmar": _annual_calmar(bench_return, bench_mdd),
             }
         )
+    # 逐年度块同过幅值闸门（第 8 次复发的面：整段 summary 正常而年度块是 1e4 级噪声
+    # ——生产库实测 147 条 |benchmark_sharpe|>50，最大 16332.48）
+    return sanitize_annual_blocks(out)
+
+
+def sanitize_annual_blocks(blocks: list[dict] | None) -> list[dict]:
+    """年度块的**幅值闸门**（写入面与读取面共用）：不可能的比值型指标置 None。
+
+    为什么是幅值而不是完整判据：旧栈（`rule_backtest`）的 `compute_summary` 对
+    零方差腿有既定语义——报 `0.0`（"零波动"），这是 R5-D-4 记录在案的存量口径。
+    完整判据（相对方差）会把这类**合法的 0.0** 一并置 None，等于顺手改掉存量语义；
+    而本轮的缺陷形态是**噪声**（|v| 远超闸门，实测 17022 / 16332），幅值闸门恰好
+    只打噪声、不动 0.0。相对方差判据仍由研究栈（`is_degenerate_summary`）承担。
+    读取面同样需要它：修复前已落库的年度块（147 条）仍会被 HTTP 取出、被前端
+    显示并进 CSV，而写入面闸门管不到历史行。`calmar` 不在闸门内（低回撤/短窗口
+    可合法 > 50）。
+    """
+    out: list[dict] = []
+    for row in blocks or []:
+        if not isinstance(row, dict):
+            out.append(row)
+            continue
+        cleaned = dict(row)
+        for key in _RATIO_METRIC_KEYS + ("benchmark_sharpe", "excess_sharpe"):
+            value = cleaned.get(key)
+            if value is None:
+                continue
+            try:
+                if abs(float(value)) > DEGENERATE_SHARPE_ABS_LIMIT:
+                    cleaned[key] = None
+            except (TypeError, ValueError):
+                continue
+        out.append(cleaned)
     return out

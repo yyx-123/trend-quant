@@ -304,10 +304,13 @@ class TestRunBatch:
         assert ok_cell["annual_return"] is not None
         assert ok_cell["excess_annual_return"] is not None
         # 2026-08 新增列：基准夏普/卡玛 + 超额 + 平均空仓天数，端到端落库可查
-        assert ok_cell["benchmark_sharpe"] is not None
+        # 夹具是**单调**净值（日收益恒等）→ 基准腿的 Sharpe 是浮点残差噪声
+        # （年化 ~1e16 级），必须记 None 而不是落库；calmar 不入闸（低回撤/短窗口
+        # 可合法 > 50，R10 结论），故仍照常给出。噪声/合法两侧口径由
+        # test_loop_review_ds4f_r11.py 的载荷钉子覆盖。
+        assert ok_cell["benchmark_sharpe"] is None
+        assert "excess_sharpe" in ok_cell and ok_cell["excess_sharpe"] is None
         assert ok_cell["benchmark_calmar"] is not None
-        assert ok_cell["excess_sharpe"] == pytest.approx(
-            ok_cell["sharpe"] - ok_cell["benchmark_sharpe"])
         assert ok_cell["excess_calmar"] == pytest.approx(
             ok_cell["calmar"] - ok_cell["benchmark_calmar"])
         assert ok_cell["avg_flat_days"] is not None

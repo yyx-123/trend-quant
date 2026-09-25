@@ -197,6 +197,37 @@ def _evaluating_experiment(db, registry, topic, session):
     return exp
 
 
+def test_confirm_verdict_rejects_oversize_reasoning(test_db, registry, topic, human_session):
+    """reasoning 上限 4000 字（行为级；取代 test_loop_review_ds4f_r4.py 里的
+    源码文本断言——把阈值改成 4_000_000 后那条钉子仍全绿，70k 字照样落库）。
+
+    R4A-P3-7 的缺陷形态是"上限形同虚设"：既要有上限，也不能把上限压到
+    连正常留痕都过不去，故两侧都断言。
+    """
+    from research import lifecycle, verdict
+    from research.errors import LifecycleError
+
+    version = _strategy_version(test_db, registry, "reasoning-limit-line")
+    globals()["_version_id"] = version["id"]
+    exp = _evaluating_experiment(test_db, registry, topic, human_session)
+    lifecycle.transition(test_db, exp["id"], "running")
+    lifecycle.transition(test_db, exp["id"], "evaluating")
+    verdict.insert_platform_verdict(
+        test_db, experiment_id=exp["id"], baseline={}, evidence={},
+        warnings=[], report={}, suggested_verdict="confirmed",
+    )
+    with pytest.raises(LifecycleError):
+        verdict.confirm_verdict(
+            test_db, experiment_id=exp["id"], final_verdict="inconclusive",
+            reasoning="x" * 4001, session_id=human_session["session_id"],
+        )
+    out = verdict.confirm_verdict(
+        test_db, experiment_id=exp["id"], final_verdict="inconclusive",
+        reasoning="y" * 3900, session_id=human_session["session_id"],
+    )
+    assert out["final_verdict"] == "inconclusive"
+
+
 def test_platform_verdict_requires_evaluating(test_db, registry, topic, human_session):
     from research.errors import LifecycleError
 

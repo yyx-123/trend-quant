@@ -262,6 +262,11 @@ async def list_batch_runs() -> dict:
 
 
 def _parse_cell_blobs(row: dict) -> dict:
+    # 年度块的比值型指标走读取面清噪（幅值超闸 → None）：修复前落库的噪声
+    # （生产库 147 条 |benchmark_sharpe|>50，最大 16332.48）仍会被 HTTP 取出、
+    # 被前端显示并进 CSV——写入面闸门管不到历史行。
+    from rule_backtest.metrics import sanitize_annual_blocks
+
     for key in (
         "annual_returns_json",
         "monthly_heatmap_json",
@@ -275,6 +280,8 @@ def _parse_cell_blobs(row: dict) -> dict:
         if text:
             try:
                 row[out_key] = json.loads(text)
+                if out_key == "annual_returns":
+                    row[out_key] = sanitize_annual_blocks(row[out_key])
             except (ValueError, TypeError):
                 row[out_key] = None
         else:

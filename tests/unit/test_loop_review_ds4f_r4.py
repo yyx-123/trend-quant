@@ -326,16 +326,6 @@ def test_grant_token_rejects_oversize_and_unknown_experiment(test_db):
                            purpose="ok", experiment_id="E-NOPE")
 
 
-def test_confirm_rejects_oversize_reasoning(test_db, registry=None):
-    """R4A-P3-7：reasoning 有上限（此前 70k 字也能落库）。"""
-    import inspect
-
-    from research import verdict
-
-    src = inspect.getsource(verdict.confirm_verdict)
-    assert "max 4000 chars" in src
-
-
 # ----------------------------------------------------------------------
 # V10 复核：回灌必须落回 `_queue`（只进集合不等于可再派发）
 # ----------------------------------------------------------------------

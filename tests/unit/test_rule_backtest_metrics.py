@@ -215,11 +215,27 @@ class TestComputeAnnualReturns:
         assert len(result) >= 1
         row = result[0]
         assert row["benchmark_return"] is not None
-        assert row["benchmark_sharpe"] is not None
         assert row["benchmark_max_drawdown"] is not None
         assert row["benchmark_calmar"] is not None
+        # 逐年度块同过幅值闸门：**单调**序列的日收益方差只是浮点残差（每期收益恒等
+        # → std ~1e-16、mean ~2e-3 → 年化 sharpe ~1e16 级噪声）。这类噪声此前会被
+        # 落库（生产库实测 147 条 |benchmark_sharpe| > 50，最大 16332.48）并经
+        # HTTP/前端/CSV 外显 → 现在记 None。
+        assert row["benchmark_sharpe"] is None
         # 策略净值增长快于基准，收益应高于基准
         assert row["return"] > row["benchmark_return"]
+
+    def test_benchmark_sharpe_kept_when_legitimate(self) -> None:
+        """有真实波动的基准腿：年度 Sharpe 必须**照常保留**（防过拦截）。
+
+        与上一条配对：钉子同时覆盖"噪声置 None"与"合法值不动"两侧。
+        """
+        nav = _make_nav([100_000 + i * 400 for i in range(90)])
+        noisy = [100_000 + i * 150 + (2_500 if i % 2 else -2_000) for i in range(90)]
+        result = compute_annual_returns(nav, benchmark_daily_nav=_make_nav(noisy))
+        row = result[0]
+        assert row["benchmark_sharpe"] is not None
+        assert abs(row["benchmark_sharpe"]) < 50
 
     def test_max_drawdown_and_calmar(self) -> None:
         # 先涨后跌：100 -> 120 -> 90，年内最大回撤 (90/120 - 1) = -25%
