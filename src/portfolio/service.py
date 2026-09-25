@@ -59,6 +59,7 @@ def resolve_experiment_config(
     diff: list[dict],
     registry: ModuleRegistry,
     new_name: str | None = None,
+    allow_retired: bool = False,
 ) -> tuple[StrategyConfig, str]:
     """"基准 + 插槽 diff" → 完整策略配置（非法即拒）。
 
@@ -74,7 +75,11 @@ def resolve_experiment_config(
     # 退役线（台账看不到、实验却在它上面生长）。口径对齐：拒绝新引用，
     # 已有实验记录与历史 run 不受影响。
     _strategy = library.get_strategy(db, base_row["strategy_id"])
-    if _strategy is not None and _strategy.get("retired_at"):
+    if (
+        not allow_retired
+        and _strategy is not None
+        and _strategy.get("retired_at")
+    ):
         raise ServiceError(
             f"strategy line {base_row['strategy_id']} is retired; "
             "its versions cannot be used as a new experiment base "

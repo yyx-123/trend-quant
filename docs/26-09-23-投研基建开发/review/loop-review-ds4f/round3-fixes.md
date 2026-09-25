@@ -33,6 +33,29 @@
 - 冗余索引：DDL 层恢复后仍被 `_migrate_schema` 的 `DROP INDEX IF EXISTS` 清掉（双保险），
   终态断言仍成立。
 
+
+## V7 独立验收（第 7 个代理）：判 FAIL → 二次修复
+
+V7 逐项反证，**判 3 项阻断**（全部是我的实现/钉子问题）：
+
+| # | 项 | V7 证据 | 二次修复 |
+|---|---|---|---|
+| ND-1（P2） | 复核 campaign 的"重新物化"是**死代码**：`materialize_topic(db, topic_id)` 漏了 keyword-only 的 `root` → `TypeError` 被本地 except 吞掉、每个 campaign 都往 stderr 打 traceback、`rematerialized_topics` 恒空 | 真 CLI 跑出 traceback；`rematerialized_topics == []` | 从 `research.api.DEFAULT_TOPICS_DIR` 取根、`ResearchService.recompute_campaign` 透传 `self.topics_dir`；新增钉子断言"真的产出物化文件" |
+| ND-2（P3） | 物化 `report.json` 与 HTTP 下载**内容不等价**：`spec` 在文件里是 `null`（原始实验行只有 `spec_json`，未解码） | 键集相同但值不同（`spec=null`） | `materialize_topic` 内解码 `spec_json → spec`；钉子断言 `payload["spec"]["base"] == version id` |
+| ND-3（P2） | 缺省展开**不完整**：8 个声明字段仍是静默杠杆（backtest 的 `expect/mc_bands/is_compound/compound_reason/primary_horizon`、event 的 `primary_horizon/context_filter`、distribution 的 `criterion`），显式写出其"不改变行为的值"仍绕过重复检测 | 逐一 ACCEPTED | 补全 `_MODULE_SPEC_DEFAULTS`（含 `universe`；`primary_horizon` 按 runner 语义现算 = `horizons[0]`）；新增**机制性**钉子：表必须覆盖全部声明字段（排除必填集）——新增字段不登记即红灯 |
+| ND-4（P3） | 退役线修复**过头**：既有实验的重跑（rerun/复核/高原探针/晋升）经 `resolve_experiment_config` 一并被拒 → 退役一个策略线会把已完成的实验全部变成 failed | `rerun` → runner → ServiceError → failed | `resolve_experiment_config(allow_retired=False)` 默认拒新引用，**复现/复核路径传 `allow_retired=True`**（rerun/探针/晋升）；钉子断言两条路径的行为差 |
+| ND-5（P3） | 既有版本行**无血缘**（种子/人工版本，`experiment_id IS NULL`）时仍静默吸收晋升 | `promote` 到与 `base-v1@1` 同 config 的实验 → 返回 `base-v1@1`、血缘 None | 血缘不同（含 None）即 `LibraryError`；钉子覆盖 |
+| ND-6（P3） | `LibraryError`/`ServiceError` 是 `ValueError` 家族 → MCP 通道把它归为 "internal error"，业务原因被吞 | 直接调用 `_error_payload(LibraryError(...))` | `_error_payload` 增加这两类的业务分类；钉子断言不含 "internal error" |
+| 钉子缺口 | engine 守卫钉子只覆盖 2/5 张子表；CLI 钉子是源码 grep（删任一 `frozen_writes` 都抓不到） | 变异实证 | engine 钉子补全 5 张表的 UPDATE/DELETE（含真行）；CLI 的 `skipped` 改为真 subprocess 断言（V7 已独立验证行为），`frozen_writes` 的存在由源码断言 + 行为 spy 双重覆盖 |
+
+**V7 已独立验证为正确**（无需改动）：晋升守卫行为、命名缺省等价、退役线 intake/resolve/历史可读、
+engine 守卫与存量传播（含父提交建的库重开后获得守卫）、索引删除与 UNIQUE 完整性、
+verdict 状态守卫与行级认领、CLI 冻结与 skipped、哨兵 monkeypatch 生效、MCP 错误形状。
+
+**另记（非本轮引入）**：`tests/unit/test_db_path_anchoring.py::test_init_db_default_is_not_cwd_relative`
+以无参 `init_db()` 打开并迁移**生产库**——每次全量测试都会对 `data/trend_quant.db` 跑一遍 DDL
+（行数不变、效果即"迁移到最新 schema"）。属存量测试卫生问题，记入最终报告的记录项。
+
 ## 回归结果
 
 - 全量：**1605 passed / 1 failed**（唯一失败仍是改动前即 flaky 的 Windows 临时文件用例，在父提交上同样失败）；修复过程中另有一次全量 **1606 passed / 0 failed**。

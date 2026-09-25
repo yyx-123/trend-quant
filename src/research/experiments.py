@@ -104,14 +104,22 @@ def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
     # 却因键集不同被判"另一个实验"（exact 不命中、similar 直接 return False）
     # → 重复检测整体被绕过。缺省表是**单一真源**（下方 _MODULE_SPEC_DEFAULTS），
     # 与各 runner 的 `spec.get(k, default)` 对齐；新字段必须同时登记。
-    for key, default in _MODULE_SPEC_DEFAULTS.get(
-        str(evaluation_module or "").split("@")[0], {}
-    ).items():
+    module_key = str(evaluation_module or "").split("@")[0]
+    for key, default in _MODULE_SPEC_DEFAULTS.get(module_key, {}).items():
         if key not in known:
             continue
         # **缺键或 None 都取平台缺省**——这正是"省略 ≡ 显式缺省"的归一（R3C-P2-2）
         if expanded.get(key) is None:
             expanded[key] = default() if callable(default) else default
+    # runner 侧 `primary_horizon` 的缺省不是常量而是 `horizons[0]`（ND-3：
+    # 显式写出该值必须与省略等价）
+    if module_key in ("event_study", "bucket_analysis") and expanded.get("primary_horizon") is None:
+        horizons = expanded.get("horizons")
+        if isinstance(horizons, (list, tuple)) and horizons:
+            try:
+                expanded["primary_horizon"] = int(horizons[0])
+            except (TypeError, ValueError):
+                pass
     return expanded
 
 
@@ -129,21 +137,37 @@ def _module_spec_defaults() -> dict[str, dict]:
             "window_mode": "static_holdout",
             "n_folds": 4,
             "initial_capital": 1_000_000,
+            # ND-3（V7 复核补全）：以下均为**声明字段**，显式写出"不改变行为的
+            # 值"此前会让键集不同而绕过重复检测（静默杠杆）
+            "expect": "positive",
+            "mc_bands": True,
+            "is_compound": False,
+            "compound_reason": "",
+            # backtest 不使用 primary_horizon（由 event/bucket 消费）；
+            # 声明即登记，取值 None 表示"不适用"
+            "primary_horizon": None,
         },
         "event_study": {
             "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],
+            "universe": "liquidity_default",
             "expect": "positive",
             "horizons": [5, 10, 20],
             "path_stats": False,
+            # runner 侧缺省 = horizons[0]（下方 _expand_platform_defaults 现算）
+            "primary_horizon": None,
+            "context_filter": None,
         },
         "bucket_analysis": {
             "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],
+            "universe": "liquidity_default",
             "expect": "positive",
             "horizons": [10, 20],
             "buckets": 5,
         },
         "distribution": {
             "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],
+            "universe": "liquidity_default",
+            "criterion": None,
         },
         "head_to_head": {
             "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],

@@ -389,3 +389,157 @@ def test_cli_recompute_surfaces_skipped():
     src = sys_path.read_text(encoding="utf-8")
     assert '"skipped"' in src, "CLI recompute 必须打印 skipped（R3C-P3-3）"
     assert "frozen_writes" in src, "CLI 同步执行通道必须包 frozen_writes（R3C-P3-1）"
+
+
+# ----------------------------------------------------------------------
+# V7 复核后的补钉（ND-1..ND-6）
+# ----------------------------------------------------------------------
+
+
+def test_recompute_rematerializes_with_the_right_root(test_db, registry, topic, human_session, tmp_path):
+    """ND-1：复核 campaign 的重新物化必须**真的跑起来**（root 参数不能缺）。
+
+    V7 复核实证：初版调用漏了 keyword-only 的 `root` → TypeError 被本地 except
+    吞掉、每个 campaign 都往 stderr 打 traceback、且从不物化。
+    """
+    version = _strategy_version(test_db, registry, "remat-line")
+    globals()["_version_id"] = version["id"]
+    exp = _evaluating_experiment(test_db, registry, topic, human_session)
+    lifecycle.transition(test_db, exp["id"], "running")
+    lifecycle.transition(test_db, exp["id"], "evaluating")
+    verdict.insert_platform_verdict(
+        test_db, experiment_id=exp["id"], baseline={}, evidence={},
+        warnings=[], report={}, suggested_verdict="confirmed",
+    )
+    verdict.confirm_verdict(test_db, experiment_id=exp["id"],
+                            final_verdict="confirmed", reasoning="准入复核",
+                            session_id=human_session["session_id"])
+    from research.recompute import recompute_campaign
+
+    out = recompute_campaign(
+        test_db, old_module_ref="d_position_risk@1", new_module_ref="d_position_risk@1",
+        registry=registry, topics_dir=tmp_path / "topics_dir",
+    )
+    assert out["rematerialized_topics"] == [topic["id"]], out
+    produced = list((tmp_path / "topics_dir").rglob("report.json"))
+    assert produced, "复核后必须产出物化文件（ND-1）"
+
+
+def test_materialized_report_spec_matches_http_envelope(test_db, registry, topic, human_session, tmp_path):
+    """ND-2：物化 report.json 的 `spec` 必须与 HTTP 下载一致（不能是 null）。"""
+    from research import topic_files
+
+    version = _strategy_version(test_db, registry, "spec-env-line")
+    globals()["_version_id"] = version["id"]
+    exp = _evaluating_experiment(test_db, registry, topic, human_session)
+    lifecycle.transition(test_db, exp["id"], "running")
+    lifecycle.transition(test_db, exp["id"], "evaluating")
+    verdict.insert_platform_verdict(
+        test_db, experiment_id=exp["id"], baseline={}, evidence={},
+        warnings=[], report={}, suggested_verdict="confirmed",
+    )
+    verdict.confirm_verdict(test_db, experiment_id=exp["id"],
+                            final_verdict="inconclusive", reasoning="信封一致",
+                            session_id=human_session["session_id"])
+    out = topic_files.materialize_topic(test_db, topic["id"], root=tmp_path / "t2")
+    import json
+
+    payload = json.loads(
+        (Path(out) / "experiments" / exp["id"] / "report.json").read_text(encoding="utf-8")
+    )
+    assert payload["spec"] is not None, "物化信封的 spec 不得为 null（ND-2）"
+    assert payload["spec"].get("base") == version["id"]
+
+
+def test_platform_defaults_table_covers_all_declared_fields():
+    """ND-3：缺省值表必须覆盖**全部**声明字段（否则"显式缺省即逃逸"会复发）。
+
+    这是机制性守卫：新增声明字段而不登记缺省值 → 本用例失败。
+    """
+    from research.experiments import _DECLARED_SPEC_FIELDS, _MODULE_SPEC_DEFAULTS
+
+    # `base`/`diff`/`event` 是**必填**字段（无缺省），其余声明字段必须有缺省登记
+    required = {"base", "diff", "event", "signal_module", "feature", "metric", "ref"}
+    for module_key, declared in _DECLARED_SPEC_FIELDS.items():
+        table = _MODULE_SPEC_DEFAULTS.get(module_key, {})
+        missing = sorted(declared - set(table) - required)
+        assert not missing, (
+            f"{module_key} 的声明字段缺省值未登记：{missing}"
+            "（显式写出缺省值会绕过重复检测——见 R3C-P2-2/ND-3）"
+        )
+
+
+def test_explicit_defaults_of_all_fields_collide_with_omission(test_db, registry, topic, human_session):
+    """ND-3 行为面：把声明字段逐个显式写成缺省值，都必须判重复。"""
+    global _version_id
+    from research.errors import IntakeRejected
+
+    version = _strategy_version(test_db, registry, "allextra-line")
+    _version_id = version["id"]
+    _propose(test_db, registry, topic, human_session)
+    for extra in ({"expect": "positive"}, {"mc_bands": True},
+                  {"is_compound": False}, {"compound_reason": ""}):
+        with pytest.raises(IntakeRejected) as ei:
+            _propose(test_db, registry, topic, human_session, spec_extra=extra)
+        assert "duplicate_of" in str(ei.value) or "similar_to" in str(ei.value), extra
+
+
+def test_retired_line_existing_experiment_still_runnable(test_db, registry, topic, human_session):
+    """ND-4：退役线只禁**新引用**——既有实验的复现/复核必须仍可跑。"""
+    from portfolio import library, service
+    from portfolio.service import ServiceError
+
+    version = _strategy_version(test_db, registry, "rerun-retired-line")
+    library.retire_strategy(test_db, "rerun-retired-line")
+    with pytest.raises(ServiceError):
+        service.resolve_experiment_config(
+            test_db, base_version_id=version["id"], diff=[], registry=registry,
+        )
+    # 复现路径：allow_retired=True → 可解析
+    config, _yaml = service.resolve_experiment_config(
+        test_db, base_version_id=version["id"], diff=[], registry=registry,
+        allow_retired=True,
+    )
+    assert config is not None
+
+
+def test_promote_refuses_version_without_lineage(test_db, registry):
+    """ND-5：既有版本行**无血缘**（种子/人工版本）时同样不得静默复用。"""
+    from portfolio import library
+    from portfolio.library import LibraryError
+    from portfolio.slots import REGISTRY, ensure_builtins
+    from portfolio.strategy import parse_strategy_yaml
+
+    ensure_builtins()
+    ensure_strategy(test_db, "seed-line", name="seed-line")
+    yaml_text = (
+        "name: seed-line\n"
+        "universe: {module: category_filter@1}\n"
+        "signal: {module: macd_cross@1}\n"
+        "rank: {module: by_freshness@1}\n"
+        "sizing: {module: all_in@1}\n"
+        "portfolio_risk: []\n"
+        "position_risk: {module: hard_stop@1, params: {atr_mul: 1.5}}\n"
+        "execution: {module: tail_session@1}\n"
+    )
+    add_version_yaml(test_db, "seed-line", yaml_text, REGISTRY, created_by="human")
+    config = parse_strategy_yaml(yaml_text, REGISTRY)
+    with pytest.raises(LibraryError):
+        library.add_version(test_db, "seed-line", config,
+                            experiment_id="E0009", created_by="experiment")
+
+
+def test_mcp_error_payload_classifies_library_errors():
+    """ND-6：业务异常（LibraryError/ServiceError）不得落进"internal error"。"""
+    import sys
+
+    from portfolio.library import LibraryError
+    from portfolio.service import ServiceError
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    from trend_mcp.research_tools import _error_payload
+
+    for exc in (LibraryError("config already exists as x@1"), ServiceError("base not found")):
+        payload = _error_payload(exc)
+        assert payload["ok"] is False
+        assert "internal error" not in payload["error"], payload

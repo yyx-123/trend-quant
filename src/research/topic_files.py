@@ -60,6 +60,13 @@ def materialize_topic(db, topic_id: str, *, root: str | Path) -> Path:
               "|---|---|---|---|---|"]
 
     for exp in experiments:
+        # ND-2（V7 复核）：物化信封必须带上**解码后的 spec**——原始实验行只有
+        # `spec_json`，直接塞进信封会让 `spec` 变成 null，与 HTTP 下载不一致。
+        if isinstance(exp.get("spec_json"), str) and "spec" not in exp:
+            try:
+                exp = {**exp, "spec": json.loads(exp["spec_json"])}
+            except (TypeError, ValueError):
+                exp = {**exp, "spec": None}
         verdicts = verdict_mod.list_verdicts(db, exp["id"])
         # 定论优先（GLM53F-P1-4）：复核稿不劫持展示/物化位
         latest = verdict_mod.canonical_verdict(verdicts)

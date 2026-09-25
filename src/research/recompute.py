@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 
 from audit.app_logger import get_logger
@@ -113,6 +115,7 @@ def recompute_campaign(
     registry,
     session_id: str = "human-default",
     limit: int | None = None,
+    topics_dir: str | Path | None = None,
 ) -> dict:
     """批量复核：重跑引用旧模块版本的 verdicted 实验，产出带 supersedes 指针
     的新 verdict。返回 {recomputed: [...], failed: [...], skipped: [...]}。
@@ -208,6 +211,7 @@ def recompute_campaign(
     # 失败只告警，与 service._materialize 同口径。
     rematerialized: list[str] = []
     try:
+        from research.api import DEFAULT_TOPICS_DIR
         from research.topic_files import materialize_topic
 
         topic_ids = {
@@ -217,7 +221,10 @@ def recompute_campaign(
             if not topic_id:
                 continue
             try:
-                materialize_topic(db, topic_id)
+                materialize_topic(
+                    db, topic_id,
+                    root=topics_dir or DEFAULT_TOPICS_DIR,
+                )
                 rematerialized.append(topic_id)
             except Exception:
                 import logging

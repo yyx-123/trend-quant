@@ -37,6 +37,16 @@ def _error_payload(exc: Exception) -> dict:
                 "experiment_id": getattr(exc, "experiment_id", None)}
     if isinstance(exc, ResearchError):
         return {"ok": False, "error": str(exc)}
+    # ND-6（V7 复核）：库/服务层的业务异常（LibraryError / ServiceError 等
+    # ValueError 家族）此前落进"internal error"分支——业务原因被吞，模型看不
+    # 到可读解释。这里把它们与 ResearchError 同口径暴露。
+    try:
+        from portfolio.library import LibraryError
+        from portfolio.service import ServiceError
+    except Exception:  # pragma: no cover - 导入失败时不改变兜底行为
+        LibraryError = ServiceError = ()  # type: ignore[assignment]
+    if isinstance(exc, (LibraryError, ServiceError)):
+        return {"ok": False, "error": str(exc)}
     logger.exception("research tool internal error")
     return {"ok": False, "error": "internal error (see server logs)"}
 

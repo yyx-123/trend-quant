@@ -340,6 +340,10 @@ def run_portfolio_backtest(db, experiment: dict, ctx: dict) -> dict:
     config, resolved_yaml = portfolio_service.resolve_experiment_config(
         db, base_version_id=base_ref, diff=diff, registry=registry,
         new_name=f"exp-{experiment['id']}",
+        # ND-4（V7 复核）：复现/复核**既有**实验不是"新引用"——退役线只禁
+        # 新实验，历史实验的重跑（rerun/复核/高原探针）必须照常可跑，
+        # 否则退役一个策略线会把已在它上面完成的实验全部变成 failed。
+        allow_retired=True,
     )
 
     windows = holdout.get_windows(db)
@@ -650,6 +654,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
                 probe_cfg, _yaml = portfolio_service.resolve_experiment_config(
                     db, base_version_id=base_ref, diff=probe_diff, registry=registry,
                     new_name=f"exp-{experiment['id']}-plateau-{param}-{neighbor}",
+                    allow_retired=True,  # 探针是既有实验的邻域，不是新引用
                 )
                 probe_ref = f"experiment:{experiment['id']}:plateau"
                 if wf_folds_for_probe is not None:

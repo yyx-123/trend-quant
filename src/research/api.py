@@ -259,6 +259,7 @@ class ResearchService:
         config, _yaml = portfolio_service.resolve_experiment_config(
             self.db, base_version_id=base_ref, diff=spec.get("diff") or [],
             registry=self.registry, new_name=strategy_id,
+            allow_retired=True,  # 晋升既有实验不是"新引用"（ND-4）
         )
         library.ensure_strategy(
             self.db, strategy_id, name=name or strategy_id,

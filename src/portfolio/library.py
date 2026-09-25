@@ -117,11 +117,17 @@ def add_version(
         # 已带有**另一个**实验的血缘，静默复用会丢掉本次实验的血缘（调用方仍
         # 收 ok:True）——"入库是唯一的门、必须完整实验血缘"（决策 8）被绕过。
         existing_exp = existing.get("experiment_id")
-        if existing_exp and experiment_id and existing_exp != experiment_id:
+        if experiment_id and existing_exp != experiment_id:
+            # ND-5（V7 复核）：既有行**没有**血缘（如种子版本）时静默复用同样
+            # 会让本次晋升的实验血缘消失——同样 fail-loud。
+            origin = (
+                f"experiment {existing_exp}" if existing_exp
+                else "a version without experiment lineage（如种子/人工版本）"
+            )
             raise LibraryError(
-                f"config already promoted from experiment {existing_exp} "
-                f"(version {existing['id']}); refusing silent reuse for "
-                f"experiment {experiment_id} —— 如需独立血缘请使用新的策略线"
+                f"config already exists as {existing['id']} from {origin}; "
+                f"refusing silent reuse for experiment {experiment_id} "
+                "—— 如需独立血缘请使用新的策略线"
             )
         return existing
 
