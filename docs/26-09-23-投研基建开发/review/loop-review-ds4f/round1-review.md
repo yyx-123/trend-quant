@@ -1,6 +1,15 @@
 # Round 1 审查报告（loop-review-ds4f）
 
-> **状态：OPEN（待修复 + 子代理验收）**
+> **状态：CLOSED（2026-09-25 闭合）**
+> - 修复清单与验收记录：`round1-fixes.md`；
+> - 验收子代理 V1（4 项 P1 反证式核验，含真实 5.5GB 生产库对照）：**V1_VERDICT: PASS**；
+> - 验收子代理 V2（12 项 P2 + 全 diff 回归搜寻 + 空钉变异反证）：**V2_VERDICT: PASS（无阻断项）**；
+>   复核发现 1 个我引入的新注入面（`live_bars` 可覆盖真实 bar / 受限句柄可达）、
+>   1 个我引入的崩溃 bug（live_overlay 上界修复里 `date().date()`）、哨兵两处窄竞态、
+>   黑名单过宽、**5 条空钉**——全部已二次修复并补钉（变异反证 23/23 命中）；
+> - 全量回归：1578 passed / 2 failed，失败全部落在改动前即 flaky 的
+>   `tests/test_instruments_bulk_backfill.py`（在父提交上**同样**失败，Windows
+>   临时文件 PermissionError）；ruff 与基线逐条对比新增 0 条。
 >
 > 日期：2026-09-25
 > 审查对象：commit `c986ad1`（投研基建一期全量实现的当前 HEAD，基线 `f93031e`）

@@ -251,8 +251,9 @@ def attribute_diffs(
                 # 100%、乃至 +100% 的净值错误都被"tail_slippage"吸收，
                 # 阶段 1 的 `unexplained == []` 机器判据形同摆设。
                 cum_drag = (1.0 + drag_factor) * (1.0 + slip_ratio) - 1.0
-                # 硬上限：单笔数量漂移不得超过该笔自身数量的 1/2——超过即
-                # 不是"滑点的下游"，而是另一笔订单（真实口径差异）。
+                # 硬上限：单笔数量漂移不得超过该笔自身数量的 1/2（整手起步，
+                # 即 `max(lot, |qty|//2)`——对极小手数订单相当于"至多整仓"）。
+                # 超过即不是"滑点的下游"，而是另一笔订单（真实口径差异）。
                 qty_cap = max(int(lot_size), int(abs(int(ot["qty"])) // 2))
                 qty_bound = min(
                     max(int(lot_size), int(abs(int(ot["qty"])) * cum_drag)) + int(lot_size),

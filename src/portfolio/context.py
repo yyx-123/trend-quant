@@ -25,8 +25,12 @@ if TYPE_CHECKING:
 
 
 def _readonly(arr: np.ndarray) -> np.ndarray:
-    """把面板切片标为只读（不拷贝）。视图与其父数组共享内存，但 writeable=False
-    的视图拒绝赋值——模块拿不到可写句柄（R1-P3-9）。"""
+    """把面板切片标为只读（不拷贝，零开销）。
+
+    口径如实（R1-P3-9 + V1 复核）：`writeable=False` 的视图拒绝**直接**赋值，
+    挡住"顺手改一行"这类事故；但它不是安全边界——`arr.base` 仍是可写的父数组，
+    刻意绕过依然可以。真正的边界是"内置件不写面板"的代码纪律 + 面板不被视为
+    可变对象。"""
     arr.setflags(write=False)
     return arr
 

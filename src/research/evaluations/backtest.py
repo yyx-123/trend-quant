@@ -704,31 +704,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
         )
     elif not exp_result["trades"]:
         warnings.append("no_trades(实验窗口内零成交)")
-    if plateau is None and not is_creation:
-        # GLM53F-P2-1③：换模块类 diff 无参数高原证据——不阻断 confirmed，
-        # 但必须显式可见（plateau 门对这类实验是缺席而非通过）。
-        # R1-P2-6：告警原因必须与真实原因一致（此前 dict 形态 diff 被误报为
-        # "换模块类"，而它其实只是 `to: {module, params}` 没被枚举）。
-        warnings.append(
-            "plateau_evidence_absent(该 diff 无数值参数可供邻域探查——"
-            "换模块/零值参数等；孤峰检查缺席，勿当作已通过)"
-        )
-    elif (
-        plateau is not None
-        and plateau.get("verdict") == "unknown"
-        and not is_creation
-    ):
-        # R1-P2-6：verdict="unknown"（邻域点构造不出来，如参数取合法零值时
-        # 相对步长 ±20% 退化）此前**静默通过**——is_plateau 只排除 "peak"，
-        # 于是"没查"与"查过没问题"在判定器里不可区分。零值参数在全仓至少有
-        # 15 个（tail_session.slippage_base/slippage_tail、trend_score_cross
-        # .threshold、liquidity_filter.min_amount20 …），必须显式可见。
-        warnings.append(
-            f"plateau_evidence_absent(邻域点未能构造：{plateau.get('reason')}——"
-            "高原/孤峰检查实际缺席，勿当作已通过)"
-        )
-    elif plateau and plateau.get("verdict") == "peak":
-        warnings.append("plateau_peak(参数孤峰，疑似过拟合)")
+    warnings.extend(plateau_warnings(plateau, is_creation=is_creation))
     # GLM53F-P2-1④：换手增幅成本可解释性（§6.5.1）——阈值化不合适，
     # 进警告由人工 confirm 判读
     _d_turn = deltas.get("delta_turnover")
@@ -808,6 +784,35 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
         "suggested_verdict": suggested,
         "runs": runs_out,
     }
+
+
+def plateau_warnings(plateau: dict | None, *, is_creation: bool) -> list[str]:
+    """高原/孤峰证据面的告警（R1-P2-6；抽成纯函数以便直接断言行为）。
+
+    - `plateau is None`（无数值参数可探）+ 非创建型 → 证据缺席（不阻断
+      confirmed，但必须可见）；
+    - `verdict == "unknown"`（邻域点构造不出来，如参数取合法零值时相对步长
+      ±20% 退化）→ **必须显式可见**：判定器只排除 "peak"，否则"没查"与
+      "查过没问题"不可区分（仓内至少 15 个合法零值参数可命中）；
+    - `peak` → 孤峰告警。
+    """
+    if is_creation:
+        return []
+    if plateau is None:
+        # GLM53F-P2-1③ + R1-P2-6：告警原因必须与真实原因一致
+        return [
+            "plateau_evidence_absent(该 diff 无数值参数可供邻域探查——"
+            + "换模块/零值参数等；孤峰检查缺席，勿当作已通过)"
+        ]
+    if plateau.get("verdict") == "unknown":
+        reason = plateau.get("reason") or "no neighbors"
+        return [
+            "plateau_evidence_absent(邻域点未能构造："
+            + f"{reason}——高原/孤峰检查实际缺席，勿当作已通过)"
+        ]
+    if plateau.get("verdict") == "peak":
+        return ["plateau_peak(参数孤峰，疑似过拟合)"]
+    return []
 
 
 def _plateau_items(diff: list[dict]) -> list[dict]:

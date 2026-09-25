@@ -238,6 +238,12 @@ class BoundGateway:
         )
 
     def get_tradability(self, *, symbols: list[str], dates: list[date], **kwargs) -> pd.DataFrame:
+        # live_bars 只对 L3 实盘运行器开放（它持有顶层 Gateway）：受限句柄
+        # 是给**模块**用的，模块不得为自己伪造决策日 bar（V1 复核实证：经
+        # 受限句柄可注入 as_of 当日行情改写卡控结论）——与 as_of/data_version
+        # 同级按越权拒绝并留痕。
+        if kwargs.get("live_bars") is not None:
+            self._reject_violation("get_tradability", {"live_bars": "<forbidden>"})
         if "as_of" in kwargs or "data_version" in kwargs:
             self._reject_violation("get_tradability", kwargs)
         return self.__gateway.get_tradability(
@@ -246,7 +252,6 @@ class BoundGateway:
             as_of=self._as_of,
             caller_layer=self._caller_layer,
             run_id=self._run_id,
-            live_bars=kwargs.get("live_bars"),
         )
 
     def get_production_indicator(self, *, symbols: list[str], name: str, since, **kwargs):

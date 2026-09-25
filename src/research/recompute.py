@@ -89,6 +89,23 @@ def find_experiments_using(db, module_ref: str) -> list[dict]:
     return out
 
 
+def holdout_blocks_campaign(db, spec: dict) -> bool:
+    """该 spec 的窗口是否触碰 holdout（campaign 无 token 通路 → 必然失败的剔除判据）。
+
+    R1-P3-18：显式记账为 skipped，而不是让 HoldoutError 混进 failed 的原因字符串
+    ——批量复核"静默丢目标"必须可见。判定失败（异常）不阻断复核（交给 runner 自行拒绝）。
+    """
+    try:
+        from research import holdout as _holdout
+
+        win = (spec or {}).get("window") or []
+        if len(win) == 2:
+            return bool(_holdout.window_touches_holdout(db, win[0], win[1]))
+    except Exception:
+        return False
+    return False
+
+
 def recompute_campaign(
     db,
     *,
@@ -123,19 +140,13 @@ def recompute_campaign(
         # 参数），触碰过 holdout 的目标实验必然以 HoldoutError 报 failed——
         # 批量复核会"静默丢目标"。这里先判定，命中即按 skipped 显式记账，
         # 让"有哪些目标没复核"在结果里可见（而不是混进 failed 的原因字符串）。
-        try:
-            from research import holdout as _holdout
-
-            _win = (new_spec or {}).get("window") or []
-            if len(_win) == 2 and _holdout.window_touches_holdout(db, _win[0], _win[1]):
-                skipped.append({
-                    "id": exp_id,
-                    "reason": "holdout_touched（campaign 无 token 传递通路，"
-                              "需人工单跑并附带 holdout token）",
-                })
-                continue
-        except Exception:
-            pass  # 判定失败不阻断复核（交给 runner 自行拒绝）
+        if holdout_blocks_campaign(db, new_spec):
+            skipped.append({
+                "id": exp_id,
+                "reason": "holdout_touched（campaign 无 token 传递通路，"
+                          "需人工单跑并附带 holdout token）",
+            })
+            continue
         # 复核运行：直接调 runner（不走状态机——原实验已是 verdicted 终态，
         # 复核是台账追加，不是生命周期重开）
         try:

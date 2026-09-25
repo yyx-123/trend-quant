@@ -33,6 +33,46 @@ from research.evaluations.event import parse_event_spec
 FEATURES = ("atr_pct", "momentum_20", "er_10")
 
 
+class BucketScanCtx:
+    """分桶扫描的逐日上下文（模块级：钉子必须能驱动**真实**上下文与 scan 路径，
+    而不是只断言桩对象自身的属性——V1/V2 复核均实证"只断言桩"的钉子是空钉）。
+
+    事件扫描不需要账户，但信号插槽协议允许模块读 ``ctx.account``（内置件
+    abs_momentum@1 会读 ``positions`` 做"持仓跌出 top 集就退出"）。必须给只读
+    空账户桩，不能留 None——loop-review-ds4f R1-P1-3：留 None 时
+    bucket_analysis 会 AttributeError 崩掉整个实验（status=failed），而按
+    experiments.py 的计数口径工程失败**计入 attempt_index**，每次崩溃都在虚增
+    DSR 的试验次数 N。与 event.py 共用 `_common.EmptyAccount`（单一实现）。
+    """
+
+    __slots__ = ("date", "panel", "account", "params", "run_seed", "gateway", "data_version")
+
+    def __init__(self, panel, day, upto):
+        from portfolio.context import PanelView
+
+        self.date = day
+        self.panel = PanelView(panel, upto)
+        self.account = EmptyAccount()
+        self.params = {}
+        self.run_seed = day.toordinal()
+        self.gateway = None
+        self.data_version = 0
+
+
+def permutation_p_value(spread: float | None, random_spreads: list[float]) -> float | None:
+    """置换对照的经验 p 值（|随机利差| ≥ |实际利差| 的比例）。
+
+    R1-P2-11（V2 复核要求可直测）：`spread` 为 NaN 时**必须**记 None——
+    旧实现只判 ``is not None``，`np.abs(random) >= nan` 全 False → p=0.0
+    （全族最显著），被送进课题内 BH-FDR 抬高 still_significant。
+    """
+    import numpy as np
+
+    if spread is None or not np.isfinite(spread) or not random_spreads:
+        return None
+    return float(np.mean(np.abs(np.asarray(random_spreads, dtype=float)) >= abs(spread)))
+
+
 def _feature_matrix(panel, feature: str) -> np.ndarray:
     """(T,N) 特征矩阵（因果口径，当日值只用截至当日数据）。"""
     close = panel.data["close"]
@@ -145,8 +185,6 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
         min_amount20=DEFAULT_MIN_AMOUNT20 if liquidity_default else None,
         warnings_out=panel_warnings,
     )
-    from portfolio.context import PanelView
-
     spec_obj = registry.require(signal_ref, slot="signal")
     module = spec_obj.factory(signal_params)
     if hasattr(module, "prepare"):
@@ -174,25 +212,6 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
     # 事件日截面：信号日 × 标的 → (t, col) + 特征值
     members = [UniverseMember(symbol=s) for s in panel.symbols]
 
-    class _ScanCtx:
-        __slots__ = ("date", "panel", "account", "params", "run_seed", "gateway", "data_version")
-
-        def __init__(self, day, upto):
-            self.date = day
-            self.panel = PanelView(panel, upto)
-            # 事件扫描不需要账户，但信号模块会读 ctx.account.positions
-            # （如 abs_momentum@1）——必须给只读空账户桩，不能留 None。
-            # loop-review-ds4f R1-P1-3：留 None 时 bucket_analysis 会
-            # AttributeError 崩掉整个实验（status=failed），且按
-            # experiments.py 的计数口径，工程失败**计入 attempt_index**，
-            # 每次崩溃都在虚增 DSR 的试验次数 N。与 event.py 共用
-            # _common.EmptyAccount（单一实现）。
-            self.account = EmptyAccount()
-            self.params = {}
-            self.run_seed = day.toordinal()
-            self.gateway = None
-            self.data_version = 0
-
     events: list[tuple[int, int, float]] = []  # (t, col, feature_value)
     date_to_idx = {d: i for i, d in enumerate(panel.dates)}
     # (symbol, 事件日) 去重 + 特征值/前瞻收益均取**事件日**（K3-R2-残留-1：
@@ -204,7 +223,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
             continue
         if t + max_h >= len(panel.dates):
             continue
-        for ev in module.scan(_ScanCtx(day, t), members):
+        for ev in module.scan(BucketScanCtx(panel, day, t), members):
             if ev.kind != "entry":
                 continue
             col = panel._symbol_index.get(ev.symbol)
@@ -290,14 +309,8 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
                 random_spreads.append(float(g_means[-1] - g_means[0]))
         if random_spreads:
             random_band = float(np.percentile(np.abs(random_spreads), 95))
-            # 经验 p 值（评审 DS-P2-3）：|随机利差| ≥ |实际利差| 的比例。
-            # loop-review-ds4f R1-P2-11：必须判 isfinite——空桶时 spread 是
-            # **NaN 而不是 None**，`np.abs(random) >= nan` 全 False → p=0.0
-            # （全族最"显著"的值）被送进课题内 BH-FDR 抬高 still_significant。
-            if spread is not None and np.isfinite(spread):
-                evidence["p_value"] = float(
-                    np.mean(np.abs(random_spreads) >= abs(spread))
-                )
+            # 经验 p 值（评审 DS-P2-3 + R1-P2-11）：NaN spread 必须记 None
+            evidence["p_value"] = permutation_p_value(spread, random_spreads)
 
         if spread is not None and np.isfinite(spread) and random_band is not None:
             if monotonicity >= 0.8 and abs(spread) > random_band:

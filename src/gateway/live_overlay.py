@@ -26,20 +26,23 @@ def default_live_overlay(db):
         for symbol, quote in (quotes or {}).items():
             if not quote:
                 continue
-            # R1-P3-4：只为取上一根 bar 的 volume——此前 load_market_data
-            # 拉全量历史（874 标的 × 10 年日K），每日 14:00 白耗 IO；
-            # 改为最近 10 个自然日窗口查询（长假期后仍有上一交易日 bar）
+            # 只为取上一根 bar 的 volume——此前 load_market_data 拉全量历史
+            # （874 标的 × 10 年日K），每日 14:00 白耗 IO；改为窄窗口查询。
+            # 口径（R1-P3-4 + R1-P3-20 + ds4f-R1 复核）：
+            #   - 窗口放宽到 20 自然日：10 日不够跨长假（2023-10-09 前是 11 日
+            #     缺口 → 取不到前 bar → 合成 bar volume=0）；
+            #   - 上界取 as_of **前一日**：窗口上界是闭区间（"<= 23:59:59"），
+            #     含 as_of 会把当日自己的 bar 当成"前一根"（V1 实证：拿到的是
+            #     当日 volume 而非前一日）。
             prev_vol = 0.0
             try:
                 import pandas as _pd
 
-                # R1-P3-20：窗口 10 自然日不够跨长假（实测 2023-10-09 前是
-                # 11 日缺口 → 取不到前 bar → 合成 bar volume=0）；且 end 必须
-                # 锚在 as_of，否则盘后重触发会把**当日自己的** bar 当"前一根"。
-                as_of_day = _pd.Timestamp(as_of).date()
-                win_start = (as_of_day - _pd.Timedelta(days=20)).date()
+                as_of_ts = _pd.Timestamp(as_of)
+                win_start = (as_of_ts - _pd.Timedelta(days=20)).date()
+                win_end = (as_of_ts - _pd.Timedelta(days=1)).date()
                 prev = db.load_market_data_window_many(
-                    [symbol], win_start, as_of_day, price_mode="raw", period="1d",
+                    [symbol], win_start, win_end, price_mode="raw", period="1d",
                 )
                 frames = prev.get(symbol) if isinstance(prev, dict) else None
                 if frames is not None and len(frames):

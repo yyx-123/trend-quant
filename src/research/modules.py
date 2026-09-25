@@ -92,6 +92,8 @@ def propose_module(
                     "error": f"{type(exc).__name__}: 模块装载/自动测试失败"
                              "（细节见服务端日志）",
                 }
+                # 归因文案的消毒在 module_gate._safe_error 里做（源头收口，
+                # 覆盖 reject_reason / MCP / CLI 全部消费面）
                 reject_reason = "load: module failed to load or pass the gate"
 
 
@@ -140,14 +142,18 @@ _RESTRICTED_BUILTINS = {
 # 的逃生口（`pd.io.common.os`、`np.ctypeslib.ctypes` 等）。命名级黑名单掐断
 # 常见链路；**不是**真沙箱——真隔离需子进程/容器，见 round1-review R1-D-1。
 _DENIED_ATTR_NAMES = frozenset({
+    # 进程/文件系统/序列化的逃逸口（模块对象属性链的常见落点）
     "os", "sys", "subprocess", "ctypes", "ctypeslib", "pickle", "shutil",
     "importlib", "builtins", "socket", "urllib", "requests", "multiprocessing",
-    "threading", "tempfile", "pathlib", "glob", "signal", "pty", "platform",
-    "resource", "gc", "inspect", "marshal", "code", "codeop", "cmd",
+    "threading", "tempfile", "pathlib", "glob", "signal", "pty",
+    "resource", "gc", "inspect", "marshal", "codeop",
     "system", "popen", "spawn", "spawnl", "spawnv", "execv", "execve",
-    "fork", "kill", "remove", "unlink", "rmtree", "chmod", "chown",
-    "write", "writelines", "to_csv", "to_pickle", "to_json", "to_sql",
-    "read_csv", "read_pickle", "read_sql", "load", "loads", "dump", "dumps",
+    "fork", "kill", "rmtree", "chmod", "chown",
+    # 文件 IO（DataFrame/ndarray 的读写方法）
+    "to_csv", "to_pickle", "to_sql", "read_csv", "read_pickle", "read_sql",
+    # 注：刻意**不**收录 remove/write/load/loads/dump/dumps/code/cmd/platform
+    # 这类泛用名——它们会误杀合法模块（`out.remove(x)`、`f.write`、
+    # `np.load` 之外的同名方法），V2 复核指出黑名单不宜过宽。
 })
 
 

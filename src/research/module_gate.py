@@ -209,6 +209,19 @@ def _instantiate(factory, params: dict, panel):
     return instance
 
 
+def _safe_error(exc: Exception) -> str:
+    """归因失败的对外文案：只给异常类型 + 一句业务说明。
+
+    loop-review-ds4f R1-P3-19（V1 复核收口）：门的 `checks[*]["error"]` 会被
+    `modules.submit_module_draft` 原样写进 `reject_reason` 并回给 MCP 客户端，
+    而 `str(exc)` 可能含本机路径/栈内细节。细节只进日志。
+    """
+    import logging
+
+    logging.getLogger(__name__).exception("module gate check failed")
+    return f"{type(exc).__name__}: check failed (details in server log)"
+
+
 def run_module_gate(factory, *, slot: str, params: dict | None = None) -> dict:
     """契约 + 确定性 + 前缀稳定性三门（全插槽）。返回 {passed, checks}。"""
     checks: dict[str, dict] = {}
@@ -225,7 +238,7 @@ def run_module_gate(factory, *, slot: str, params: dict | None = None) -> dict:
         if missing:
             return {"passed": False, "checks": checks}
     except Exception as exc:
-        checks["contract"] = {"ok": False, "error": str(exc)[:300]}
+        checks["contract"] = {"ok": False, "error": _safe_error(exc)}
         return {"passed": False, "checks": checks}
 
     # 2. 确定性：同输入同输出（同一面板两次探测）
@@ -238,7 +251,7 @@ def run_module_gate(factory, *, slot: str, params: dict | None = None) -> dict:
         if a1 != a2:
             return {"passed": False, "checks": checks}
     except Exception as exc:
-        checks["determinism"] = {"ok": False, "error": str(exc)[:300]}
+        checks["determinism"] = {"ok": False, "error": _safe_error(exc)}
         return {"passed": False, "checks": checks}
 
     # 3. 前缀稳定性：截断到 cut 与全量分别 prepare，≤cut 的探测输出一致。
@@ -258,7 +271,7 @@ def run_module_gate(factory, *, slot: str, params: dict | None = None) -> dict:
         if out_full != out_cut:
             return {"passed": False, "checks": checks}
     except Exception as exc:
-        checks["prefix_stability"] = {"ok": False, "error": str(exc)[:300]}
+        checks["prefix_stability"] = {"ok": False, "error": _safe_error(exc)}
         return {"passed": False, "checks": checks}
 
     return {"passed": True, "checks": checks}

@@ -148,31 +148,48 @@ def _spawn_same_day_catchup(
         def _watch() -> None:
             import time as _time
 
-            waited = 0
-            while run_freeze.is_frozen() and waited < 7200:
-                _time.sleep(60)
-                waited += 60
-            if run_freeze.is_frozen():
-                logger.warning("same-day catchup abandoned: still frozen after 2h")
-                return
-            if market_now().date() != today:
-                return  # 跨日了，交给当日 cron/启动补偿
-            logger.info("same-day catchup: unfrozen, running daily update now")
-            try:
-                payload = daily_market_update_job(settings, data_service, force=force)
-            except Exception:
-                logger.exception("same-day catchup failed")
-                return
-            # 补跑 = 数据 + post-update pipeline（除权检测 + 指标重建）。
-            # loop-review-ds4f R1-P2-13：pipeline 的编排在 app/main.py
-            # （core 不得 import services），此前哨兵只调日更本体 → 顺延日
-            # 的 indicator_daily/trend_daily 整日缺失，且 main 的启动补偿看到
-            # last_ok==today 也不再补。回调由调用方注入（core 保持无 services 依赖）。
-            if after_update is not None:
+            # 预算内的"等解冻 → 补跑"循环。必须循环而非一次性（V2 复核实证）：
+            # 哨兵在解冻与日更的"检查再检查"之间可能被别的 run 重新冻结，此时
+            # 日更会再次顺延——旧写法直接调 after_update，会在**数据还没落地**
+            # 的情况下跑一次 pipeline（symbols=[] 的全池扫描），而当日 rebuild
+            # 再也不会发生。
+            remaining = 7200
+            while remaining > 0:
+                while run_freeze.is_frozen() and remaining > 0:
+                    _time.sleep(60)
+                    remaining -= 60
+                if run_freeze.is_frozen():
+                    logger.warning("same-day catchup abandoned: still frozen after 2h")
+                    return
+                if market_now().date() != today:
+                    return  # 跨日了，交给当日 cron/启动补偿
+                logger.info("same-day catchup: unfrozen, running daily update now")
                 try:
-                    after_update(payload)
+                    payload = daily_market_update_job(settings, data_service, force=force)
                 except Exception:
-                    logger.exception("same-day catchup post-update pipeline failed")
+                    logger.exception("same-day catchup failed")
+                    return
+                status = str(payload.get("status") or "")
+                if status == "deferred_backtest_running":
+                    # 又被冻结：回到等待（预算继续消耗），不跑 pipeline
+                    logger.info("same-day catchup: re-deferred, waiting again")
+                    continue
+                if status in ("skipped_already_running", "skipped_non_trading_day"):
+                    # 另一触发源正在/已经完成日更：pipeline 由那一侧负责，
+                    # 本哨兵不得叠加（V2 复核实证：旧写法会跑第二遍）
+                    logger.info("same-day catchup: %s — pipeline owned by the other trigger", status)
+                    return
+                # 补跑 = 数据 + post-update pipeline（除权检测 + 指标重建）。
+                # loop-review-ds4f R1-P2-13：pipeline 的编排在 app/main.py
+                # （core 不得 import services），此前哨兵只调日更本体 → 顺延日
+                # 的 indicator_daily/trend_daily 整日缺失。回调由调用方注入。
+                if after_update is not None:
+                    try:
+                        after_update(payload)
+                    except Exception:
+                        logger.exception("same-day catchup post-update pipeline failed")
+                return
+            logger.warning("same-day catchup abandoned: budget exhausted")
 
         _catchup_sentinel = threading.Thread(
             target=_watch, daemon=True, name="daily-update-catchup"

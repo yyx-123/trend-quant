@@ -144,6 +144,14 @@ def compute_tradability(
                     continue
                 key = str(_sym or "").strip().upper()
                 ser = raw_closes.get(key)
+                # **只在库里确实没有该日 bar 时**才并入（V1 复核实证：旧写法
+                # 会覆盖真实 bar——注入 10.01 即可把真实的 is_limit_up=True
+                # 翻成 False）。live 的用途本就是"EOD bar 尚未落库"，一旦
+                # 落库就该以库为准。
+                if ser is not None and _live_day in {
+                    pd.Timestamp(d).date() for d in ser.index
+                }:
+                    continue
                 if ser is None:
                     raw_closes[key] = pd.Series({_live_day: value})
                 else:
@@ -255,10 +263,13 @@ def compute_tradability(
                         continue
                     if not np.isfinite(f) or f <= 0:
                         continue
-                    # 第一根「日期严格晚于 E 且有 bar」的轴日 = 除权除息日
+                    # 第一根「日期严格晚于 E 且有 bar」的轴日 = 除权除息日。
+                    # **累乘**而非覆盖（V1 复核残留）：停牌跨越两个除权日时
+                    # 两个因子会落到同一根 bar 上，只取后者会让该日基准价
+                    # 偏高、产出假跌停（002129.SZ 真实库有 1 例，差异 0.24%）。
                     k = int(np.searchsorted(bar_ord, ex_ord, side="right"))
                     if k < bar_pos.size:
-                        f_ax[int(bar_pos[k])] = f
+                        f_ax[int(bar_pos[k])] *= f
         f_t = f_ax[run_idx]
 
         # 新股上市初期无涨跌幅限制（天数分板块/分时代，GLM53F-P2-17）

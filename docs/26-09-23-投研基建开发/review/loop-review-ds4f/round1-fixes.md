@@ -108,6 +108,75 @@
 
 ---
 
+## 验收（2 个独立子代理 + 主审复核）
+
+派 2 个独立验收代理，全部**反证式**核验（不看报告结论，自己在父提交上复现旧缺陷、
+在当前树证明新行为、并主动找反例）：
+
+### V1（4 项 P1 专项）
+
+**V1_VERDICT: PASS**。四项 P1 均在父提交（`c986ad1`）复现了缺陷、在当前树以
+真实数据/真实端到端路径证明修复：
+
+- **P1-1**：独立重导出"跌幅落在存储日次一根 bar"的分布（`f ≥ 1.05`：466 vs 0；
+  `f ≥ 1.15`：537 vs 0）；用 **`market_data_qfq` 与 `compute_qfq(raw, factors)`
+  逐值一致（最大相对差 0.0，12 只随机标的）** 反证 `core/adjustment.py` 的口径
+  自洽、不该动；真实库 1632 个交易日 × 874 标的逐格对照：去掉 366 个假涨停 +
+  462 个假跌停，"871 个分歧格中，raw 价与**旧**标记矛盾 871 次、与**新**标记
+  矛盾 0 次"；边界（多因子/相邻除权/停牌/E 非 bar 日/窗口外因子/脏因子）全过。
+- **P1-2**：38 种畸形窗口 × 3 条路径全部封堵；并给出"接受但正确标记触碰"与
+  "接受且**仍未**标记"的穷举结论（后者为空）。
+- **P1-3**：真实跑实验：父树 `bucket+abs_momentum` → `failed`；当前树 8 个内置
+  信号模块在 event/bucket 两侧全部 `evaluating`。
+- **P1-4**：货币口径逐调用点核对（`rule_backtest/engine.py`、`reports.py`、
+  `evaluations/backtest.py`、`head_to_head.py` 全传货币额），并确认**没有任何
+  消费方依赖旧的比率语义**（`web/`、`src/app/`、`src/trend_mcp/` 对 `turnover`
+  零引用）。
+
+### V2（P2/P3 + 回归专项）
+
+**V2_VERDICT: PASS（无阻断项）**。12 项 P2 全部行为性验证通过；并交叉证明
+"修复未引入回归"：walk_forward 的折窗口/拼接/Δ指标**逐位一致**（只有高原探针、
+PBO、费用/未成交可用性、告警这些**本就该变**的字段改变），无缺口面板的回测
+**逐位一致**，全量套件与基线一致；`data/backups/*.db`（修复前）与生产库对照
+证明 P2-9 的触发器定义**真的**传播到了存量库。
+
+### 复核发现的问题与本轮二次修复（全部已修 + 补钉）
+
+| # | 发现（来源） | 二次修复 |
+|---|---|---|
+| V1-多因子 | 停牌跨越两个除权日时两个因子落到同一根 bar 上，旧写法只留后者（真实库 1 例） | `f_ax[k] *= f`（累乘）；新增钉子 `test_tradability_multi_factor_on_one_bar_multiplies` |
+| V1/V2-注入面 | 新增的 `live_bars` 可**覆盖**真实的 as_of 日 bar；且经 `BoundGateway` 可达（模块可为自己伪造决策日行情） | ①只在库里确实没有该日 bar 时并入；②受限句柄对 `live_bars` 按越权拒绝并留痕；新增 2 条钉子 |
+| V1-live_overlay | `end=as_of` 是闭区间上界 → `tail(1)` 仍取到当日自己的 bar（我的修复不完整） | 上界改 `as_of - 1 日`；新增钉子（该钉子在实现里当场抓到我的一个 `date.date()` 崩溃 bug） |
+| V1-错误文案 | 模块门的 `checks[*]["error"]` 仍把异常原文经 `reject_reason` 回给 MCP | 在 `module_gate._safe_error` **源头**收口（只给异常类型），覆盖全部消费面 |
+| V2-哨兵竞态 | 顺延哨兵在 `skipped_already_running` 时仍调 pipeline（双跑）；被重新冻结时提前跑 pipeline 且当日 rebuild 永久丢失 | 哨兵改为"预算内循环 + 按 payload status 分支"：`deferred` 回等待、`skipped_*` 交还对方、成功才回调 |
+| V2-黑名单过宽 | `remove/write/loads/to_json/code` 等泛用名会误杀合法模块 | 黑名单收窄到进程/文件系统/序列化逃逸面；钉子补"泛用属性名不得被拒" |
+| V1/V2-空钉 | **5 条钉子是空钉**（`bucket` 账户桩 / 信号 ffill / plateau unknown / recompute 剔除 / estimate_stop 探针），另有 3 条半空 | 全部重写为驱动真实上下文/真实调用形态；`bucket` 的 `_ScanCtx` 提升为模块级 `BucketScanCtx`、plateau 告警抽 `plateau_warnings`、p 值抽 `permutation_p_value`、campaign 判据抽 `holdout_blocks_campaign`（可直测）；并做**变异反证**：18 项变异 18 项被抓住（见下） |
+| V2-parity | 旧界的"数量 100% 漂移"其实父树也会拦 → 该半条断言无区分度 | 改用**父树会吸收、修复后拒绝**的 60% 漂移 + 反向"一手内漂移必须归类" |
+| V2-只读视图 | `.base` 仍可写 → "拿不到可写句柄"的说法不实 | 注释如实降级为"防事故的减速带，非安全边界" |
+
+**变异反证结果**（把实现改坏 → 对应钉子必须失败）：18 项变异 **18/18 被抓住**
+（`bucket account=None`、`signal ffill off`、`warnings 重绑定`、`p_value isfinite 关掉`、
+`turnover 再除一次`、`heat_cap 拒绝无止损候选`、`parity 数量界回到旧公式`、
+`parity NAV 级联无界`、`除权基准左右界互换`、`多因子覆盖`、`holdout 字符串比较`、
+`window 入口校验关掉`、`plateau unknown 告警关掉`、`短分段塌陷否决放开`、
+`门 estimate_stop 探针关掉`、`recompute holdout 剔除关掉`、`verdict 强度序放开`、
+`哨兵 status 门关掉`）+ 追加 5 项（`live_bars 覆盖`、`受限句柄放行 live_bars`、
+`live_overlay 上界`、`多因子`、`parity 旧界`）。
+
+### 记录在案的残余风险（非阻断，V1/V2 一致认定）
+
+1. `heat_cap` 对"无止损估计的候选"放行 = 该候选**不受 cap 约束**（与 DS-R2 对
+   "组合热不可知"的裁决同口径，但确实是可绕过点）→ 建议进最终报告的待决策清单。
+2. 守卫触发器改为 `DROP`+`CREATE` 后，`executescript` 非事务：脚本中途因锁/IO
+   失败会留下"触发器缺席"。V2 已反证"列漂移导致 CREATE 失败"**不可达**（SQLite
+   不在 CREATE 时校验 WHEN 中的列，触发时才报错 = fail-closed），残余仅为极端
+   IO 失败；列运行期再评估。
+3. `tests/unit/test_db_path_anchoring.py` 以无参 `init_db()` 直接对生产库跑 DDL
+   （存量测试卫生问题，非本轮引入；行数未变）→ 记录，建议后续修测试夹具。
+4. `rerun_experiment` 复制 `spec_json` 时不重跑入口卡控（历史行的 window 格式
+   不被重新校验，但 holdout 侧 fail-closed 解析兜底）。
+
 ## 回归结果
 
 - **全量回归（主审人实跑，`pytest tests/ -q`）**：**1572 passed / 1 failed / 0 error**。
