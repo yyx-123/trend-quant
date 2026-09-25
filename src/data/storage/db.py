@@ -1227,6 +1227,32 @@ class Database:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
+            # 研究线内试次号唯一（R22B-F1）：attempt_index 是 DSR / 配对检验的
+            # 试验次数输入——历史上 COUNT 与 INSERT 分属两个连接，并发下发（MCP
+            # 并行 tool call / 双击 / shell 并行）会撞号，撞号 = 多重检验校正静默
+            # 失效，而该列在 append-only 保护列内**事后改不动**。新分配已在同一
+            # 立即事务内完成（research/experiments.py），这里加唯一索引兜底：
+            # 再撞号会当场报错，而不是继续污染试验计数。
+            # 存量库若已撞号（本改动前的并发写入产物），**不阻断启动**，把冲突
+            # 行列出来交人工处置（append-only 下平台自己也删不掉）。
+            try:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_research_experiments_line_attempt"
+                    " ON research_experiments(subject_key, attempt_index)"
+                    " WHERE is_reproduction = 0 AND status <> 'rejected_intake'"
+                )
+            except sqlite3.IntegrityError:
+                conflicts = conn.execute(
+                    """SELECT subject_key, attempt_index, GROUP_CONCAT(id) AS ids
+                       FROM research_experiments
+                       WHERE is_reproduction = 0 AND status <> 'rejected_intake'
+                       GROUP BY subject_key, attempt_index HAVING COUNT(*) > 1"""
+                ).fetchall()
+                _logger.error(
+                    "研究线内 attempt_index 撞号（无法建立唯一索引；该列 append-only，"
+                    "需人工处置）：%s", [tuple(r) for r in conflicts],
+                )
+
             # 2026-08 登录墙改造：users 表由明文密码迁移为 pbkdf2 哈希。
             # 旧库明文就在库里，直接读出重哈希即可，幂等（已哈希的行跳过）。
             rows = conn.execute("SELECT id, password FROM users").fetchall()

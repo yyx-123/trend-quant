@@ -652,7 +652,13 @@ def annotate_trade_display_metrics(
         trade = dict(raw)
         side = str(trade.get("side", "")).upper()
         if side == "BUY":
-            # 买入行不注入 holding_days（前端该列本就留空），保持载荷最小改动
+            # 仓位占比（R22A 观察项）：买入行此前前端硬编码"全仓"，而真实建仓
+            # 权重 = 市值 /（市值 + 建仓后现金）——整手取整与费用让它不是恰好 100%
+            # （实测首笔 99.94%），"全仓"是近似而非计算。字段由成交自身可算，
+            # 不额外依赖净值序列。
+            weight = _position_pct(trade)
+            if weight is not None:
+                trade["position_pct"] = weight
             open_buys.append(trade)
             out.append(trade)
             continue
@@ -678,6 +684,20 @@ def annotate_trade_display_metrics(
                     trade.update(_excursion_pct(candles, entry_idx, exit_idx, entry_price))
         out.append(trade)
     return out
+
+
+def _position_pct(trade: dict) -> float | None:
+    """建仓权重（%）= 建仓市值 /（建仓市值 + 建仓后现金）。取不到字段返回 None。"""
+    price = _as_float(trade.get("exec_price")) or _as_float(trade.get("price"))
+    qty = _as_float(trade.get("qty"))
+    cash_after = _as_float(trade.get("cash_after"))
+    if not price or price <= 0 or not qty or qty <= 0 or cash_after is None:
+        return None
+    value = price * qty
+    total = value + cash_after
+    if total <= 0:
+        return None
+    return value / total * 100.0
 
 
 def _as_float(value: object) -> float | None:

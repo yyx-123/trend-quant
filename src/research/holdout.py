@@ -130,6 +130,29 @@ def get_token(db, token_id: str) -> dict | None:
     return row_to_dict(row)
 
 
+def _token_covers_experiment(db, bound_experiment_id: str, experiment_id: str) -> bool:
+    """token 绑定的实验是否覆盖本次实验（相等，或沿复现链回溯到它）。
+
+    R22B-F4：只沿 `parent_experiment_id` 逐级回溯，且**只认复现链**
+    （当前实验 `is_reproduction=1`）——放行范围严格限定为"同一份 spec 的重跑"，
+    无关实验依旧被绑定检查拦住。
+    """
+    current = str(experiment_id or "")
+    bound = str(bound_experiment_id or "")
+    for _ in range(8):                      # 深度上限：防御异常 lineage 环
+        if not current or current == bound:
+            return bool(current) and current == bound
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT parent_experiment_id, is_reproduction FROM research_experiments WHERE id = ?",
+                (current,),
+            ).fetchone()
+        if row is None or not row["is_reproduction"] or not row["parent_experiment_id"]:
+            return False
+        current = str(row["parent_experiment_id"])
+    return False
+
+
 def list_tokens(db) -> list[dict]:
     with db.connect() as conn:
         rows = conn.execute("SELECT * FROM holdout_tokens ORDER BY id").fetchall()
@@ -161,7 +184,15 @@ def check_window(
     token = get_token(db, token_id)
     if token is None or token["consumed_at"] is not None:
         raise HoldoutError(f"invalid or consumed holdout token: {token_id}")
-    if token["experiment_id"] and experiment_id and token["experiment_id"] != experiment_id:
+    # R22B-F4：复现实验（is_reproduction=1）重跑的是**同一份 spec**——token 发给的
+    # 是"这件事"而不是某一个 id。严格按 id 绑定会让复现永远越不过样本外门
+    # （实测 E0008 拿过 token，复现 E0009 仍失败且 token 未被消费，白烧一次试次）。
+    # 沿 lineage 逐级回溯父实验即可（只放行复现链，不放行无关实验）。
+    if (
+        token["experiment_id"] and experiment_id
+        and token["experiment_id"] != experiment_id
+        and not _token_covers_experiment(db, token["experiment_id"], experiment_id)
+    ):
         raise HoldoutError(
             f"holdout token {token_id} is bound to experiment {token['experiment_id']}"
         )

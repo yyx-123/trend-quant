@@ -210,6 +210,13 @@ class ResearchService:
                 "suggested_verdict": None if latest is None else latest["suggested_verdict"],
                 "warnings": [] if latest is None else latest["warnings"],
                 "created_at": exp["created_at"],
+                # R22B-F9：检索面缺两项关键上下文——"这条结论是样本外验证过的吗"
+                # 与"这是复现还是一次新尝试"。工具文档要求 AI"先读台账再提假设"，
+                # 而它此前只能逐条 get_experiment 才看得到 holdout_touched；
+                # is_reproduction 两处模板都没出现（跨线复现会被当成新尝试读）。
+                "holdout_touched": bool(exp.get("holdout_touched")),
+                "is_reproduction": bool(exp.get("is_reproduction")),
+                "error": exp.get("error"),
             })
         return out
 

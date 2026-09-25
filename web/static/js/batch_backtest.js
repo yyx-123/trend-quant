@@ -105,7 +105,7 @@
     { key: 'excess_calmar', label: '超额卡玛', fmt: num2Signed },
     { key: 'win_rate', label: '胜率', fmt: pct },
     { key: 'profit_factor', label: '盈亏比', fmt: num2 },
-    { key: 'trade_count', label: '交易数', fmt: int },
+    { key: 'trade_count', label: '成交笔数', fmt: int },
     { key: 'avg_holding_days', label: '平均持仓', fmt: days1 },
     { key: 'avg_flat_days', label: '平均空仓', fmt: days1 },
     // 止损诊断平铺列（2026-08-30 方案 §3.1；旧批次未回填时为 NULL 显示 —）
@@ -1451,7 +1451,7 @@
       '总收益 ' + pct(d.total_return) + '｜年化 ' + pct(d.annual_return) +
       '｜超额 ' + pctSigned(d.excess_annual_return) +
       '｜最大回撤 ' + pct(d.max_drawdown) + '｜夏普 ' + num2(d.sharpe) +
-      '｜交易 ' + (d.trade_count == null ? '—' : d.trade_count) + ' 笔' +
+      '｜成交 ' + (d.trade_count == null ? '—' : d.trade_count) + ' 笔（买卖各计）' +
       '｜平均持仓 ' + days1(d.avg_holding_days) +
       '｜平均空仓 ' + days1(d.avg_flat_days);
 
@@ -1639,8 +1639,14 @@
       COMPARE_COLUMNS.forEach(function (c) {
         cells += '<td>' + esc(c.fmt(medB[c.key])) + '</td>';
       });
-      var delta = (medA.annual_return != null && medB.annual_return != null)
-        ? medB.annual_return - medA.annual_return : null;
+      // Δ 年化 = **逐格作差后取中位数**（与后端 compare_batches / /api/compare
+      // 同口径）——"两个中位数之差"在配对样本上会给出不同的数（实测 −0.97pp
+      // vs −1.74pp），且与前一行展示的 A/B 中位数不自洽。
+      var perPairDelta = s.pairs.map(function (p) {
+        return (p.a.annual_return != null && p.b.annual_return != null)
+          ? p.b.annual_return - p.a.annual_return : null;
+      }).filter(finiteOrNull);
+      var delta = median(perPairDelta);
       cells += '<td class="' + (delta > 0 ? 'batch-pos' : delta < 0 ? 'batch-neg' : '') + '">' +
         esc(pctSigned(delta)) + '</td>';
       tr.innerHTML = cells;

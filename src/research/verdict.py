@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from research import evaluations
 from research.errors import LifecycleError
+from research.evaluations.base import VERDICT_RANK
 from research.ledger import alloc_id, loads, row_to_dict, rows_to_dicts
 from research.lifecycle import require_experiment, transition
 
@@ -179,6 +180,17 @@ def confirm_verdict(
     # reasoning 是人工留痕，加长度上限（表单/接口层此前无任何限制）
     if len(reasoning) > 4000:
         raise LifecycleError("reasoning too long (max 4000 chars)")
+
+    # R22B-F7：非法枚举此前会被下游的"可降不可升"分支接住 → 报
+    # "final_verdict upgraded exceeds platform suggestion rejected (downgrade only)"，
+    # 模型会理解成"平台纪律不许升格"而去改实验设计，真因只是拼写/取值非法
+    # （CLI 侧由 argparse choices 挡住，两侧口径不一致；校验下沉到服务层才一致）。
+    final_verdict = str(final_verdict or "").strip()
+    if final_verdict not in VERDICT_RANK:
+        raise LifecycleError(
+            f"invalid final_verdict: {final_verdict!r} "
+            f"(allowed: {', '.join(VERDICT_RANK)})"
+        )
 
     module = evaluations.require_evaluation(exp["evaluation_module"])
     if not module.final_verdict_allowed(verdict["suggested_verdict"], final_verdict):

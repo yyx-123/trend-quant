@@ -401,15 +401,15 @@ def propose_experiment(
 
     # 骨架 5：attempt_index 平台赋值 = 同研究线（subject_key）已达入口的
     # 实验数 + 1（rejected_intake 未真正取证，不计入尝试次数）。
+    # **分配与写入必须同事务**（R22B-F1）：此前 COUNT 与 INSERT 各用一个连接，
+    # 并发下发（MCP 并行 tool call / 双击 / shell 并行）会读到同一份快照 →
+    # 多个真实验拿到同一个 attempt_index，而 DSR/配对检验正是拿它当试验次数
+    # （`stats/psr.py` 里 n_trials<=1 直接退化为 PSR(0)，多重检验校正失效），
+    # 且 attempt_index 在 append-only 保护列内、**事后不可修**。
+    # 这里先 `BEGIN IMMEDIATE` 拿写锁再 COUNT，INSERT 同事务提交（相等等待由
+    # busy_timeout=30s 兜底）；另加唯一索引兜底（见 db.py 的
+    # ux_research_experiments_line_attempt），撞号会当场报错而不是静默污染。
     subject_key = module.subject_key(spec or {}) if module is not None else ""
-    with db.connect() as conn:
-        row = conn.execute(
-            """SELECT COUNT(*) AS n FROM research_experiments
-               WHERE subject_key = ? AND status <> 'rejected_intake'
-                 AND is_reproduction = 0""",
-            (subject_key,),
-        ).fetchone()
-    attempt_index = int(row["n"] or 0) + 1
 
     if not reasons:
         exact_dupes, similar_dupes = find_duplicates(
@@ -432,6 +432,14 @@ def propose_experiment(
     reject_reason = "; ".join(reasons) if reasons else None
 
     with db.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM research_experiments
+               WHERE subject_key = ? AND status <> 'rejected_intake'
+                 AND is_reproduction = 0""",
+            (subject_key,),
+        ).fetchone()
+        attempt_index = int(row["n"] or 0) + 1
         exp_id = alloc_id(conn, "research_experiments", "E", width=4)
         conn.execute(
             """INSERT INTO research_experiments

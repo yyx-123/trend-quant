@@ -528,6 +528,12 @@ _ANNOTATION_STOP_FIELDS = (
     "current_atr",
     "highest_since_buy",
     "highest_since_buy_date",
+    # R22A-F4：棘轮档此前不在白名单里，看盘页画不出它——而棘轮是引擎的独立
+    # 出场条件（`rule_backtest.engine.STOP_EXIT_REASONS` 含 chandelier_stop_ratchet，
+    # 手工交易页也有三档卡）。缺它时"我的止损线"只取硬/吊灯较高者，当棘轮更高
+    # 时刻画的位置**低于**系统真正最早触发的价，给出"还没到止损"的错误安全感。
+    "chandelier_stop_ratchet_price",
+    "chandelier_stop_ratchet_triggered",
 )
 
 

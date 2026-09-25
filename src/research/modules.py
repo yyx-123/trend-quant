@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from research.errors import ResearchError
 from research.ledger import alloc_id, loads, row_to_dict, rows_to_dicts
@@ -99,20 +100,30 @@ def propose_module(
 
     with db.connect() as conn:
         draft_id = alloc_id(conn, "module_drafts", "M", width=4)
-        conn.execute(
-            """INSERT INTO module_drafts
-               (id, slot, name, version, kind, source, params_schema_json, status,
-                test_report_json, reject_reason, created_by, owner_session, reviewed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       CASE WHEN ? IN ('reviewed','rejected')
-                            THEN datetime('now','localtime') END)""",
-            (
-                draft_id, slot, name, version, kind, source,
-                json.dumps(params_schema or {}, ensure_ascii=False, sort_keys=True),
-                status, json.dumps(report, ensure_ascii=False, sort_keys=True),
-                reject_reason, session["kind"], session["session_id"], status,
-            ),
-        )
+        try:
+            conn.execute(
+                """INSERT INTO module_drafts
+                   (id, slot, name, version, kind, source, params_schema_json, status,
+                    test_report_json, reject_reason, created_by, owner_session, reviewed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           CASE WHEN ? IN ('reviewed','rejected')
+                                THEN datetime('now','localtime') END)""",
+                (
+                    draft_id, slot, name, version, kind, source,
+                    json.dumps(params_schema or {}, ensure_ascii=False, sort_keys=True),
+                    status, json.dumps(report, ensure_ascii=False, sort_keys=True),
+                    reject_reason, session["kind"], session["session_id"], status,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            # R22B-F3（P2）：上面的"先查重"与这里的 INSERT 之间有竞态（并发/超时
+            # 重试）——输家撞 UNIQUE(name,version) 时，**同一个业务条件**（"模块
+            # 已存在"）此前有两种口径：查重分支给可读文案，撞约束分支把 sqlite
+            # 异常冒到通道层 → MCP 回 "internal error (see server logs)"，模型
+            # 误判平台故障并盲目重试（实测命中）。约束冲突是业务结果，就地翻译。
+            if "module_drafts" in str(exc):
+                raise ResearchError(f"module already exists: {name}@{version}") from exc
+            raise
     return get_draft(db, draft_id)
 
 

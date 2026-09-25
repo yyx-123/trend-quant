@@ -69,6 +69,11 @@ def main() -> int:
                    help="复现实验入队后立即同步执行（R1-P3-10：纯 CLI 用法不再停在 queued）")
     p.add_argument("--token", default=None, help="holdout 放行 token（复现触碰样本外窗口时需要）")
 
+    p = sub.add_parser("run")
+    p.add_argument("experiment_id",
+                   help="派发一个已登记未派发的实验（propose-experiment 未加 --run 时）")
+    p.add_argument("--token", default=None, help="holdout 放行 token（触碰样本外窗口时需要）")
+
     p = sub.add_parser("recompute")
     p.add_argument("--old", dest="old_ref", required=True)
     p.add_argument("--new", dest="new_ref", required=True)
@@ -99,11 +104,26 @@ def main() -> int:
         print(json.dumps(topic, ensure_ascii=False))
         return 0
     if args.cmd == "propose-experiment":
+        # R22B-F8：CLI 侧此前直接把 json.loads 的结果透给服务层——spec 传成
+        # `[1,2]`/`"abc"` 时抛 AttributeError，被下面的 `except Exception` 当成
+        # 业务原因打印（`'list' object has no attribute 'get'`），而 MCP 侧同样
+        # 输入由 schema 挡住并给明确文案。这里先做类型校验，两侧口径一致。
+        try:
+            spec_obj = json.loads(args.spec)
+        except json.JSONDecodeError as exc:
+            print(json.dumps({"ok": False, "error": f"--spec 不是合法 JSON: {exc}"},
+                             ensure_ascii=False))
+            return 1
+        if not isinstance(spec_obj, dict):
+            print(json.dumps({"ok": False,
+                              "error": f"--spec 必须是 JSON 对象（收到 {type(spec_obj).__name__}）"},
+                             ensure_ascii=False))
+            return 1
         try:
             exp = service.propose_experiment(
                 session_id=session["session_id"], title=args.title or args.evaluation_module,
                 topic_id=args.topic, evaluation_module=args.evaluation_module,
-                spec=json.loads(args.spec), hypothesis=args.hypothesis,
+                spec=spec_obj, hypothesis=args.hypothesis,
                 allow_duplicate=args.allow_duplicate, auto_queue=False,
             )
         except Exception as exc:
@@ -114,16 +134,39 @@ def main() -> int:
                          ensure_ascii=False))
         if args.run:
             from core import run_freeze
-            from research.pipeline import run_experiment
+            from research.pipeline import run_experiment, run_result_envelope
 
             # 冻结写包裹（GLM53F-P2-11）：同步通道与 worker 同口径——run 期间
             # 日更写任务冻结，防"一次 run 读到两版 qfq"（决策 A3）
             with run_freeze.frozen_writes():
                 result = run_experiment(service.db, exp["id"], registry=service.registry,
                                         holdout_token=getattr(args, "token", None))
-            print(json.dumps({"status": result.get("status"),
-                              "suggested": (result.get("suggested_verdict"))}, ensure_ascii=False))
+            run_env = run_result_envelope(result)   # R22B-F2：统一信封 + 失败退出码
+            print(json.dumps(run_env, ensure_ascii=False))
+            return 0 if run_env["run_status"] == "ran" else 1
         return 0
+    if args.cmd == "run":
+        # R22B-F5：派发一个"已登记未派发"的实验（run=False 攒批后的"再跑"入口）
+        from core import run_freeze
+        from research.pipeline import run_experiment, run_result_envelope
+
+        exp = service.get_experiment(args.experiment_id)
+        if exp is None:
+            print(json.dumps({"ok": False, "error": f"experiment not found: {args.experiment_id}"},
+                             ensure_ascii=False))
+            return 1
+        if exp.get("status") != "queued":
+            print(json.dumps({"ok": False,
+                              "error": f"experiment {args.experiment_id} not queued"
+                                       f" (status={exp.get('status')})"}, ensure_ascii=False))
+            return 1
+        with run_freeze.frozen_writes():
+            result = run_experiment(service.db, args.experiment_id, registry=service.registry,
+                                    holdout_token=getattr(args, "token", None))
+        run_env = run_result_envelope(result)
+        print(json.dumps({"ok": True, "experiment_id": args.experiment_id, **run_env},
+                         ensure_ascii=False))
+        return 0 if run_env["run_status"] == "ran" else 1
     if args.cmd == "ledger":
         for row in service.search_ledger(
             subject_key=args.subject or None, topic_id=args.topic or None,
@@ -156,7 +199,7 @@ def main() -> int:
                "attempt_index": exp["attempt_index"]}
         if getattr(args, "run", False):
             from core import run_freeze
-            from research.pipeline import run_experiment
+            from research.pipeline import run_experiment, run_result_envelope
 
             try:
                 # R3C-P3-1（Round 3 复核）：与 propose --run / MCP 同步路径 /
@@ -167,11 +210,17 @@ def main() -> int:
                         holdout_token=getattr(args, "token", None),
                     )
             except Exception as exc:
+                out["run_status"] = "failed"
                 out["run_error"] = str(exc)
             else:
-                out["final_verdict"] = v.get("final_verdict")
+                # R22B-F2：成功/失败都用统一信封表达，"跑了但失败"不再伪装成成功
+                env = run_result_envelope(v)
+                out.update(env)
+                if env["run_status"] == "failed" and not out.get("run_error"):
+                    out["run_error"] = env.get("error")
+        failed = out.get("run_status") == "failed"
         print(json.dumps(out, ensure_ascii=False))
-        return 0
+        return 1 if failed else 0
     if args.cmd == "recompute":
         from core import run_freeze
 

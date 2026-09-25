@@ -110,18 +110,39 @@ def _ai_session(db, ctx=None):
     )
 
 
-def _run_or_queue(service, experiment_id: str) -> dict:
-    """有 worker 入队；无 worker 同步执行到 evaluating。"""
+def _run_or_queue(service, experiment_id: str, *, holdout_token: str | None = None) -> dict:
+    """有 worker 入队；无 worker 同步执行到 evaluating。
+
+    R22B-F2：同步分支返回**统一运行信封**（`run_status`/`verdict`/`error`）——
+    此前只取 `result.get("status")`，而成功返回的是 verdict 行（无 status 键）
+    → dispatch.status 恒为 null；失败时（如缺 holdout token）既无失败标记也
+    无原因，模型会把"run 失败"读成"已跑完"。
+
+    R22B-F4：MCP 此前完全没有 holdout 通路（工具签名里没有 token 位）——
+    fail-closed 本身没错，但代价是空烧一次试次；这里与 CLI 的 `--token` 对称。
+    """
     if service.worker is not None:
         queued = service.worker.submit(experiment_id)
         return {"mode": "queued", "queued": queued}
     from core import run_freeze
-    from research.pipeline import run_experiment
+    from research.pipeline import run_experiment, run_result_envelope
 
     # 冻结写包裹（GLM53F-P2-11）：同步通道与 worker 同口径（决策 A3）
     with run_freeze.frozen_writes():
-        result = run_experiment(service.db, experiment_id, registry=service.registry)
-    return {"mode": "sync", "status": result.get("status")}
+        result = run_experiment(
+            service.db, experiment_id, registry=service.registry,
+            holdout_token=holdout_token or None,
+        )
+    return {"mode": "sync", **run_result_envelope(result)}
+
+
+def _fresh_status(service, experiment_id: str, fallback: str = "") -> str:
+    """跑完之后读**库内真实状态**（R22B-F2）：顶层 status 此前是运行前的快照
+    （恒 `queued`），与实验行里真实的 `evaluating`/`failed` 矛盾。"""
+    exp = service.get_experiment(experiment_id)
+    if isinstance(exp, dict) and exp.get("status"):
+        return str(exp["status"])
+    return fallback
 
 
 def register_research_tools(mcp) -> None:
@@ -162,12 +183,17 @@ def register_research_tools(mcp) -> None:
         title: str = "",
         allow_duplicate: bool = False,
         run: bool = True,
+        holdout_token: str = "",
         ctx: Context = None,
     ) -> dict:
         """提实验（骨架校验不过即 rejected_intake 留痕并返回原因）。
 
         spec 形态见各评估模块说明；backtest 改进型 diff 恰一槽。
-        run=False 时只登记不入队（攒一批再跑）。
+        `run=False` 时只登记（不入队）；入队后再跑请用 `research_run_experiment`
+        （此前文档写"攒一批再跑"但没有任何派发入口，实验会停到进程重启）。
+        `holdout_token`：窗口触碰样本外时需要的放行 token（由人发放后
+        显式传入；不传则 fail-closed）。返回 `dispatch.run_status` 才是
+        **这次运行**的结果（`ok=true` 只表示实验对象已创建）。
         """
         service = _service()
         session = _ai_session(service.db, ctx)
@@ -180,8 +206,12 @@ def register_research_tools(mcp) -> None:
             )
         except Exception as exc:
             return _error_payload(exc)
-        dispatch = _run_or_queue(service, exp["id"]) if run else {"mode": "parked"}
-        return {"ok": True, "experiment_id": exp["id"], "status": exp["status"],
+        dispatch = (
+            _run_or_queue(service, exp["id"], holdout_token=holdout_token)
+            if run else {"mode": "parked"}
+        )
+        return {"ok": True, "experiment_id": exp["id"],
+                "status": _fresh_status(service, exp["id"], exp["status"]),
                 "attempt_index": exp["attempt_index"], "dispatch": dispatch}
 
     @mcp.tool()
@@ -249,8 +279,15 @@ def register_research_tools(mcp) -> None:
             return _error_payload(exc)
 
     @mcp.tool()
-    def research_rerun_experiment(experiment_id: str, run: bool = True, ctx: Context = None) -> dict:
-        """复现一个已到终态的实验（同 spec 同 attempt_index、不计尝试计数）。"""
+    def research_rerun_experiment(
+        experiment_id: str, run: bool = True, holdout_token: str = "",
+        ctx: Context = None,
+    ) -> dict:
+        """复现一个已到终态的实验（同 spec 同 attempt_index、不计尝试计数）。
+
+        `holdout_token`：原实验拿到的放行 token 直接传这里即可——复现是新 id，
+        按 id 自动带不出原 token（R22B-F4 已让其回溯 parent，显式传入更稳）。
+        """
         service = _service()
         session = _ai_session(service.db, ctx)
         try:
@@ -260,9 +297,38 @@ def register_research_tools(mcp) -> None:
             )
         except Exception as exc:
             return _error_payload(exc)
-        dispatch = _run_or_queue(service, exp["id"]) if run else {"mode": "parked"}
+        dispatch = (
+            _run_or_queue(service, exp["id"], holdout_token=holdout_token)
+            if run else {"mode": "parked"}
+        )
         return {"ok": True, "experiment_id": exp["id"],
+                "status": _fresh_status(service, exp["id"], exp.get("status", "")),
                 "attempt_index": exp["attempt_index"], "dispatch": dispatch}
+
+    @mcp.tool()
+    def research_run_experiment(experiment_id: str, ctx: Context = None) -> dict:
+        """执行一个**已登记但未派发**的实验（`run=False` 攒下来的那批）。
+
+        R22B-F5：文档一直承诺"攒一批再跑"，但此前除了 `run=True` 的同调用
+        派发与"进程启动补投"之外没有任何入口——实验停在 queued 直到应用
+        重启，而 `research_conclude_topic` 要求课题内无在途实验 → 一个 parked
+        实验会把关题卡死。这里补上与 CLI `run` 对称的显式派发入口。
+        """
+        service = _service()
+        try:
+            exp = service.get_experiment(experiment_id)
+            if exp is None:
+                return {"ok": False, "error": f"experiment not found: {experiment_id}"}
+            if exp.get("status") != "queued":
+                return {"ok": False,
+                        "error": f"experiment {experiment_id} not queued"
+                                 f" (status={exp.get('status')})"}
+            dispatch = _run_or_queue(service, experiment_id)
+        except Exception as exc:
+            return _error_payload(exc)
+        return {"ok": True, "experiment_id": experiment_id,
+                "status": _fresh_status(service, experiment_id, exp.get("status", "")),
+                "dispatch": dispatch}
 
     @mcp.tool()
     def research_promote_to_library(

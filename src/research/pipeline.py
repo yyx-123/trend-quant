@@ -68,6 +68,35 @@ def run_experiment(db, experiment_id: str, *, registry, holdout_token: str | Non
         return lifecycle.get_experiment(db, experiment_id)
 
 
+def run_result_envelope(result: dict) -> dict:
+    """把 `run_experiment` 的两种返回形态归一为统一信封（R22B-F2）。
+
+    `run_experiment` 成功返回 verdict 行（**无** `status` 键）、失败返回实验行
+    （**无** `suggested_verdict` 键）——两个通道此前各取一半：MCP 的 dispatch
+    只看 `status`（跑成功时恒为 null），CLI 打印 `{"status":…, "suggested":…}`
+    （失败时 suggested 为 null）且**退出码恒 0**，自动化调用方会把"run 失败"
+    读成"已受理/成功"，失败原因（如"需要 holdout token"）也拿不到。
+
+    信封字段：
+    - `run_status`：`ran`（跑到 evaluating）/ `failed`（工程失败，实验转 failed）
+    - `verdict`：平台建议（成功时）；`error`：失败原因（失败时）
+    - `experiment_status`：库内真实状态
+    """
+    if "suggested_verdict" in result:
+        return {
+            "run_status": "ran",
+            "experiment_status": result.get("status", "evaluating"),
+            "verdict": result.get("suggested_verdict"),
+            "error": None,
+        }
+    return {
+        "run_status": "failed",
+        "experiment_status": result.get("status", "failed"),
+        "verdict": None,
+        "error": result.get("error"),
+    }
+
+
 def _pick_unconsumed_token(db, experiment_id: str) -> str | None:
     """只自动带出**绑定本实验**的最早未消费 holdout token。
 
@@ -75,12 +104,25 @@ def _pick_unconsumed_token(db, experiment_id: str) -> str | None:
     （experiment_id IS NULL）不自动带出——它会被下一个触碰 holdout 的
     无关实验按 id 抢先消费，与发放意图可能不符；全局 token 须调用方
     显式透传（CLI --token / run_experiment(holdout_token=...)）。
+
+    R22B-F4：复现实验（`is_reproduction=1`）额外回溯 `parent_experiment_id`。
+    token 是发给"受权做这件事"的原实验的，而复现是新 id——只按新 id 查永远
+    查不到，于是 MCP 侧 rerun 空烧一次试次（实测 E0008 发过 token、复现 E0009
+    仍失败且 token 未消费）。
     """
     with db.connect() as conn:
         row = conn.execute(
-            """SELECT id FROM holdout_tokens
-               WHERE consumed_at IS NULL AND experiment_id = ?
-               ORDER BY id LIMIT 1""",
+            "SELECT parent_experiment_id, is_reproduction FROM research_experiments WHERE id = ?",
             (experiment_id,),
         ).fetchone()
-    return row["id"] if row else None
+        ids = [experiment_id]
+        if row is not None and row["is_reproduction"] and row["parent_experiment_id"]:
+            ids.append(str(row["parent_experiment_id"]))
+        placeholders = ", ".join("?" for _ in ids)
+        token = conn.execute(
+            f"""SELECT id FROM holdout_tokens
+                WHERE consumed_at IS NULL AND experiment_id IN ({placeholders})
+                ORDER BY id LIMIT 1""",
+            tuple(ids),
+        ).fetchone()
+    return token["id"] if token else None

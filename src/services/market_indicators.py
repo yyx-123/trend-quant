@@ -114,7 +114,15 @@ def compute_market_indicators(
         "lower": _series(boll_out["dn"]),
     }
 
-    macd_out = core_ind.macd(close, warmup=False)
+    # R22A-F6：此前用 warmup=False（图表口径），而**权威口径**是 warmup=True——
+    # `data/indicator_store` 写入 `indicator_daily.macd_dif/dea/hist` 与
+    # `core/indicators.detect_macd_phase`（看板相位/金叉家数）都用 True。同一标的
+    # 同一天因此有两个 MACD 值：长历史差在 1e-5 级（实测 875 标的 max|Δhist|=1.7e-5），
+    # 但**历史很短的标的**（<~100 根，如新发 ETF 551030.SS 只有 7 根）在 False 下
+    # 整段为 None → 看盘页 MACD 副图空白、金叉标记消失，而看板与相位判定都有值。
+    # `core/indicators.macd` 的注记本就写着"需要统一时应固定用同一种模式"，这里
+    # 统一到缓存/相位的权威口径。
+    macd_out = core_ind.macd(close, warmup=True)
     macd = {
         "dif": _series(macd_out["dif"]),
         "dea": _series(macd_out["dea"]),

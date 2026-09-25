@@ -242,6 +242,49 @@ def f0(fill: dict) -> str:
     return str(fill.get("fill_date") or fill.get("date") or "")
 
 
+def _trades_from_fills(
+    fills: list[dict], round_trips: list[dict] | None = None
+) -> list[dict]:
+    """把引擎成交（+回合）适配成 `compute_summary` 认的交易列表（R22A-F2）。
+
+    买卖各算一笔——与旧栈 `trade_count`（成交笔数）同口径，也与报告里印出的
+    成交明细行数一致；卖出笔的 `pnl` 取配对回合的净额（回测器内存侧是
+    `pnl_net`，引擎 round_trips 是 `pnl`，两套键名都接受）。取不到 pnl 的卖出
+    （例如期末未平仓或配对缺失）不写该键，`compute_summary` 会按 0 计入
+    胜率分母——与引擎"未平仓不计入"的语义接近，且不会伪造盈利。
+    """
+    pnl_by_exit: dict[tuple[str, str], float] = {}
+    for rt in round_trips or []:
+        if not isinstance(rt, dict):
+            continue
+        pnl = rt.get("pnl_net")
+        if pnl is None:
+            pnl = rt.get("pnl")
+        if pnl is None:
+            continue
+        pnl_by_exit[(str(rt.get("symbol", "")), str(rt.get("exit_date", ""))[:10])] = float(pnl)
+
+    trades: list[dict] = []
+    for fill in fills or []:
+        symbol = str(fill.get("symbol", ""))
+        side = str(fill.get("side", "")).upper()
+        trade = {
+            "date": f0(fill),
+            "symbol": symbol,
+            "side": side,
+            "qty": _fill_qty(fill),
+            "exec_price": _fill_price(fill),
+            "commission": float(fill.get("commission", 0.0) or 0.0),
+            "stamp_tax": float(fill.get("stamp_tax", 0.0) or 0.0),
+        }
+        if side == "SELL":
+            pnl = pnl_by_exit.get((symbol, str(trade["date"])[:10]))
+            if pnl is not None:
+                trade["pnl"] = pnl
+        trades.append(trade)
+    return trades
+
+
 def build_report(
     db,
     *,
@@ -261,9 +304,17 @@ def build_report(
     噪声——它们在**本函数重新从 NAV 派生**，不经过 L4 的退化闸门，于是原样进了
     持久化的 `full_run_report`（实测 summary.sharpe=6.1e12 + 394 条滚动 Sharpe
     噪声，并被 HTTP/物化产物原样发布）。这里对同一份 NAV 再判一次退化并清零。
+
+    R22A-F2（P2）：此前固定 `trades=[]` 喂 `compute_summary` → 报告里
+    `summary.trade_count/win_rate/profit_factor/avg_holding_days/total_commission`
+    全为 0，而**同一载荷**里 `evidence.trades=26`、`cost.total_fees=309.06`，
+    读者会据此得出"这笔实验没交易、没成本"的相反结论（落库 6 份产物）。核心函数
+    `compute_summary` 的零成交语义不动（GLM53F R1-D-5），改在调用侧把真实成交喂回去。
     """
     traded_total = _traded_amount(fills)
-    summary = compute_summary(nav_rows, trades=[], turnover_total=traded_total)
+    summary = compute_summary(
+        nav_rows, trades=_trades_from_fills(fills, round_trips), turnover_total=traded_total
+    )
     degenerate = is_degenerate_summary(nav_rows, summary)
     if degenerate:
         summary["sharpe"] = None

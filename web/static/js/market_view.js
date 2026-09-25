@@ -107,6 +107,8 @@
   let allMultiKline = [];        // [{strategy_id, strategy_name, buy_points, sell_points, skipped_buy_points}]
   let activeResultKey = null;    // which strategy's markers are shown on chart
   const SKIP_REASON_TEXT = {
+    // 与引擎 reason 码一一对应（新增码必须同步，否则页面显示英文枚举）
+    below_min_order: '低于最小申报数量',
     insufficient_cash: '现金不足',
   };
   let allSymbols = [];
@@ -488,16 +490,36 @@
     return Number.isFinite(n) ? String(n) : '-';
   }
 
-  // 止损线悬停文案：硬止损/吊灯止损各一行算式，最后一行给出取值规则
+  // 止损线悬停文案：硬止损/吊灯/棘轮各一行算式，最后一行给出取值规则。
+  // R22A-F4：棘轮（chandelier_stop_ratchet）是引擎的**独立出场条件**
+  // （rule_backtest.engine.STOP_EXIT_REASONS 含 chandelier_stop_ratchet，手工交易页
+  // 也有三档卡）。此前本页只算硬/吊灯两条 → 棘轮价更高时画出的"止损线"低于系统
+  // 真正最早触发的价，图上会给出"还没到止损"的错误安全感。
   function stopHoverText(t, s, effectivePrice) {
     const modeLabel = myStopMode === 'tight' ? '紧止损' : '松止损';
+    const ratchet = Number(s.chandelier_stop_ratchet_price);
     const lines = [
       `${modeLabel}线 = ${fmtExact(effectivePrice)} 元，说明：`,
       `硬止损 = 买入价 ${fmtExact(t.buy_price)} − ${s.hard_stop_atr_mul}×买入日ATR20 ${fmtExact(s.atr_at_buy)} = ${fmtExact(s.hard_stop_price)} 元`,
       `吊灯止损 = 买入以来最高价 ${fmtExact(s.highest_since_buy)}（${s.highest_since_buy_date || '-'}）− ${s.chandelier_stop_atr_mul}×当前ATR20 ${fmtExact(s.current_atr)} = ${fmtExact(s.chandelier_stop_price)} 元`,
-      `二者取价高者 ${fmtExact(effectivePrice)} 元作为${modeLabel}线`,
     ];
+    if (Number.isFinite(ratchet) && ratchet > 0) {
+      lines.push(`棘轮止损 = 买入以来最高价 − 棘轮倍数×ATR20 = ${fmtExact(ratchet)} 元${s.chandelier_stop_ratchet_triggered ? '（棘轮已触发过）' : ''}`);
+      lines.push(`三者取价高者 ${fmtExact(effectivePrice)} 元作为${modeLabel}线`);
+    } else {
+      lines.push(`二者取价高者 ${fmtExact(effectivePrice)} 元作为${modeLabel}线`);
+    }
     return lines.join('\n');
+  }
+
+  // 有效止损线 = 硬/吊灯/棘轮三档**取价高者**（与引擎"任一条件触发即离场"一致）
+  function effectiveStopPrice(stops) {
+    const candidates = [
+      stops.hard_stop_price,
+      stops.chandelier_stop_price,
+      stops.chandelier_stop_ratchet_price,
+    ].map(Number).filter((v) => Number.isFinite(v) && v > 0);
+    return candidates.length ? Math.max.apply(null, candidates) : null;
   }
 
   function myAnnotationSeries() {
@@ -515,9 +537,7 @@
       }
       const stops = t.stops && t.stops[myStopMode];
       if (t.status === 'open' && stops) {
-        const hard = Number(stops.hard_stop_price);
-        const chandelier = Number(stops.chandelier_stop_price);
-        const effective = Math.max(hard, chandelier);
+        const effective = effectiveStopPrice(stops);
         if (Number.isFinite(effective) && effective > 0) {
           stopLines.push({
             yAxis: effective,
@@ -1116,7 +1136,7 @@
             <th>卡玛比</th>
             <th>胜率</th>
             <th>盈亏比</th>
-            <th>交易数</th>
+            <th title="成交笔数（买入与卖出各计一笔）">成交笔数</th>
           </tr>
         </thead>
         <tbody>
@@ -1291,7 +1311,7 @@
         <th>夏普</th>
         <th>最大回撤</th>
         <th>卡玛比</th>
-        <th>交易数</th>
+        <th title="平仓回合数（一次买入→卖出计一笔；胜率/盈亏比的分母）">平仓笔数</th>
         <th>胜率</th>
         <th>盈亏比</th>
       </tr>
@@ -1353,9 +1373,13 @@
     debugPreviewEl.textContent = '';
   }
 
+  // 建仓权重由后端算好带出（R22A 观察项）：此前硬编码"全仓"，而整手取整 + 费用
+  // 让真实权重不是恰好 100%（实测 99.94%）；字段缺失时显示"—"而不是假精确的"全仓"。
   function positionPctCell(trade) {
     if (String(trade?.side || '').toUpperCase() !== 'BUY') return '';
-    return '<span class="text-muted">全仓</span>';
+    const pctValue = Number(trade?.position_pct);
+    if (!Number.isFinite(pctValue)) return '<span class="text-muted">—</span>';
+    return `${num(pctValue, 2)}%`;
   }
 
   function skippedTradeRow(skip) {

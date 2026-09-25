@@ -136,13 +136,18 @@ def test_recompute_exact_reference_matching(test_db, human_session, topic):
         ("E-内联", {"diff": [{"slot": "portfolio_risk", "to": ["heat_cap@1(0.06)"]}]}),
     ]
     with test_db.connect() as conn:
-        for eid, spec in rows:
+        # attempt_index 逐行递增：同研究线内试次号必须唯一（R22B-F1 的部分唯一索引
+        # ux_research_experiments_line_attempt 会拦重复——这三条是三条独立实验，
+        # 本来就该各有试次号，此前省略没被约束）。
+        for idx, (eid, spec) in enumerate(rows, start=1):
             conn.execute(
                 """INSERT INTO research_experiments
                    (id, title, owner_session, created_by, topic_id, evaluation_module,
-                    subject_key, spec_json, hypothesis, status)
-                   VALUES (?, ?, ?, 'human', ?, 'portfolio_backtest@1', 'k', ?, 'h', 'verdicted')""",
-                (eid, eid, human_session["session_id"], topic["id"], __import__("json").dumps(spec)),
+                    subject_key, spec_json, hypothesis, status, attempt_index)
+                   VALUES (?, ?, ?, 'human', ?, 'portfolio_backtest@1', 'k', ?, 'h',
+                           'verdicted', ?)""",
+                (eid, eid, human_session["session_id"], topic["id"],
+                 __import__("json").dumps(spec), idx),
             )
     hits = {item["id"] for item in rc.find_experiments_using(test_db, "stop@1")}
     assert "E-精确" in hits
