@@ -89,8 +89,28 @@ warnings；下游消费 → `conclusion`（FDR）、`_regime_split`（collapse �
 `evidence["degenerate_legs"]` + warnings；全部消费面 → summary/stats/滚动 Sharpe/
 regime 段/collapse 门/benchmark_relative（beta·alpha·capture）/head_to_head/PBO/课题 FDR。
 
+
+## Round 9 确认轮（第 6 次复发）与定稿修复
+
+R9 判 **NOT CLEAN**：退化腿类第 6 次复发——根因是**"判定有两条腿（NAV + Sharpe）、
+每个调用点都要记得传全"**，调用点一多必然漏。
+
+| # | 项 | 证据 | 修复（结构性收口） |
+|---|---|---|---|
+| **R9-1**（P2） | `build_report` 的闸门是**整序列**的，而滚动 Sharpe 的噪声是**窗口局部**的："前 300 日无成交、之后正常"的腿整序列 Sharpe 正常 → 闸门不触发，但落在无成交段里的窗口仍是 6.3e12 级 → 实测 **392 条**噪声窗口被持久化/发布 | 引擎精确复现（前缀 255/300/385/645 日 → 132/222/392/912 条噪声） | 新增 `_rolling_sharpe_gated`：**逐窗口**判退化并剔除（`is_degenerate_summary(窗口, 该窗口的 sharpe)`） |
+| **R9-2a**（P2） | `head_to_head` 的判据调用**没传 Sharpe 这条腿** → **合法可配置**的极小仓位腿（`weights`/`risk_budget_pct` 下限可达 1e-4 量级 → 年化 \|Sharpe\| 85~287）被判"未退化"，其噪声直接**双向翻转判定**（正常腿被 confirmed/rejected、ΔSharpe ±286、置信带 ±16~20） | 真 `run_head_to_head`（仅打桩数据源） | head_to_head 改走新入口 `is_degenerate_summary(rows, summary)` |
+| **R9-2b**（P3） | `benchmark_relative` 的 beta 守卫与 `_bench_degenerate` 同样只有相对腿 → 近失配基准给出 beta −195…−67,470、capture 46.9 | 引擎精确复现 | 用基准腿的**年化** Sharpe 走新入口；capture 与 beta/alpha 同闸 |
+| **定稿** | 判据入口结构性收口：`rule_backtest.metrics.is_degenerate_summary(nav_rows, summary)` 自动取两条腿（summary 缺 Sharpe 时**自行从 NAV 现算** `annualized_sharpe`）→ 调用点漏传在结构上不可能；`_nav_summary`/`head_to_head`/`build_report`/`benchmark_relative` 全部改走该入口；PBO 的逐块日频 Sharpe 先年化再比闸门 | — | 三条新钉子（两腿入口 / 逐窗口滚动 / 基准两腿） |
+
+**R9 同时确认（正面）**：独立复算 4 组（判据 128 序列 + 边界 10 例、build_report 40 组
+对 `ebcd0f6` 零差异、benchmark_relative 200 组零差异、PBO 40 组零差异）；**过拦截审计**：
+平台真实数据 200 只 ETF × 10117 个窗口的最大年化 \|Sharpe\| 为 **4.37**（20 日窗口最大
+19.07）→ 闸门 50 有 2.6~11 倍余量，当前数据上不可达（构造性 58.5 的合法序列会被排除
+——记为文档口径注记，非缺陷）；两轮全量零漂移（1647/1）；ruff 新增 0 条；`.tmp_*`
+未入库、工作树干净。
+
 ## 回归结果
 
-- 全量（Round 7 修复后终跑）：**1642 passed / 2 failed**（唯一失败为既有 Windows 临时文件 flake）；
+- 全量（Round 9 修复后终跑）：**1649 passed / 2 failed**（唯一失败为既有 Windows 临时文件 flake）；
 - 新增钉子：`tests/unit/test_loop_review_ds4f_r5.py` 8 项 + 三条守卫钉子（跨文件）；
 - ruff：`(file, rule)` 集合与基线**完全一致**（新增 0 条）。

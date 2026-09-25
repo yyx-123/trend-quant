@@ -205,9 +205,10 @@ def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict
     if turnover_total is None:
         summary["turnover"] = None
     # 退化判定（R5-P2-2 + R7-F1/F2）：统一走 _common.is_degenerate_leg
-    from research.evaluations._common import is_degenerate_leg, null_degenerate_metrics
+    from research.evaluations._common import null_degenerate_metrics
+    from rule_backtest.metrics import is_degenerate_summary
 
-    if is_degenerate_leg(nav_rows, sharpe=summary.get("sharpe")):
+    if is_degenerate_summary(nav_rows, summary):
         null_degenerate_metrics(summary)
     return summary
 

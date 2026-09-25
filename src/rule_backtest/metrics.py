@@ -67,8 +67,43 @@ DEGENERATE_SHARPE_ABS_LIMIT = 50.0
 DEGENERATE_REL_TOL = 1e-6
 
 
+def annualized_sharpe(nav_rows) -> float | None:
+    """NAV 序列的年化 Sharpe（judge 的幅值闸门以**年化**口径为准）。"""
+    eq = [float(r["equity"]) for r in (nav_rows or []) if r.get("equity") is not None]
+    if len(eq) < 3:
+        return None
+    rets = [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq)) if eq[i - 1]]
+    if len(rets) < 2:
+        return None
+    mean_r = sum(rets) / len(rets)
+    var = sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1)
+    if var <= 0:
+        return None
+    return mean_r / (var ** 0.5) * (252 ** 0.5)
+
+
+def is_degenerate_summary(nav_rows, summary: dict | None) -> bool:
+    """**唯一推荐的判据入口**：腿的 NAV + 它的摘要（含 sharpe）。
+
+    R9 复核（第 6 次复发）的根因是"判定有两条腿、每个调用点都要记得传全"——
+    调用点一多就漏。本函数把"NAV + Sharpe 两条腿"打包成一次调用，并**自行
+    从 NAV 现算 Sharpe**（不依赖调用方是否传对），使漏传在结构上不可能。
+    """
+    sharpe = None
+    if isinstance(summary, dict) and summary.get("sharpe") is not None:
+        sharpe = summary.get("sharpe")
+    elif isinstance(summary, (int, float)):
+        sharpe = float(summary)
+    if sharpe is None:
+        sharpe = annualized_sharpe(nav_rows)
+    return is_degenerate_nav(nav_rows, sharpe=sharpe)
+
+
 def is_degenerate_nav(nav_rows, *, sharpe: float | None = None) -> bool:
-    """该 NAV 序列是否退化（指标不可用）。``sharpe`` 给了就一并做幅值闸门。"""
+    """该 NAV 序列是否退化（指标不可用）。``sharpe`` 给了就一并做幅值闸门。
+
+    调用方优先用 :func:`is_degenerate_summary`（自动取 NAV + Sharpe 两条腿）。
+    """
     import math
 
     if sharpe is not None and (

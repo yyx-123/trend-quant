@@ -169,7 +169,10 @@ def test_pbo_zero_when_dominant_strategy():
     """策略 0 在每个区块都最优 → PBO = 0（无过拟合迹象）。"""
     rng = np.random.default_rng(2)
     base = rng.normal(0, 0.01, (160, 4))
-    dominant = base[:, :1] + 0.05  # 同一噪声 + 恒正漂移 → 处处最优
+    # 同一噪声 + **真实量级**的恒正漂移 → 处处最优。漂移取 0.006/日（年化
+    # Sharpe ≈ 9.5，落在诚实区间内；0.05/日 会给出 ≈127 的年化 Sharpe，属
+    # "不可能存在的序列"，会被退化闸门（|sharpe|>50）正确地排除）
+    dominant = base[:, :1] + 0.006
     matrix = np.hstack([dominant, base[:, 1:]])
     out = pbo_cscv(matrix, n_blocks=8)
     assert out["n_combinations"] == 70

@@ -118,5 +118,9 @@ def _sharpe_vec(x: np.ndarray) -> np.ndarray:
     std = np.nanstd(x, axis=0, ddof=1)
     with np.errstate(all="ignore"):
         sharpe = np.where(std > 0, mean / std, 0.0)
-    degenerate = (std <= np.abs(mean) * 1e-6) | (np.abs(sharpe) > _SHARPE_ABS_LIMIT)
+    # 闸门是**年化**口径（50）——这里 sharpe 是逐块的日频口径，先年化再比
+    annualized = sharpe * (252.0 ** 0.5)
+    degenerate = (std <= np.abs(mean) * 1e-6) | (
+        np.abs(annualized) > _SHARPE_ABS_LIMIT
+    )
     return np.where(degenerate, np.nan, sharpe)

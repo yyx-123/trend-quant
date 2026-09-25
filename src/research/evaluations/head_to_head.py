@@ -126,7 +126,7 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
     psr_ab = _psr(sr_a, sr_b, len(ra), skew_a, kurt_a)
 
     from rule_backtest.metrics import compute_summary
-    from research.evaluations._common import is_degenerate_leg, long_window_annotations
+    from research.evaluations._common import long_window_annotations
 
     # R1-P2-5：换手不得报假 0（DS-P1-3 同类残留）——两条腿都落了 engine_runs，
     # 按 fills 实算成交总额。
@@ -144,10 +144,14 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
     # 日收益只有计息浮点残差）时 Sharpe 是噪声（实测 ≈6e12），作差会把正常腿判成
     # rejected。这里同样判定退化并显式标注，绝不让噪声决定判定。
     _degenerate_legs = []
+    # R9-2a（第 6 次复发）：必须走"NAV + Sharpe"两条腿——只传 NAV 时，**合法可配置**
+    # 的极小仓位腿（weights/risk_budget_pct 下限可达 1e-4 量级 → |sharpe| 85~287）
+    # 会被判"未退化"，其噪声直接翻转判定（实测 confirmed/rejected 双向翻转）
+    from rule_backtest.metrics import is_degenerate_summary
+
     for _name, _summary in (("a", summary_a), ("b", summary_b)):
-        # 传给退化判据的必须是**行字典序列**（不是 float 列表）——judge 读 r["equity"]
         _rows = result_a["daily_nav"] if _name == "a" else result_b["daily_nav"]
-        if is_degenerate_leg(_rows):
+        if is_degenerate_summary(_rows, _summary):
             _degenerate_legs.append(_name)
     _degenerate = bool(_degenerate_legs)
     if _degenerate:

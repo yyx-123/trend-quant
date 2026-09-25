@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from rule_backtest.metrics import compute_summary, is_degenerate_nav
+from rule_backtest.metrics import compute_summary, is_degenerate_summary
 
 
 def daily_returns(nav_rows: list[dict]) -> pd.Series:
@@ -40,11 +40,18 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
         return {}
     p, b = joined["p"].to_numpy(), joined["b"].to_numpy()
     var_b = float(np.var(b, ddof=1))
+    # R9-2b：判定必须走"NAV + 年化 Sharpe"两条腿（此前只做相对方差判定，
+    # 近失配带的基准（|sharpe| 数百）仍会给出 beta=-195…-67470 / capture=46.9）
+    _bench_sharpe = (
+        float(np.mean(b) / np.std(b, ddof=1) * np.sqrt(252.0))
+        if len(b) > 1 and np.std(b, ddof=1) > 0 else None
+    )
+    _bench_degenerate = is_degenerate_summary(bench_nav_rows, _bench_sharpe)
     # R7-F2 连带：基准腿若是"平坦"序列（零成交/全现金，方差只有浮点残差），
     # beta 会爆成 1e12 级噪声 —— 以相对方差为门槛，退化即记 None（不可用），
     # 而不是除以一个噪声方差。
     _b_scale = max(abs(float(np.mean(b))), 1e-12)
-    if var_b > (_b_scale * 1e-6) ** 2:
+    if not _bench_degenerate and var_b > (_b_scale * 1e-6) ** 2:
         beta = float(np.cov(p, b, ddof=1)[0, 1] / var_b)
         alpha_daily = float(p.mean() - beta * b.mean())
     else:
@@ -57,7 +64,6 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
     down = b < 0
     # R8 复核（P3）：退化基准（零成交/全现金）下的 up/down capture 是"除以噪声均值"
     # 的无意义比值（实测 11.4）——与 beta/alpha 同口径：退化腿整组记 None
-    _bench_degenerate = is_degenerate_nav(bench_nav_rows)
     _up_mean = float(b[up].mean()) if up.any() else 0.0
     _down_mean = float(b[down].mean()) if down.any() else 0.0
     up_capture = (
@@ -77,6 +83,25 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
         "up_capture": up_capture,
         "down_capture": down_capture,
     }
+
+
+def _rolling_sharpe_gated(nav_rows: list[dict], window: int) -> list[dict]:
+    """滚动 Sharpe（**逐窗口**剔除退化值，R9-1）。
+
+    整序列标记抓不住"无成交前缀"：前 N 日只有计息时，落在那段里的滚动窗口仍是
+    1e12 级浮点噪声，而整序列 Sharpe 正常（实测 392 条噪声窗口）。
+    """
+    from rule_backtest.metrics import is_degenerate_summary
+
+    series = rolling_sharpe(nav_rows, window)
+    out: list[dict] = []
+    for point in series:
+        hist = [r for r in nav_rows if str(r.get("date")) <= str(point.get("date"))]
+        hist = hist[-window:] if len(hist) > window else hist
+        if is_degenerate_summary(hist, point):
+            continue
+        out.append(point)
+    return out
 
 
 def rolling_sharpe(nav_rows: list[dict], window: int = 126) -> list[dict]:
@@ -226,13 +251,10 @@ def build_report(
     持久化的 `full_run_report`（实测 summary.sharpe=6.1e12 + 394 条滚动 Sharpe
     噪声，并被 HTTP/物化产物原样发布）。这里对同一份 NAV 再判一次退化并清零。
     """
-    from rule_backtest.metrics import is_degenerate_nav
-
     traded_total = _traded_amount(fills)
     summary = compute_summary(nav_rows, trades=[], turnover_total=traded_total)
-    degenerate = is_degenerate_nav(nav_rows)
-    if degenerate or is_degenerate_nav(nav_rows, sharpe=summary.get("sharpe")):
-        degenerate = True
+    degenerate = is_degenerate_summary(nav_rows, summary)
+    if degenerate:
         summary["sharpe"] = None
         summary["sortino"] = None
         summary["degenerate_leg"] = True
@@ -251,9 +273,11 @@ def build_report(
         "run_id": run_id,
         "summary": summary,
         "benchmark_relative": bench_rel,
-        # R8：退化腿的滚动 Sharpe 是同一份噪声（此前原样持久化 394+268 条）
-        "rolling_sharpe_6m": [] if degenerate else rolling_sharpe(nav_rows, 126),
-        "rolling_sharpe_12m": [] if degenerate else rolling_sharpe(nav_rows, 252),
+        # R8/R9：滚动 Sharpe 的噪声是**窗口局部**的——"前 N 日无成交、之后正常"
+        # 的腿整序列 Sharpe 正常，但落在无成交段里的窗口仍是 1e12 级噪声
+        # （实测 392 条）。因此**逐窗口**判退化并剔除，而不是靠整序列标记。
+        "rolling_sharpe_6m": _rolling_sharpe_gated(nav_rows, 126),
+        "rolling_sharpe_12m": _rolling_sharpe_gated(nav_rows, 252),
         "drawdown_durations": drawdown_durations(nav_rows),
         "return_distribution": return_distribution(nav_rows),
         "cost": cost_drag(fills),

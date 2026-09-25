@@ -339,3 +339,81 @@ def test_capture_ratios_refuse_noise_denominators():
     out = benchmark_relative(nav, flat)
     assert out["up_capture"] is None and out["down_capture"] is None, out
     assert out["beta"] is None and out["alpha_annual"] is None
+
+
+# ----------------------------------------------------------------------
+# R9 复核后的定稿钉子：判据必须**两条腿**都看（NAV + Sharpe），且窗口局部生效
+# ----------------------------------------------------------------------
+
+
+def test_judge_entry_point_takes_both_legs():
+    """R9-2a：`is_degenerate_summary` 必须自行从 NAV 现算 Sharpe——调用点漏传
+    不再可能（此前 5 个调用点里 2 个只传 NAV，合法可配置的极小仓位腿
+    （|sharpe| 85~287）被判"未退化"并翻转判定）。"""
+    from rule_backtest.metrics import (
+        annualized_sharpe,
+        is_degenerate_nav,
+        is_degenerate_summary,
+    )
+
+    # 极小仓位腿：日收益 ≈ 1e-4 量级 + 小幅波动 → 年化 Sharpe 数百
+    eq = 1e6
+    rows = []
+    for i in range(200):
+        eq *= 1.0 + (2e-4 + (2e-5 if i % 2 else -2e-5))
+        rows.append({"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}", "equity": eq})
+    sharpe = annualized_sharpe(rows)
+    assert sharpe is not None and abs(sharpe) > 50, sharpe
+    # 只传 NAV（相对判据）：漏判；走新入口（两条腿）：抓住
+    assert is_degenerate_nav(rows) is False
+    assert is_degenerate_summary(rows, None) is True
+    assert is_degenerate_summary(rows, {"sharpe": sharpe}) is True
+    # 诚实序列不得被误杀
+    normal = [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+               "equity": 1e6 * (1.004 if i % 2 else 0.997)} for i in range(60)]
+    assert is_degenerate_summary(normal, None) is False
+
+
+def test_rolling_sharpe_is_gated_per_window():
+    """R9-1：滚动 Sharpe 的噪声是**窗口局部**的——"前 N 日无成交、之后正常"
+    的腿整序列 Sharpe 正常，但落在无成交段里的窗口仍是 1e12 级噪声
+    （实测 392 条曾被持久化）。"""
+    from portfolio.reports import _rolling_sharpe_gated, build_report
+    from rule_backtest.metrics import is_degenerate_nav
+
+    equity = 1e6
+    rows = []
+    for i in range(420):
+        if i < 300:  # 前 300 日无成交：只有计息
+            equity *= 1.0 + 0.01 / 252.0
+        else:
+            equity *= 1.004 if i % 2 else 0.997
+        rows.append({"date": f"{2010 + i // 250}-{1 + (i % 250) // 28:02d}-"
+                             f"{1 + (i % 250) % 28:02d}", "equity": equity})
+    assert is_degenerate_nav(rows) is False, "整序列 Sharpe 正常（这正是漏判的原因）"
+    gated6 = _rolling_sharpe_gated(rows, 126)
+    assert all(p["sharpe"] is not None and abs(p["sharpe"]) < 1e3 for p in gated6), \
+        "落在无成交段的滚动窗口必须被剔除"
+    report = build_report(None, run_id="R-roll", nav_rows=rows, fills=[],
+                          unfilled=[], gate_log=[])
+    assert all(abs(p["sharpe"]) < 1e3 for p in report["rolling_sharpe_6m"]), \
+        "持久化的滚动 Sharpe 不得含 1e12 级噪声"
+    assert all(abs(p["sharpe"]) < 1e3 for p in report["rolling_sharpe_12m"])
+
+
+def test_benchmark_relative_judges_both_legs():
+    """R9-2b：基准的近失配噪声（年化 Sharpe 数百）也必须判退化——
+    此前只做相对方差判定，仍给出 beta=-195…-67470、capture=46.9。"""
+    from portfolio.reports import benchmark_relative
+
+    nav = [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+            "equity": 1e6 * (1.004 if i % 2 else 0.997)} for i in range(120)]
+    # 近失配基准：日收益 2e-4 ± 2e-5（std/|mean| = 1e-1，纯相对判据漏判）
+    eq = 1e6
+    near = []
+    for i in range(120):
+        eq *= 1.0 + (2e-4 + (2e-5 if i % 2 else -2e-5))
+        near.append({"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}", "equity": eq})
+    out = benchmark_relative(nav, near)
+    assert out["beta"] is None and out["alpha_annual"] is None, out
+    assert out["up_capture"] is None and out["down_capture"] is None, out
