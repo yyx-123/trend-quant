@@ -124,6 +124,15 @@ def test_freeze_gate_applies_even_for_force(test_db, monkeypatch):
     并留 job_runs 痕（真调用 job 函数，不再是重言式）。"""
     from core import jobs, run_freeze
 
+    # 顺延后挂的当日补跑哨兵是**真线程**（R21-巡-1）：它比本测试活得久，
+    # monkeypatch 解除后会看到"已解冻"→ 真跑一次日更并长期占用
+    # `jobs._catchup_sentinel` 单例，后续 test_review_r3 的哨兵钉子 join 到它
+    # 就永远等不到退出（实测整目录跑必红、单跑全绿）。哨兵本身另有专项钉子
+    # （tests/unit/test_loop_review_ds4f_r2.py::test_catchup_sentinel_does_not_hot_spin），
+    # 这里只钉"是否请求了挂哨兵"。
+    spawned: list = []
+    monkeypatch.setattr(jobs, "_spawn_same_day_catchup", lambda *a, **kw: spawned.append(a))
+
     monkeypatch.setattr(jobs, "is_trading_day", lambda d: True)
     monkeypatch.setattr(run_freeze, "is_frozen", lambda: True)  # 恒冻结 → 超时顺延
     monkeypatch.setattr("time.sleep", lambda s: None)           # 等待循环快进
@@ -135,6 +144,7 @@ def test_freeze_gate_applies_even_for_force(test_db, monkeypatch):
     assert payload["status"] == "deferred_backtest_running"
     row = test_db.get_latest_job_run("daily_update_deferred")
     assert row is not None and row["status"] == "deferred_backtest_running"
+    assert spawned, "顺延必须请求挂当日补跑哨兵（否则当日 EOD/指标重建整天空转）"
 
 
 # ----------------------------------------------------------------------

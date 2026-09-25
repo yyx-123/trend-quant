@@ -42,10 +42,18 @@ def _error_payload(exc: Exception) -> dict:
     # 到可读解释。这里把它们与 ResearchError 同口径暴露。
     try:
         from portfolio.library import LibraryError
+        from portfolio.registry import ModuleRegistrationError
         from portfolio.service import ServiceError
+        from portfolio.strategy import StrategyConfigError
     except Exception:  # pragma: no cover - 导入失败时不改变兜底行为
         LibraryError = ServiceError = ()  # type: ignore[assignment]
-    if isinstance(exc, (LibraryError, ServiceError)):
+        StrategyConfigError = ModuleRegistrationError = ()  # type: ignore[assignment]
+    # R21B-P2-2：晋升/载入路径抛的是 StrategyConfigError / ModuleRegistrationError
+    # （都是 ValueError 家族的业务错误）——此前不在白名单里 → MCP 返回
+    # "internal error (see server logs)"，而 CLI 同调用给真实原因（如
+    # "position_risk: param atr_mul: -1.0 < min 0.1"）→ 模型会误判成平台故障并盲目重试。
+    if isinstance(exc, (LibraryError, ServiceError, StrategyConfigError,
+                        ModuleRegistrationError)):
         return {"ok": False, "error": str(exc)}
     logger.exception("research tool internal error")
     return {"ok": False, "error": "internal error (see server logs)"}

@@ -610,6 +610,103 @@ def sanitize_ratio_metrics(summary: dict | None) -> dict:
     return out
 
 
+def annotate_trade_display_metrics(
+    trades: list[dict] | None,
+    *,
+    nav_dates: list | None = None,
+    bar_dates: list | None = None,
+    candles: list | None = None,
+) -> list[dict]:
+    """给成交明细补上展示字段：`holding_days` / `return_pct` / `max_profit_pct` / `max_drawdown_pct`（返回副本）。
+
+    为什么必须在**回测自身的日线**上算：浏览器只拿得到 slim 结果（`daily_nav` /
+    `charts` 在传输时被剥掉，见 `service.slim_backtest_result`），所以这些列曾在
+    前端用**屏幕上那根 K 线**的 payload 现算——切周/月 K 或图表区间与回测区间不
+    重合时，持有区间会静默错位（实测月 K 下持有天数 2/3/3 对 引擎 44/60/60、
+    最大浮盈 0.5% 对 6.05%），算不出来时还会退化成自然日天数。口径搬到这里后
+    与 `compute_summary` 的 `avg_holding_days` 同源（净值下标差），前端只负责显示。
+
+    口径：
+    - `holding_days`：`daily_nav` 下标差（交易日）；缺净值序列时回退 `bar_dates` 下标差；
+      两端任一缺失 → `None`（前端显示 "-"，**不**回退自然日，那是另一种口径）。
+    - `return_pct`：`pnl / (买入成交价 × 股数 + 买入佣金)`，与旧前端公式一致。
+    - `max_profit_pct` / `max_drawdown_pct`：持有区间（含入场与出场两根 bar）内
+      对买入成交价的最高浮盈、以及以持有期高点为峰值的最大回撤（负数）。
+    """
+    out: list[dict] = []
+    open_buys: list[dict] = []
+    nav_index = {str(day)[:10]: i for i, day in enumerate(nav_dates or [])}
+    bar_index = {str(day)[:10]: i for i, day in enumerate(bar_dates or [])}
+
+    def _idx(day: object) -> int | None:
+        key = str(day or "")[:10]
+        if not key:
+            return None
+        if key in nav_index:
+            return nav_index[key]
+        return bar_index.get(key)
+
+    for raw in trades or []:
+        if not isinstance(raw, dict):
+            continue
+        trade = dict(raw)
+        side = str(trade.get("side", "")).upper()
+        if side == "BUY":
+            # 买入行不注入 holding_days（前端该列本就留空），保持载荷最小改动
+            open_buys.append(trade)
+            out.append(trade)
+            continue
+        if side != "SELL":
+            out.append(trade)
+            continue
+
+        entry = open_buys.pop(0) if open_buys else None
+        trade["holding_days"] = None
+        if entry is not None:
+            entry_idx, exit_idx = _idx(entry.get("date")), _idx(trade.get("date"))
+            if entry_idx is not None and exit_idx is not None and exit_idx >= entry_idx:
+                trade["holding_days"] = int(exit_idx - entry_idx)
+
+            entry_price = _as_float(entry.get("exec_price")) or _as_float(entry.get("price"))
+            qty = _as_float(entry.get("qty")) or _as_float(trade.get("qty"))
+            pnl = _as_float(trade.get("pnl"))
+            if entry_price and entry_price > 0 and qty and qty > 0:
+                cost = entry_price * qty + (_as_float(entry.get("commission")) or 0.0)
+                if cost > 0 and pnl is not None:
+                    trade["return_pct"] = pnl / cost * 100.0
+                if candles and entry_idx is not None and exit_idx is not None and exit_idx >= entry_idx:
+                    trade.update(_excursion_pct(candles, entry_idx, exit_idx, entry_price))
+        out.append(trade)
+    return out
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _excursion_pct(
+    candles: list, entry_idx: int, exit_idx: int, entry_price: float
+) -> dict:
+    """持有区间的最高浮盈与峰值回撤（`candles` 为 [open, close, low, high]）。"""
+    max_profit = 0.0
+    peak = entry_price
+    max_drawdown = 0.0
+    for i in range(entry_idx, min(exit_idx, len(candles) - 1) + 1):
+        bar = candles[i] or []
+        high = _as_float(bar[3]) if len(bar) > 3 else None
+        low = _as_float(bar[2]) if len(bar) > 2 else None
+        if high and high > 0:
+            max_profit = max(max_profit, (high - entry_price) / entry_price * 100.0)
+            peak = max(peak, high)
+        if low and low > 0 and peak > 0:
+            max_drawdown = max(max_drawdown, (peak - low) / peak * 100.0)
+    return {"max_profit_pct": max_profit, "max_drawdown_pct": -max_drawdown}
+
+
 def sanitize_annual_blocks(blocks: list[dict] | None) -> list[dict]:
     """年度块的**幅值闸门**（写入面与读取面共用）：不可能的比值型指标置 None。
 

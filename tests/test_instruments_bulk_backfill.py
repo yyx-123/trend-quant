@@ -241,7 +241,10 @@ class BulkBackfillJobManagerTest(unittest.TestCase):
 
 class InstrumentAddJobManagerTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors：加标的回填跑在后台线程，线程内的 sqlite 句柄
+        # 会活到 tearDown 之后（Windows 上删临时库报 WinError 32）。HEAD 基线
+        # 同样红，属环境差异而非断言失败——不要把删除失败伪装成用例失败。
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp_path = Path(self.tmp.name)
         init_db(self.tmp_path / "test.db")
         get_db().save_instrument_categories(

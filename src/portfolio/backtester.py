@@ -140,10 +140,15 @@ def heat_cap_of(config) -> float:
     导致非默认 cap 的 run 拿到"与配置矛盾"的告警数字（实测 cap=12% 时
     仍写 6%、111/242 天与 5.35×，真值为 50/242 与 2.68×）。
     """
-    for g in getattr(config, "gates", ()) or ():
-        if (getattr(g, "module", "") or "").startswith("heat_cap"):
-            return float((getattr(g, "params", None) or {}).get("max_heat_pct", 0.06))
-    return 0.06
+    caps = [
+        float((getattr(g, "params", None) or {}).get("max_heat_pct", 0.06))
+        for g in (getattr(config, "gates", ()) or ())
+        if (getattr(g, "module", "") or "").startswith("heat_cap")
+    ]
+    # 多门时取**约束最紧**的那条（R21A-F3）：实际生效的是 min（准入时每个门都卡控），
+    # 取第一个会把告警整条抑制（实测两门 0.25/0.06 时按 0.25 判 → 一条告警都没有，
+    # 而真值 110/243 天越线）。
+    return min(caps) if caps else 0.06
 
 
 def heat_cap_ex_post_warning(nav_rows: list[dict], cap: float) -> str | None:

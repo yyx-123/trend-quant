@@ -10,7 +10,7 @@ import pandas as pd
 
 from audit.app_logger import get_logger
 from core import env
-from core.adjustment import compute_qfq, factors_equal
+from core.adjustment import compute_qfq, factors_equal, normalize_factors
 from core.bars import (
     PERIOD_DAILY,
     PERIOD_MONTHLY,
@@ -421,12 +421,23 @@ class DataService:
             # （实测 002594.SZ 造出 −66.94% 的单日断裂），并把真实除权日判成
             # **假跌停**（卖不出、止损顺延），全程无告警。因子"消失"不是正常的
             # 公司行为：拒绝覆盖已有因子，响亮告警，等 vendor 恢复或人工处理。
-            if not factors and stored.get(symbol):
+            # 判据（R21A-F1/F2 收紧）：**因子的日期集合只应追加、不应缩短**——
+            # 上游快照里若缺了本地已有的任一因子日期（清空/部分截断/整批非 dict），
+            # 都视为数据源缺口而**不是**正常公司行为：拒绝覆盖本地因子，
+            # 并**把返回值也改回本地存量**（调用方会用返回值去物化 qfq——
+            # 只拦因子表而不拦返回值时，qfq 仍会被整段改写为不复权，实测复现
+            # 同一个 −66.94% 假断裂）。
+            _stored_norm = normalize_factors(stored.get(symbol) or [])
+            _fetched_days = {day for day, _ in normalize_factors(factors)}
+            missing = [(day, val) for day, val in _stored_norm if day not in _fetched_days]
+            if missing:
                 logger.warning(
-                    "ex-factor wipe refused for %s: upstream returned empty while %d "
-                    "local factors exist (possible vendor response gap) — 保留本地因子、qfq 不变",
-                    symbol, len(stored[symbol]),
+                    "ex-factor shrink refused for %s: upstream returned %d factors but "
+                    "%d local factors are missing (e.g. %s) — 保留本地因子、返回值同步回退，"
+                    "qfq 不变（数据源缺口？）",
+                    symbol, len(factors), len(missing), missing[:2],
                 )
+                fetched[symbol] = list(stored[symbol])
                 continue
             db.replace_ex_factors(symbol, factors, provider="tickflow")
             changed.append(symbol)
@@ -459,7 +470,10 @@ class DataService:
                 raw_start, raw_end, qfq_start, qfq_end, symbol,
             )
             return {"symbol": symbol, "status": "raw_incomplete", "rows": 0}
-        if factors is None:
+        if factors is None or (isinstance(factors, (list, tuple)) and len(factors) == 0):
+            # 空列表与 None 同口径回读库（R21A-F1）：调用方拿到空列表就整段重写 qfq
+            # 会把历史改写成**不复权**（实测 −66.94% 假断裂）。库里也空时才真的按
+            # 无因子物化（例如从未有过除权的标的）。
             factors = db.load_ex_factors(symbol)
         qfq = compute_qfq(raw, factors)
         qfq["provider"] = "local_raw+factors"

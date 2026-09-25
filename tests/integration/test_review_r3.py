@@ -503,6 +503,10 @@ def test_load_reviewed_modules_isolates_bad_draft(test_db, registry):
 def test_freeze_defer_spawns_same_day_catchup(test_db, monkeypatch):
     from core import jobs, run_freeze
 
+    # 哨兵是进程级单例：先清掉可能残留的旧线程（R21-巡-1——上一个测试若留下
+    # 活线程，`_spawn_same_day_catchup` 会幂等早返回，本测试就 join 到一个
+    # 与自己无关的旧线程上，断言变成碰运气）。
+    monkeypatch.setattr(jobs, "_catchup_sentinel", None)
     monkeypatch.setattr(jobs, "is_trading_day", lambda d: True)
     monkeypatch.setattr(run_freeze, "is_frozen", lambda: True)  # 恒冻结
     monkeypatch.setattr("time.sleep", lambda s: None)           # 快进
@@ -515,6 +519,7 @@ def test_freeze_defer_spawns_same_day_catchup(test_db, monkeypatch):
     assert sentinel is not None  # 顺延 ≠ 饿一整天：当日补跑哨兵已挂
     sentinel.join(timeout=10)    # 快进下哨兵耗尽 2h 预算后自行退出
     assert not sentinel.is_alive()
+    monkeypatch.setattr(jobs, "_catchup_sentinel", None)  # 不复用给后续测试
 
 
 # ----------------------------------------------------------------------

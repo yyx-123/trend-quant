@@ -1167,79 +1167,10 @@
     return `${sign}${num(value, 2)}%`;
   }
 
-  function calendarHoldingDays(buyDate, sellDate) {
-    const buy = new Date(`${buyDate}T00:00:00`);
-    const sell = new Date(`${sellDate}T00:00:00`);
-    if (Number.isNaN(buy.getTime()) || Number.isNaN(sell.getTime())) return null;
-    return Math.max(0, Math.round((sell.getTime() - buy.getTime()) / 86400000));
-  }
-
-  function tradingHoldingDays(buyDate, sellDate) {
-    const dates = currentPayload?.dates || [];
-    const buyIdx = dates.indexOf(buyDate);
-    const sellIdx = dates.indexOf(sellDate);
-    if (buyIdx >= 0 && sellIdx >= 0 && sellIdx >= buyIdx) return sellIdx - buyIdx;
-    return calendarHoldingDays(buyDate, sellDate);
-  }
-
-  function tradeExcursionMetrics(buyTrade, sellTrade) {
-    const empty = { return_pct: null, max_profit_pct: null, max_drawdown_pct: null };
-    const buyPrice = Number(buyTrade?.exec_price);
-    const qty = Number(buyTrade?.qty) || Number(sellTrade?.qty);
-    if (!Number.isFinite(buyPrice) || buyPrice <= 0 || !Number.isFinite(qty) || qty <= 0) return empty;
-
-    // 涨跌幅：本次交易收益 / 买入成本（含买入佣金）
-    const pnl = Number(sellTrade?.pnl);
-    const cost = buyPrice * qty + (Number(buyTrade?.commission) || 0);
-    const returnPct = Number.isFinite(pnl) && cost > 0 ? (pnl / cost) * 100 : null;
-
-    // 最大浮盈 / 最大回撤：基于持有期间的最高价 / 最低价
-    const dates = currentPayload?.dates || [];
-    const candles = currentPayload?.candles || [];
-    const buyIdx = dates.indexOf(buyTrade?.date);
-    const sellIdx = dates.indexOf(sellTrade?.date);
-    if (buyIdx < 0 || sellIdx < 0 || sellIdx < buyIdx) {
-      return { ...empty, return_pct: returnPct };
-    }
-    let maxProfit = 0;
-    let maxDrawdown = 0;
-    let peak = buyPrice;
-    for (let i = buyIdx; i <= sellIdx; i += 1) {
-      const c = candles[i] || [];
-      const high = Number(c[3]);
-      const low = Number(c[2]);
-      if (Number.isFinite(high) && high > 0) {
-        maxProfit = Math.max(maxProfit, ((high - buyPrice) / buyPrice) * 100);
-        peak = Math.max(peak, high);
-      }
-      if (Number.isFinite(low) && low > 0 && peak > 0) {
-        maxDrawdown = Math.max(maxDrawdown, ((peak - low) / peak) * 100);
-      }
-    }
-    return {
-      return_pct: returnPct,
-      max_profit_pct: maxProfit,
-      max_drawdown_pct: -maxDrawdown,
-    };
-  }
-
-  function attachHoldingDays(rawTrades) {
-    const openBuys = [];
-    return rawTrades.map((trade) => {
-      const side = String(trade?.side || '').toUpperCase();
-      if (side === 'BUY') {
-        openBuys.push(trade);
-        return { ...trade, holding_days: null };
-      }
-      if (side !== 'SELL') return { ...trade, holding_days: null };
-      const buy = openBuys.shift();
-      const days = buy ? tradingHoldingDays(buy.date, trade.date) : null;
-      const metrics = buy
-        ? tradeExcursionMetrics(buy, trade)
-        : { return_pct: null, max_profit_pct: null, max_drawdown_pct: null };
-      return { ...trade, holding_days: days, ...metrics };
-    });
-  }
+  // 持有天数 / 本次收益 / 最大浮盈 / 最大回撤由后端在**回测自身的日线**上算好
+  // （rule_backtest.metrics.annotate_trade_display_metrics，随 slim 结果的 trades 带出）。
+  // 前端不再用屏幕上的 K 线 payload 现算：切周/月 K 或图表区间与回测区间不重合时，
+  // 那样会把持有区间算错（静默错数）或退化成自然日天数。
 
   function holdingDaysCell(trade) {
     if (String(trade?.side || '').toUpperCase() !== 'SELL') return '';
@@ -1451,7 +1382,7 @@
 
   function renderBacktestTrades(result) {
     const tradesSource = pickBacktestSource(result);
-    const trades = attachHoldingDays(tradesSource?.trades || []);
+    const trades = tradesSource?.trades || [];
     const skipped = (tradesSource?.skipped_buys || []).map(s => ({ ...s, _skipped: true }));
     const rows = [...trades, ...skipped]
       .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));

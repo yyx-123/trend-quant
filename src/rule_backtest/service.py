@@ -10,6 +10,7 @@ from audit.app_logger import get_logger
 from data.storage.market_store import MarketStore
 from rule_backtest.engine import SingleSymbolAllInBacktestEngine
 from rule_backtest.loader import StrategyLoader
+from rule_backtest.metrics import annotate_trade_display_metrics
 from rule_backtest.models import DEFAULT_FEE_RATE, BacktestExecutionConfig, RuleBacktestRequest
 from rule_backtest.registry import registry_payload
 
@@ -70,12 +71,40 @@ def slim_backtest_result(result: dict) -> dict:
     from ``multi_kline`` (already slim) and the K-line chart itself uses the
     market-view daily endpoint, so per-strategy candle/series payloads are
     pure waste on the wire.
+
+    成交明细的展示字段（持有天数/本次收益/浮盈/回撤）在**这里**算好随 trades 带出：
+    浏览器拿不到 `daily_nav`/`charts`（本函数正是剥掉它们的地方），前端曾改用屏幕
+    上的 K 线 payload 现算 → 切周/月 K 后静默错数（R21B-P2-1），口径只能留在数据源侧。
     """
+
+    def _series(source: dict) -> dict:
+        kline = (source.get("charts") or {}).get("kline") or {}
+        return {
+            "nav_dates": [row.get("date") for row in (source.get("daily_nav") or [])],
+            "bar_dates": kline.get("dates") or [],
+            "candles": kline.get("candles") or [],
+        }
+
+    def _display_trades(trades: list[dict], source: dict) -> list[dict]:
+        return annotate_trade_display_metrics(trades, **_series(source))
+
+    def _slim_one(source: dict) -> dict:
+        slim = {k: source[k] for k in _RESULT_KEEP_KEYS if k in source}
+        if "trades" in slim:      # 缺键容忍：没有 trades 就不造空键
+            slim["trades"] = _display_trades(slim["trades"], source)
+        return slim
+
     out = {k: result[k] for k in _TOP_KEEP_KEYS if k in result and k != "results"}
-    out["results"] = [
-        {k: r[k] for k in _RESULT_KEEP_KEYS if k in r}
-        for r in result.get("results", [])
-    ]
+    results = result.get("results") or []
+    out["results"] = [_slim_one(r) for r in results]
+    if "trades" in out:
+        # 顶层 backward-compat trades 用**首个策略**的日线标注（单策略前端路径读它）。
+        # 与首个策略本就是同一份列表时直接复用（真引擎路径，避免复制两份），
+        # 否则（历史/合成载荷里两份不同源）只标注不改变内容。
+        if results and result.get("trades") is results[0].get("trades"):
+            out["trades"] = out["results"][0]["trades"]
+        else:
+            out["trades"] = _display_trades(out["trades"], results[0] if results else result)
     return out
 
 
