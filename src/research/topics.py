@@ -47,7 +47,14 @@ def require_open_topic(db, topic_id: str) -> dict:
     if topic is None:
         raise TopicError(f"topic not found: {topic_id}")
     if topic["status"] != "open":
-        raise TopicError(f"topic already concluded: {topic_id}")
+        # R3C-P2-4：错误文案必须可行动——已关课题既不能再挂新实验，也不能
+        # rerun（rerun 会走本检查）。平台当前**没有**"关题后重跑同 spec"的
+        # 合法通路（新题重提会被重复检测硬拒、append 只对 queued）；需要复现时
+        # 建新课题并在 hypothesis 里显式声明为复现（该能力缺口见 R1-D/R3-D 待决策）。
+        raise TopicError(
+            f"topic already concluded: {topic_id}（已关课题不接受新实验与 rerun；"
+            "复现请新建课题并在 hypothesis 中显式声明为复现）"
+        )
     return topic
 
 

@@ -70,8 +70,13 @@ def materialize_topic(db, topic_id: str, *, root: str | Path) -> Path:
         exp_dir = exp_dir_root / exp["id"]
         exp_dir.mkdir(parents=True, exist_ok=True)
         if latest:
+            # R3C-P3-4：物化产物必须是**完整报告信封**（与 HTTP 下载端点同构）
             (exp_dir / "report.json").write_text(
-                json.dumps(latest["report"], ensure_ascii=False, indent=2), encoding="utf-8"
+                json.dumps(
+                    verdict_mod.verdict_envelope(exp, latest),
+                    ensure_ascii=False, indent=2, sort_keys=True,
+                ),
+                encoding="utf-8",
             )
             (exp_dir / "REPORT.md").write_text(
                 _render_report_md(exp, latest), encoding="utf-8"

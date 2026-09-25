@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 
 from audit.app_logger import get_logger
-
 from research import evaluations, lifecycle, verdict
 from research.ledger import loads
 
@@ -155,7 +154,8 @@ def recompute_campaign(
                 {"registry": registry, "holdout_token": None},
             )
         except Exception as exc:  # 复核失败不污染原记录
-            failed.append({"id": exp_id, "error": str(exc)[:500]})
+            failed.append({"id": exp_id, "topic_id": exp.get("topic_id"),
+                           "error": str(exc)[:500]})
             continue
         # 复核产物是平台终态记录（不进"待确认"流）：final = suggested 自动落定
         # 并带标记；定论展示面仍属原 verdict（latest_verdict 优先 supersedes IS NULL）
@@ -200,8 +200,38 @@ def recompute_campaign(
                     "recompute: research_runs backfill failed for %s", exp_id,
                     exc_info=True,
                 )
-        recomputed.append({"id": exp_id, "verdict_id": v["id"]})
+        recomputed.append({"id": exp_id, "verdict_id": v["id"],
+                           "topic_id": exp.get("topic_id")})
+    # R3C-P3-5（Round 3 复核）：复核给实验追加了带 supersedes 的 verdict 之后
+    # 必须**重新物化受影响课题**——物化是 DB→文件的单向生成，此前只有
+    # confirm/conclude 会触发，复核产物长期不进审计文件夹（DB 与文件夹不一致）。
+    # 失败只告警，与 service._materialize 同口径。
+    rematerialized: list[str] = []
+    try:
+        from research.topic_files import materialize_topic
+
+        topic_ids = {
+            row["topic_id"] for row in recomputed if row.get("topic_id")
+        } | {row["topic_id"] for row in failed if row.get("topic_id")}
+        for topic_id in sorted(topic_ids):
+            if not topic_id:
+                continue
+            try:
+                materialize_topic(db, topic_id)
+                rematerialized.append(topic_id)
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "recompute: re-materialize topic %s failed", topic_id
+                )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("recompute: re-materialization skipped")
+
     return {
         "old": old_module_ref, "new": new_module_ref,
         "recomputed": recomputed, "failed": failed, "skipped": skipped,
+        "rematerialized_topics": rematerialized,
     }

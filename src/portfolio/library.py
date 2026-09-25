@@ -113,6 +113,16 @@ def add_version(
                 f"config hash collides with another strategy line: "
                 f"{existing['id']} vs new {strategy_id}"
             )
+        # R3C-P2-1（Round 3 复核）：同 config_hash 复用既有版本行时，若那份行
+        # 已带有**另一个**实验的血缘，静默复用会丢掉本次实验的血缘（调用方仍
+        # 收 ok:True）——"入库是唯一的门、必须完整实验血缘"（决策 8）被绕过。
+        existing_exp = existing.get("experiment_id")
+        if existing_exp and experiment_id and existing_exp != experiment_id:
+            raise LibraryError(
+                f"config already promoted from experiment {existing_exp} "
+                f"(version {existing['id']}); refusing silent reuse for "
+                f"experiment {experiment_id} —— 如需独立血缘请使用新的策略线"
+            )
         return existing
 
     with db.connect() as conn:

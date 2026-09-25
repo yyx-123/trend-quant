@@ -154,24 +154,14 @@ def experiment_report_download(experiment_id: str):
     detail = service.get_experiment(experiment_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="experiment not found")
-    from research.verdict import canonical_verdict
+    from research.verdict import canonical_verdict, verdict_envelope
 
     latest = canonical_verdict(detail.get("verdicts") or [])
     if latest is None:
         raise HTTPException(status_code=404, detail="no verdict yet")
+    # 内容与课题物化的 report.json 共用同一组装函数（R3C-P3-4：此前两处不同）
     return JSONResponse(
-        content={
-            "experiment_id": experiment_id,
-            "spec": detail.get("spec"),
-            "hypothesis": detail.get("hypothesis"),
-            "baseline": latest.get("baseline"),
-            "evidence": latest.get("evidence"),
-            "warnings": latest.get("warnings"),
-            "report": latest.get("report"),
-            "suggested_verdict": latest.get("suggested_verdict"),
-            "final_verdict": latest.get("final_verdict"),
-            "reasoning": latest.get("reasoning"),
-        }
+        content=verdict_envelope({"id": experiment_id, **detail}, latest)
     )
 
 

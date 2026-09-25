@@ -211,7 +211,6 @@ CREATE TABLE IF NOT EXISTS engine_positions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_engine_positions_unique
     ON engine_positions(run_id, date, symbol);
-CREATE INDEX IF NOT EXISTS idx_engine_positions_run ON engine_positions(run_id, date, symbol);
 
 CREATE TABLE IF NOT EXISTS engine_daily_nav (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -225,9 +224,56 @@ CREATE TABLE IF NOT EXISTS engine_daily_nav (
     created_at TEXT DEFAULT (datetime('now','localtime')),
     UNIQUE(run_id, date)
 );
-CREATE INDEX IF NOT EXISTS idx_engine_daily_nav_run ON engine_daily_nav(run_id, date);
+
 
 -- ===== L3 组合策略层（详设 §5.3/§5.5） =====
+-- engine 子证据表守卫（R3C-P3-6，Round 3 复核）：判定所依赖的逐笔成交/净值/
+-- 持仓此前**完全不受 append-only 保护**（`UPDATE engine_daily_nav SET equity=...`
+-- 与 `DELETE FROM engine_fills` 都被允许），与 engine_runs 同制补上：
+-- 内容字段禁改（UPDATE 一律拒），行一律禁删。启用需要重写子表列的场景由
+-- 新的 run 承担（幂等重跑本就是 run 级隔离）。
+-- 注：与 engine_runs 一致采用 DROP+CREATE，使定义修订传播到存量库。
+DROP TRIGGER IF EXISTS trg_engine_orders_no_delete;
+CREATE TRIGGER trg_engine_orders_no_delete
+BEFORE DELETE ON engine_orders
+BEGIN SELECT RAISE(ABORT, 'engine_orders is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_orders_no_update;
+CREATE TRIGGER trg_engine_orders_no_update
+BEFORE UPDATE ON engine_orders
+BEGIN SELECT RAISE(ABORT, 'engine_orders is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_fills_no_delete;
+CREATE TRIGGER trg_engine_fills_no_delete
+BEFORE DELETE ON engine_fills
+BEGIN SELECT RAISE(ABORT, 'engine_fills is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_fills_no_update;
+CREATE TRIGGER trg_engine_fills_no_update
+BEFORE UPDATE ON engine_fills
+BEGIN SELECT RAISE(ABORT, 'engine_fills is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_unfilled_no_delete;
+CREATE TRIGGER trg_engine_unfilled_no_delete
+BEFORE DELETE ON engine_unfilled
+BEGIN SELECT RAISE(ABORT, 'engine_unfilled is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_unfilled_no_update;
+CREATE TRIGGER trg_engine_unfilled_no_update
+BEFORE UPDATE ON engine_unfilled
+BEGIN SELECT RAISE(ABORT, 'engine_unfilled is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_positions_no_delete;
+CREATE TRIGGER trg_engine_positions_no_delete
+BEFORE DELETE ON engine_positions
+BEGIN SELECT RAISE(ABORT, 'engine_positions is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_positions_no_update;
+CREATE TRIGGER trg_engine_positions_no_update
+BEFORE UPDATE ON engine_positions
+BEGIN SELECT RAISE(ABORT, 'engine_positions is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_daily_nav_no_delete;
+CREATE TRIGGER trg_engine_daily_nav_no_delete
+BEFORE DELETE ON engine_daily_nav
+BEGIN SELECT RAISE(ABORT, 'engine_daily_nav is append-only'); END;
+DROP TRIGGER IF EXISTS trg_engine_daily_nav_no_update;
+CREATE TRIGGER trg_engine_daily_nav_no_update
+BEFORE UPDATE ON engine_daily_nav
+BEGIN SELECT RAISE(ABORT, 'engine_daily_nav is append-only'); END;
+
 CREATE TABLE IF NOT EXISTS portfolio_strategies (
     id TEXT PRIMARY KEY,                  -- 策略线 id（如 base-v1）
     name TEXT NOT NULL DEFAULT '',
@@ -1125,6 +1171,11 @@ class Database:
                 "idx_market_data_raw_symbol_time",
                 "idx_market_data_qfq_symbol_time",
                 "idx_ex_factors_symbol_time",
+                # R3C-P3-7（Round 3 复核）：engine 子表上两个与 UNIQUE 约束
+                # 完全同列的冗余索引——持仓快照是引擎最大子表（满仓 800 标的
+                # ×1250 日 ≈ 百万行），白放大每次写入。
+                "idx_engine_positions_run",
+                "idx_engine_daily_nav_run",
             ):
                 conn.execute(f"DROP INDEX IF EXISTS {redundant_index}")
             for table, new_columns in targets.items():

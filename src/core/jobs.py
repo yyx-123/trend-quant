@@ -138,8 +138,8 @@ def _spawn_same_day_catchup(
     哨兵）；补跑本体经 daily_market_update_job 的模块级单飞锁，与定时/
     启动补偿互斥（同评审：哨兵此前绕过 main.py 闭包内的 _update_job_lock）。
     """
-    import threading
-
+    # threading 用**模块级引用**（R3C-P3-2：函数体内 import 会让测试的
+    # monkeypatch(jobs.threading) 永不生效 → 钉子实际起真线程并与断言竞态）
     global _catchup_sentinel
     with _catchup_spawn_lock:
         if _catchup_sentinel is not None and _catchup_sentinel.is_alive():

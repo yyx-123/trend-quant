@@ -38,7 +38,14 @@ def insert_platform_verdict(
     """平台流水线写入一条 verdict（内容随后即不可改）。"""
     if suggested_verdict not in ("confirmed", "rejected", "inconclusive"):
         raise LifecycleError(f"invalid suggested_verdict: {suggested_verdict}")
-    require_experiment(db, experiment_id)
+    exp = require_experiment(db, experiment_id)
+    # R3C-P3-8（Round 3 复核）：verdict 只能挂在**取证完成**的实验上。此前只有
+    # 存在性检查，"status 不变式"靠两个调用方各自保证（第三个调用方即失守）。
+    if str(exp.get("status") or "") not in ("evaluating", "verdicted"):
+        raise LifecycleError(
+            f"platform verdict can only attach to evaluating/verdicted "
+            f"experiments (got {exp.get('status')!r} for {experiment_id})"
+        )
     import json
 
     with db.connect() as conn:
@@ -71,6 +78,29 @@ def get_verdict(db, verdict_id: str) -> dict | None:
             "SELECT * FROM research_verdicts WHERE id = ?", (verdict_id,)
         ).fetchone()
     return _decode(row_to_dict(row))
+
+
+def verdict_envelope(experiment: dict | None, verdict_row: dict | None) -> dict:
+    """"完整实验报告"的**单一组装真源**（R3C-P3-4）。
+
+    路由下载与课题物化必须产出同一份内容：此前物化的 `report.json` 只写
+    `latest["report"]`（只有 experiment_summary），而同名 HTTP 端点带
+    baseline/evidence/warnings/报告/定论与理由——同一份"§6.5.0 完整报告"两种
+    内容，审计文件夹里看不到定论。两处共用本函数。
+    """
+    latest = verdict_row or {}
+    return {
+        "experiment_id": (experiment or {}).get("id"),
+        "spec": (experiment or {}).get("spec"),
+        "hypothesis": (experiment or {}).get("hypothesis"),
+        "baseline": latest.get("baseline"),
+        "evidence": latest.get("evidence"),
+        "warnings": latest.get("warnings"),
+        "report": latest.get("report"),
+        "suggested_verdict": latest.get("suggested_verdict"),
+        "final_verdict": latest.get("final_verdict"),
+        "reasoning": latest.get("reasoning"),
+    }
 
 
 def list_verdicts(db, experiment_id: str) -> list[dict]:
@@ -155,12 +185,21 @@ def confirm_verdict(
         )
 
     with db.connect() as conn:
-        conn.execute(
+        # R3C-P3-9（Round 3 复核）：落定必须是**行级原子认领**——入口的
+        # `final_verdict is not None` 检查与实际写入之间有窗口，并发/双击 confirm
+        # 时第二条会把 `reasoning`/`confirmed_by` 覆写成第二位的文字（库层触发器
+        # 只拦"已定论值被改成不同值"，同值覆写不拦）。`AND final_verdict IS NULL`
+        # + rowcount==0 即拒，与 lifecycle 的原子认领同制。
+        cur = conn.execute(
             """UPDATE research_verdicts
                SET final_verdict = ?, reasoning = ?, confirmed_by = ?,
                    confirmed_at = datetime('now','localtime')
-               WHERE id = ?""",
+               WHERE id = ? AND final_verdict IS NULL""",
             (final_verdict, reasoning, session["session_id"], verdict["id"]),
         )
+        if cur.rowcount == 0:
+            raise LifecycleError(
+                f"verdict already confirmed for {experiment_id} (concurrent confirm lost)"
+            )
     transition(db, experiment_id, "verdicted")
     return latest_verdict(db, experiment_id)

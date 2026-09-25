@@ -1,0 +1,306 @@
+........................................................................ [ 22%]
+..F..................................................................... [ 44%]
+........................................................................ [ 67%]
+........................................................................ [ 89%]
+..................................                                       [100%]
+================================== FAILURES ===================================
+___________________ test_catchup_sentinel_does_not_hot_spin ___________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000002701041F980>
+
+    def test_catchup_sentinel_does_not_hot_spin(monkeypatch):
+        """作业返回 deferred 而冻结已解除时，哨兵必须退避并最终退出（旧写法
+        不 sleep、预算永不递减 → 实测 10 秒内 15532 次调用且线程不退）。"""
+        from core import jobs
+        from core import settings as settings_mod
+    
+        calls: list[int] = []
+        sleeps: list[float] = []
+    
+        def _fake_job(_settings, _service=None, force=False, after_update=None):
+            calls.append(1)
+            return {"status": "deferred_backtest_running"}
+    
+        class _FakeThread:
+            def __init__(self, target=None, **kwargs):
+                self._target = target
+                self.daemon = kwargs.get("daemon", False)
+                self.name = kwargs.get("name", "")
+                self._alive = False
+    
+            def start(self):
+                self._alive = True
+                try:
+                    self._target()
+                finally:
+                    self._alive = False
+    
+            def is_alive(self):
+                return self._alive
+    
+        monkeypatch.setattr(jobs, "daily_market_update_job", _fake_job)
+        monkeypatch.setattr(jobs, "threading", type("T", (), {"Thread": _FakeThread}))
+        monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+        monkeypatch.setattr(jobs.run_freeze, "is_frozen", lambda: False)
+        monkeypatch.setattr(jobs, "market_now", lambda: datetime(2026, 9, 25, 17, 0))
+        monkeypatch.setattr(jobs, "_catchup_sentinel", None)
+    
+        jobs._spawn_same_day_catchup(
+            settings_mod.load_settings(), None, force=True, today=date(2026, 9, 25),
+            after_update=None,
+        )
+        # 预算 7200s / 每轮 60s = 120 轮上限；必须退避（sleep 被调用）
+        assert len(calls) <= 121, f"哨兵调用次数必须有界（实际 {len(calls)}）"
+>       assert sleeps, "deferred 且未冻结时必须退避，不得热转"
+E       AssertionError: deferred 且未冻结时必须退避，不得热转
+E       assert []
+
+tests\unit\test_loop_review_ds4f_r2.py:310: AssertionError
+---------------------------- Captured stderr call -----------------------------
+ate now
+------------------------------ Captured log call ------------------------------
+INFO     core.jobs:jobs.py:170 same-day catchup: unfrozen, running daily update now
+INFO     core.jobs:jobs.py:180 same-day catchup: re-deferred, waiting again
+-------------------------- Captured stderr teardown ---------------------------
+2026-09-25 13:41:27,177 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,178 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,178 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,178 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,178 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,178 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,178 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,178 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,179 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,180 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,181 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,182 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,183 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,184 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,185 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,186 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,187 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,188 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,190 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,192 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,194 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,196 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: unfrozen, running daily update now
+2026-09-25 13:41:27,198 INFO [core.jobs] same-day catchup: re-deferred, waiting again
+2026-09-25 13:41:27,198 WARNING [core.jobs] same-day catchup abandoned: budget exhausted
+=========================== short test summary info ===========================
+FAILED tests/unit/test_loop_review_ds4f_r2.py::test_catchup_sentinel_does_not_hot_spin
+1 failed, 321 passed in 236.95s (0:03:56)

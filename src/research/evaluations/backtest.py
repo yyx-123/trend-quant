@@ -41,8 +41,22 @@ def _spec_errors(spec: dict, ctx: dict) -> list[str]:
         from portfolio.library import get_version
 
         db = ctx.get("db")
-        if db is not None and get_version(db, base) is None:
-            errors.append(f"spec.base version not in library: {base}")
+        if db is not None:
+            version_row = get_version(db, base)
+            if version_row is None:
+                errors.append(f"spec.base version not in library: {base}")
+            else:
+                # R3C-P2-3（Round 3 复核）：退役策略线的版本不得作新实验的 base
+                # ——此前该守卫只在 runner 的 resolve 阶段（失败要烧一次 attempt
+                # 并落 failed 记录），入口就该拒。
+                from portfolio.library import get_strategy
+
+                line = get_strategy(db, version_row["strategy_id"])
+                if line is not None and line.get("retired_at"):
+                    errors.append(
+                        f"spec.base strategy line {version_row['strategy_id']} "
+                        "is retired（退役线不接受新引用）"
+                    )
 
     diff = spec.get("diff")
     if not isinstance(diff, list) or not diff:

@@ -121,6 +121,10 @@ def test_experiments_append_only_trigger(test_db, topic, human_session, base_v1_
 
 def test_verdicts_append_only_trigger(test_db, topic, human_session, base_v1_version, registry):
     exp = _accepted_experiment(test_db, topic, human_session, base_v1_version, registry)
+    # R3C-P3-8：平台 verdict 只能挂在 evaluating/verdicted 上（新增守卫），
+    # 夹具按真实状态机推进（此前夹具直接挂在 queued 上，靠"无守卫"通过）
+    lifecycle.transition(test_db, exp["id"], "running")
+    lifecycle.transition(test_db, exp["id"], "evaluating")
     v = verdict.insert_platform_verdict(
         test_db,
         experiment_id=exp["id"],

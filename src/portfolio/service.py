@@ -20,7 +20,6 @@ from portfolio.registry import ModuleRegistry
 from portfolio.strategy import StrategyConfig, apply_diff, parse_strategy_yaml
 
 
-
 def load_fills(db, run_id: str) -> list[dict]:
     """L4 读成交的合法路径（L3 转发 L2 存储；分层铁律：L4 不跨级 import L2）。"""
     from engine.store import EngineStore
@@ -69,6 +68,18 @@ def resolve_experiment_config(
     base_row = library.get_version(db, base_version_id)
     if base_row is None:
         raise ServiceError(f"base version not found: {base_version_id}")
+    # R3C-P2-3（Round 3 复核）：退役（下架）策略线的**新引用**必须被拒——
+    # 模块槽退役是"只禁新引用"（`modules.retire_module` 同步摘注册表），
+    # 策略线此前只有"禁新版本"一处守卫，实验路径照旧引用，且默认列表还隐藏了
+    # 退役线（台账看不到、实验却在它上面生长）。口径对齐：拒绝新引用，
+    # 已有实验记录与历史 run 不受影响。
+    _strategy = library.get_strategy(db, base_row["strategy_id"])
+    if _strategy is not None and _strategy.get("retired_at"):
+        raise ServiceError(
+            f"strategy line {base_row['strategy_id']} is retired; "
+            "its versions cannot be used as a new experiment base "
+            "(已完成的实验与历史 run 不受影响)"
+        )
     base_config = parse_strategy_yaml(base_row["config_yaml"], registry)
     config = apply_diff(base_config, diff, registry)
     if new_name:
@@ -77,6 +88,17 @@ def resolve_experiment_config(
             slots=config.slots, gates=config.gates,
         )
     return config, config.canonical_yaml()
+
+
+_WINDOW_KINDS = ("sample", "holdout", "plateau_probe")
+
+
+def _require_window_kind(value) -> str:
+    """window_kind 枚举守卫（R3B-P3-9；原写法是就地 lambda，ruff PLC3002）。"""
+    text = str(value)
+    if text not in _WINDOW_KINDS:
+        raise ValueError(f"invalid window_kind: {value!r} (allowed: {_WINDOW_KINDS})")
+    return text
 
 
 def run_backtest(
@@ -103,10 +125,7 @@ def run_backtest(
         market_profile=str(params.get("market_profile", "cn_stock")),
         strategy_ref=strategy_ref,
         run_params=params,
-        window_kind=(
-            # R3B-P3-9：L3 侧同样卡枚举——直调 L3 不再把任意字符串写进
-            # engine_runs 血缘（枚举真源与 research_runs CHECK 一致）
-            lambda wk: wk if wk in ("sample", "holdout", "plateau_probe")
-            else (_ for _ in ()).throw(ValueError(f"invalid window_kind: {wk!r}"))
-        )(str(params.get("window_kind", "sample"))),
+        # R3B-P3-9：L3 侧同样卡枚举——直调 L3 不再把任意字符串写进
+        # engine_runs 血缘（枚举真源与 research_runs CHECK 一致）
+        window_kind=_require_window_kind(params.get("window_kind", "sample")),
     )

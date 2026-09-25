@@ -178,7 +178,12 @@ def register_research_tools(mcp) -> None:
             detail = service.get_experiment(experiment_id)
         except Exception as exc:
             return _error_payload(exc)
-        return {"ok": detail is not None, "experiment": detail}
+        if detail is None:
+            # R3C-P3-10：与同族工具统一错误口径（此前缺 error 字段，客户端/
+            # 模型无法区分"不存在"与内部错误）
+            return {"ok": False, "error": f"experiment not found: {experiment_id}",
+                    "experiment": None}
+        return {"ok": True, "experiment": detail}
 
     @mcp.tool()
     def research_run_status(experiment_id: str) -> dict:

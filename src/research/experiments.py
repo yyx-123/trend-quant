@@ -98,7 +98,61 @@ def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
         expanded["window"] = [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END]
     if "universe" in known and expanded.get("universe") in (None, "liquidity_default"):
         expanded["universe"] = "liquidity_default"
+    # R3C-P2-2（Round 3 复核）：只展开 window/universe 不够——**显式写出**其余
+    # 平台缺省值（`initial_capital: 1000000`、`window_mode: "static_holdout"`、
+    # `n_folds: 4`、`expect: "positive"`…）解析出的 run 与省略它们**逐值相同**，
+    # 却因键集不同被判"另一个实验"（exact 不命中、similar 直接 return False）
+    # → 重复检测整体被绕过。缺省表是**单一真源**（下方 _MODULE_SPEC_DEFAULTS），
+    # 与各 runner 的 `spec.get(k, default)` 对齐；新字段必须同时登记。
+    for key, default in _MODULE_SPEC_DEFAULTS.get(
+        str(evaluation_module or "").split("@")[0], {}
+    ).items():
+        if key not in known:
+            continue
+        # **缺键或 None 都取平台缺省**——这正是"省略 ≡ 显式缺省"的归一（R3C-P2-2）
+        if expanded.get(key) is None:
+            expanded[key] = default() if callable(default) else default
     return expanded
+
+
+def _module_spec_defaults() -> dict[str, dict]:
+    """各评估模块"省略即平台缺省"的字段表（重复检测归一的单一真源）。
+
+    键必须与 `_DECLARED_SPEC_FIELDS` 一致；值用 callable 表达"每次现算"
+    （如 window 依赖当前 holdout 配置的 sample 窗口）。
+    """
+    from research.holdout import DEFAULT_SAMPLE_END, DEFAULT_SAMPLE_START
+
+    return {
+        "portfolio_backtest": {
+            "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],
+            "window_mode": "static_holdout",
+            "n_folds": 4,
+            "initial_capital": 1_000_000,
+        },
+        "event_study": {
+            "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],
+            "expect": "positive",
+            "horizons": [5, 10, 20],
+            "path_stats": False,
+        },
+        "bucket_analysis": {
+            "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],
+            "expect": "positive",
+            "horizons": [10, 20],
+            "buckets": 5,
+        },
+        "distribution": {
+            "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],
+        },
+        "head_to_head": {
+            "window": lambda: [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END],
+            "initial_capital": 1_000_000,
+        },
+    }
+
+
+_MODULE_SPEC_DEFAULTS = _module_spec_defaults()
 
 
 def _values_similar(a, b) -> bool:
@@ -329,7 +383,9 @@ def propose_experiment(
         if exact_dupes:
             reasons.append(
                 "duplicate_of: " + ",".join(exact_dupes)
-                + "（与历史实验完全重复，硬拒——请修改 spec 或用 rerun 复现）"
+                + "（与历史实验完全重复，硬拒——请修改 spec 或用 rerun 复现；"
+                "注意：若原实验所在课题已关题，rerun 会被课题状态拒绝，"
+                "此时请新建课题并在 hypothesis 中显式声明为复现）"
             )
         elif similar_dupes and not allow_duplicate:
             reasons.append(

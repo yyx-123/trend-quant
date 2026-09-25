@@ -155,13 +155,17 @@ def main() -> int:
                "experiment_id": exp["id"],
                "attempt_index": exp["attempt_index"]}
         if getattr(args, "run", False):
+            from core import run_freeze
             from research.pipeline import run_experiment
 
             try:
-                v = run_experiment(
-                    service.db, exp["id"], registry=service.registry,
-                    holdout_token=getattr(args, "token", None),
-                )
+                # R3C-P3-1（Round 3 复核）：与 propose --run / MCP 同步路径 /
+                # worker 同口径——研究 run 一律在冻结写任务的保护下执行
+                with run_freeze.frozen_writes():
+                    v = run_experiment(
+                        service.db, exp["id"], registry=service.registry,
+                        holdout_token=getattr(args, "token", None),
+                    )
             except Exception as exc:
                 out["run_error"] = str(exc)
             else:
@@ -169,16 +173,22 @@ def main() -> int:
         print(json.dumps(out, ensure_ascii=False))
         return 0
     if args.cmd == "recompute":
+        from core import run_freeze
+
         try:
-            result = service.recompute_campaign(
-                old_module_ref=args.old_ref, new_module_ref=args.new_ref,
-                session_id=session["session_id"], limit=args.limit,
-            )
+            with run_freeze.frozen_writes():  # 同 rerun --run（R3C-P3-1）
+                result = service.recompute_campaign(
+                    old_module_ref=args.old_ref, new_module_ref=args.new_ref,
+                    session_id=session["session_id"], limit=args.limit,
+                )
         except Exception as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
             return 1
+        # R3C-P3-3：skipped 必须可见（"哪些目标没复核"是 R1-P3-18 的修复面，
+        # 此前只在返回值里、CLI 恰好是唯一能发起 campaign 的通道）
         print(json.dumps({"ok": True, "recomputed": len(result["recomputed"]),
-                          "failed": len(result["failed"])}, ensure_ascii=False))
+                          "failed": len(result["failed"]),
+                          "skipped": result.get("skipped", [])}, ensure_ascii=False))
         return 0
     if args.cmd == "promote":
         try:
