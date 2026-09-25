@@ -99,8 +99,19 @@ def grant_token(
     留痕内容——校验下沉到源头，覆盖 Web 路由 / service 面 / 未来任何通道。
     """
     session = require_human_session(db, session_id)
-    if not str(purpose or "").strip():
+    purpose = str(purpose or "").strip()
+    if not purpose:
         raise HoldoutError("holdout token purpose must be non-empty")
+    # R4A-P3-7（Round 4 复核）：表单字段此前无长度上限、experiment_id 也不校验
+    # 存在性——70k 字理由 / 200k 字 purpose / 指向不存在实验的 token 都能落库
+    # （治理留痕指向空气 = 静默无效）。
+    if len(purpose) > 200:
+        raise HoldoutError("holdout token purpose too long (max 200 chars)")
+    if experiment_id:
+        from research.lifecycle import get_experiment
+
+        if get_experiment(db, str(experiment_id)) is None:
+            raise HoldoutError(f"experiment not found: {experiment_id}")
     with db.connect() as conn:
         tid = alloc_id(conn, "holdout_tokens", "H", width=4)
         conn.execute(

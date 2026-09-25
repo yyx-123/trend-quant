@@ -176,6 +176,9 @@ def confirm_verdict(
     reasoning = str(reasoning or "").strip()
     if not reasoning:
         raise LifecycleError("reasoning must be non-empty")
+    # R4A-P3-7：reasoning 是人工留痕，加长度上限（表单/接口层此前无任何限制）
+    if len(reasoning) > 4000:
+        raise LifecycleError("reasoning too long (max 4000 chars)")
 
     module = evaluations.require_evaluation(exp["evaluation_module"])
     if not module.final_verdict_allowed(verdict["suggested_verdict"], final_verdict):

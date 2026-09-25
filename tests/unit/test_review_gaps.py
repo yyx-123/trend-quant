@@ -116,6 +116,23 @@ def test_holdout_token_bound_to_other_experiment(test_db):
     session = get_or_create_default_human_session(test_db)
     set_enforced(test_db, True)
     try:
+        # R4A-P3-7：绑定目标必须**真实存在**（治理留痕不得指向空气）——
+        # 经服务面造一个课题 + 实验行作为绑定对象
+        from research import topics as _topics
+
+        topic = _topics.create_topic(
+            test_db, session_id=session["session_id"], title="绑定探针", question="?"
+        )
+        with test_db.connect() as conn:
+            conn.execute(
+                """INSERT INTO research_experiments
+                   (id, title, owner_session, created_by, topic_id, subject_key,
+                    evaluation_module, spec_json, hypothesis, status, attempt_index,
+                    is_reproduction)
+                   VALUES ('E0001','绑定探针',?,'human',?,'probe',
+                           'portfolio_backtest@1','{}','h','evaluating',1,0)""",
+                (session["session_id"], topic["id"]),
+            )
         token = grant_token(test_db, session_id=session["session_id"],
                             purpose="绑定 E0001", experiment_id="E0001")
         with pytest.raises(HoldoutError, match="bound to experiment"):

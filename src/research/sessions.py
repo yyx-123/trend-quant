@@ -75,9 +75,16 @@ def list_sessions(db) -> list[dict]:
     return rows_to_dicts(rows)
 
 
-def get_or_create_ai_session(db, channel: str = "mcp", label: str = "AI 研究助手") -> dict:
-    """AI 通道默认会话（每个 channel 一个稳定会话，台账归属可读）。"""
-    session_id = f"ai-{channel}-default"
+def ensure_channel_session(
+    db, *, session_id: str, label: str, channel: str
+) -> dict:
+    """按**指定 id** 保证一个通道会话存在（幂等）。
+
+    R4A-P3-5（Round 4 复核）：MCP 通道此前为了"按 token 派生的稳定会话 id"
+    **自己写库**（`INSERT OR IGNORE INTO research_sessions`），把上层策略
+    （会话命名/归属）落在通道里、绕过服务面的 kind 白名单校验，与"薄通道厚服务"
+    的分层声明矛盾。改为通道只调本函数。
+    """
     existing = get_session(db, session_id)
     if existing is not None:
         return existing
@@ -88,3 +95,10 @@ def get_or_create_ai_session(db, channel: str = "mcp", label: str = "AI 研究�
             (session_id, label, channel),
         )
     return get_session(db, session_id)
+
+
+def get_or_create_ai_session(db, channel: str = "mcp", label: str = "AI 研究助手") -> dict:
+    """AI 通道默认会话（每个 channel 一个稳定会话，台账归属可读）。"""
+    return ensure_channel_session(
+        db, session_id=f"ai-{channel}-default", label=label, channel=channel
+    )

@@ -133,10 +133,16 @@ def register_sizing_modules(registry=REGISTRY) -> None:
         slot="sizing", name="target_weight", version=1, factory=TargetWeightSizing,
         params_schema={
             "weights": {"type": "dict"},
-            # R3B-P3-4：mode 缺省行为（weights 空时 equal）此前只在工厂内
-            # 隐式成立——schema 显式声明 default，参数域契约不再漂移
-            "mode": {"type": "string", "choices": ["equal", "explicit"],
-                     "default": "equal"},
+            # mode 的缺省是**条件式**（weights 空 → equal，否则 explicit），
+            # 由工厂实现；schema 只声明取值域，**不得给 default**。
+            # R4A-P1-1（Round 4 复核，P1）：此前的 `default: "equal"` 会被
+            # `validate_params` **物化**进参数（docstring 明说"normalized =
+            # 默认值填充"）→ 只要写了 weights 而没写 mode，实现里 `params.get
+            # ("mode")` 就拿到 "equal"，权重表被整体忽略：`bench-60-40` 从
+            # 60% 沪深300 变成 100% 满仓，已发布的验收数字不可复现。
+            # 契约：**schema 物化后的参数必须与未物化时行为一致**（钉子见
+            # tests/unit/test_loop_review_ds4f_r4.py）。
+            "mode": {"type": "string", "choices": ["equal", "explicit"]},
             "members_count": {"type": "integer", "min": 1},
         },
         description="目标权重（显式表 / 成员均分）",

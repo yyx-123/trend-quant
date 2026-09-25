@@ -605,8 +605,8 @@ def test_retired_seed_line_does_not_break_every_backtest(test_db, registry):
     `add_version` 对退役线显式拒绝，而 seed 每次 run 前都跑（幂等），
     此前会让**所有** portfolio_backtest 在 seed 处失败（含既有实验复现）。"""
     from portfolio import library
-    from portfolio.slots import REGISTRY, ensure_builtins
     from portfolio.seed import seed_default_library
+    from portfolio.slots import REGISTRY, ensure_builtins
 
     ensure_builtins()
     seeded = seed_default_library(test_db, REGISTRY)

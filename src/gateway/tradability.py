@@ -208,6 +208,14 @@ def compute_tradability(
         limit_pct = board_limit_pct(symbol, asset_type=asset_type, name=info.get("name"))
         listing = listing_dates.get(symbol)
         listing_day = pd.Timestamp(listing).date() if listing else None
+        # R4A-P2-2（Round 4 复核，P2）：上市日来源问题**未在本轮改行为**——
+        # `instrument_metadata.start_date` 是用户/导入写入的字段，其语义
+        # （上市日 vs 回填起点）无法从代码判定，且生产库 874/874 行为 NULL
+        # （= 新股无涨跌幅限制这条口径在生产库上当前**完全不生效**，属数据缺口
+        # 而非代码 bug）；若把它当回填起点则会把"新股前 N 日无限制"整段关掉、
+        # 若当上市日就是现在这样。两种口径的取舍需数据侧裁决（见 R4-D-2）。
+        # 本轮只做**可见化**：把"上市日未知"如实标在结果里，不再静默。
+        listing_known = listing_day is not None
 
         # 对齐轴 = closes 日期 ∪ 运行日期——运行窗口首日前收必须能从垫片期
         # bar 算出（ffill+shift 在扩展轴上做，再取运行日子集）。
@@ -303,6 +311,8 @@ def compute_tradability(
                     "limit_down_price": float(limit_down[i]) if np.isfinite(limit_down[i]) else None,
                     "is_limit_up": bool(is_limit_up[i]),
                     "is_limit_down": bool(is_limit_down[i]),
+                    # R4A-P2-2：上市日未知时"新股无涨跌幅限制"这条不生效——如实标注
+                    "listing_known": bool(listing_known),
                     "st_status": "unknown",  # 阶段 7 前无 ST 状态历史
                     "no_limit": bool(no_limit[i]),
                 }

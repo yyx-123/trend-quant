@@ -81,7 +81,7 @@ def _ai_session(db, ctx=None):
     """AI 会话归属（R2-P3-4）：多 token（TREND_MCP_TOKENS 的 tokenA=用户A）
     部署下按 mcp_user 派生独立会话（ai-mcp-<user>），台账可区分是哪个
     token 用户的研究操作；单 token / 无请求上下文时回退共享默认会话。"""
-    from research.sessions import get_or_create_ai_session, get_session
+    from research.sessions import ensure_channel_session, get_or_create_ai_session
 
     username = None
     if ctx is not None:
@@ -93,17 +93,13 @@ def _ai_session(db, ctx=None):
             username = None
     if not username:
         return get_or_create_ai_session(db, channel="mcp")
-    session_id = f"ai-mcp-{str(username)}"
-    existing = get_session(db, session_id)
-    if existing is not None:
-        return existing
-    with db.connect() as conn:
-        conn.execute(
-            """INSERT OR IGNORE INTO research_sessions (session_id, kind, label, channel)
-               VALUES (?, 'ai', ?, 'mcp')""",
-            (session_id, f"AI（MCP·{username}）"),
-        )
-    return get_session(db, session_id)
+    # R4A-P3-5：通道不写库——会话命名/归属策略在服务面（"薄通道厚服务"）
+    return ensure_channel_session(
+        db,
+        session_id=f"ai-mcp-{str(username)}",
+        label=f"AI（MCP·{username}）",
+        channel="mcp",
+    )
 
 
 def _run_or_queue(service, experiment_id: str) -> dict:

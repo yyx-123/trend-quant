@@ -69,6 +69,8 @@ class ResearchWorker:
         self._stop = threading.Event()
         self._dispatcher: threading.Thread | None = None
         self._active_by_session: dict[str, int] = {}
+        # 已派发但未完成的 future → (experiment_id, owner)：stop() 据此回灌队列
+        self._inflight: dict = {}
         self._dispatch_iterations = 0  # 调度循环计数（热自旋回归钉子的观测点）
 
     # ------------------------------------------------------------------
@@ -94,6 +96,12 @@ class ResearchWorker:
     # ------------------------------------------------------------------
     def start(self) -> None:
         if self._dispatcher is not None:
+            # P3-4（R4A 复核）：join 超时后引用被保留——若旧线程仍活着，绝不能
+            # 再起第二个调度线程（会共享 _queue/_queued_ids/_active_by_session）
+            if getattr(self._dispatcher, "is_alive", lambda: False)():
+                _logger.warning(
+                    "research worker dispatcher still alive; start() ignored"
+                )
             return
         swept = lifecycle.mark_interrupted_research_runs(self.db)
         if swept["experiments"] or swept["engine_runs"]:
@@ -113,15 +121,56 @@ class ResearchWorker:
         self._dispatcher.start()
 
     def stop(self) -> None:
+        """停止调度与线程池（R4A-P3-3/4 复核修正）。
+
+        - **P3-3**：`cancel_futures=True` 会取消"已派发未开跑"的 future，而这些
+          id 在派发时已从 `_queued_ids` 摘除、减计数只在 `_run_one` 里——直接
+          shutdown 会**丢派发**（实验永远停在 queued、worker 内无痕）并**泄漏
+          会话计数**（泄漏到 per_session_cap 后该会话的实验永不执行）。现在先
+          把被取消的 future 对应实验放回队列并回退计数，再关闭线程池。
+        - **P3-4**：`join(timeout=5)` 超时后不得直接置空 `_dispatcher`——旧线程
+          仍活着，再 `start()` 会起第二个调度线程共享同一状态。改为保留引用。
+        """
         self._stop.set()
         if self._dispatcher:
             join = getattr(self._dispatcher, "join", None)
             if callable(join):
                 join(timeout=5)
-            self._dispatcher = None
+            if getattr(self._dispatcher, "is_alive", lambda: False)():
+                _logger.warning(
+                    "research worker dispatcher still alive after join timeout; "
+                    "start() will be refused until it exits"
+                )
+            else:
+                self._dispatcher = None
+        # R4A-P3-3：把原始队列里尚未消费的 id 并回 `_queued_ids`（dispatcher 退出
+        # 时可能有 id 只在 `_queue` 里而不在集合里 → 之后 `status()`/重派都会漏它）
+        with self._lock:
+            while True:
+                try:
+                    pending_id = self._queue.get_nowait()
+                except Exception:
+                    break
+                self._queued_ids.add(pending_id)
         if self._pool:
-            self._pool.shutdown(wait=False, cancel_futures=True)
+            pool = self._pool
             self._pool = None
+            with self._lock:
+                for fut, (exp_id, owner) in list(self._inflight.items()):
+                    if fut.done() or fut.cancelled():
+                        self._inflight.pop(fut, None)
+                        continue
+                    if getattr(fut, "running", lambda: False)():
+                        continue  # 在跑：由 _run_one 的 finally 收口（含减计数）
+                    # 未开跑：取消并回灌队列 + 回退计数；`cancel()` 也可能因竞态
+                    # 返回 False（判不出状态时保守同样回灌，绝不静默丢）
+                    fut.cancel()
+                    self._queued_ids.add(exp_id)
+                    self._active_by_session[owner] = max(
+                        0, self._active_by_session.get(owner, 1) - 1
+                    )
+                    self._inflight.pop(fut, None)
+            pool.shutdown(wait=False, cancel_futures=True)
 
     # ------------------------------------------------------------------
     def _dispatch_loop(self) -> None:
@@ -163,8 +212,18 @@ class ResearchWorker:
                 self._stop.wait(0.5)
                 continue
             if self._pool is None:
-                break  # R1-P3-18：stop() 已置空池（join 超时路径）——dispatcher 优雅退出，不再裸 assert 崩线程
-            self._pool.submit(self._run_one, experiment_id, owner)
+                # R1-P3-18：stop() 已置空池（join 超时路径）——dispatcher 优雅退出，
+                # 不再裸 assert 崩线程。R4A-P3-3：退出前必须把已消费的 id 还回去
+                # 并回退会话计数（否则该实验既不在队列也不在跑，计数永久泄漏）。
+                with self._lock:
+                    self._queued_ids.add(experiment_id)
+                    self._active_by_session[owner] = max(
+                        0, self._active_by_session.get(owner, 1) - 1
+                    )
+                break
+            fut = self._pool.submit(self._run_one, experiment_id, owner)
+            with self._lock:
+                self._inflight[fut] = (experiment_id, owner)
 
     def _run_one(self, experiment_id: str, owner: str) -> None:
         try:
@@ -184,6 +243,11 @@ class ResearchWorker:
         finally:
             with self._lock:
                 self._active_by_session[owner] = max(0, self._active_by_session.get(owner, 1) - 1)
+                # 完成即从在途表摘除（stop() 只处理"未开跑被取消"的那批）
+                for _fut, _info in list(self._inflight.items()):
+                    if _info == (experiment_id, owner):
+                        del self._inflight[_fut]
+                        break
 
     # ------------------------------------------------------------------
     def status(self) -> dict:
