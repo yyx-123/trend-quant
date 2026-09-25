@@ -12,7 +12,7 @@ import threading
 from datetime import date
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -28,6 +28,7 @@ from rule_backtest.batch_service import (
     strategy_uses_random_indicator,
 )
 from rule_backtest.loader import StrategyLoader
+from services.auth import get_current_user
 
 logger = get_logger(__name__)
 
@@ -206,7 +207,10 @@ async def run_batch_backtest(payload: BatchRunRequest) -> dict:
                         _batch_cancel_events[batch["batch_id"]] = cancel_event
                 try:
                     # Per-run service instance to avoid sharing engine state across threads.
-                    BatchBacktestService().run_batch(batch["batch_id"], cancel_event=cancel_event)
+                    # 走 run_batch_frozen：批次跨 16:30 时冻结写任务，避免逐格读到两版价格
+                    BatchBacktestService().run_batch_frozen(
+                        batch["batch_id"], cancel_event=cancel_event
+                    )
                 finally:
                     with _batch_cancel_lock:
                         _batch_cancel_events.pop(batch["batch_id"], None)
@@ -397,20 +401,33 @@ async def delete_batch_run(batch_id: str) -> dict:
 
 
 @router.get("/api/runs/{batch_id}/export")
-async def export_batch(batch_id: str, compare: str = "", live: bool = True) -> dict:
+async def export_batch(
+    batch_id: str,
+    compare: str = "",
+    live: bool = True,
+    live_all: bool = False,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """导出批次分析数据（方案 §8.2.6）：与 scripts/export_backtest_analysis.py
-    同一实现，返回导出目录路径。页面不加入口，供远程/自动化调用。"""
+    同一实现，返回导出目录路径。页面不加入口，供远程/自动化调用。
+
+    权限边界：`live_trades.csv` 是**逐用户**的实盘成交明细，默认只导出调用者自己的
+    （此前无过滤：任何已登录用户都能拿到全体用户的已清仓成交）。admin 需要全量时
+    显式传 `live_all=true`。
+    """
     from services.backtest_export import export_batch_analysis
 
     db = db_module.get_db()
     if db.get_batch_run(batch_id) is None:
         raise HTTPException(status_code=404, detail="批次不存在")
+    scope_all = bool(live_all) and bool(user.get("is_admin"))
     try:
         return export_batch_analysis(
             db,
             batch_id,
             alt_batch_id=compare.strip() or None,
             include_live=live,
+            user_id=None if scope_all else int(user.get("id")),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

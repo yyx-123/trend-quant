@@ -77,13 +77,15 @@ def rebuild_account_from_manual_trades(
         if slot is None:
             agg[symbol] = {
                 "qty": qty, "cost": qty * buy_price, "entry_price": buy_price,
-                "entry_date": buy_date,
+                "entry_date": buy_date, "lots": [(qty, buy_date)],
             }
         else:
             slot["qty"] += qty
             slot["cost"] += qty * buy_price
             slot["entry_price"] = slot["cost"] / slot["qty"]  # 加权成本
             slot["entry_date"] = min(slot["entry_date"], buy_date)  # 最早入场
+            # 逐笔留档：T+1 可卖量必须按**每笔**的买入日判定（见下）
+            slot["lots"].append((qty, buy_date))
     del open_trades
 
     account = Account(cash=cash)
@@ -96,9 +98,14 @@ def rebuild_account_from_manual_trades(
             stop_state = _rebuild_stop_state(
                 position_risk_module, panel, symbol, buy_date, entry_price
             )
-        # T+1（评审 DS-P2-6）：buy_date == 当日 → sellable=0（当日买入不可卖，
-        # 否则止损评估会把当日买入列进"应卖"——与 §4.2/§5.7 同路径不一致）
-        sellable = 0 if buy_date >= panel.dates[-1] else qty
+        # T+1（评审 DS-P2-6）：**逐笔**按买入日判定可卖量——当日买入不可卖，
+        # 否则止损评估会把当日买入列进"应卖"（与 §4.2/§5.7 同路径不一致）。
+        # 不能用"最早入场日"判整笔：存量允许同标的多次买入，`昨日买 1000 +
+        # 今日买 1000` 若按最早日判会得到 sellable=2000（实际只有 1000 可卖），
+        # 清单会下发 executable=true 的 2000 股卖出（人工照做会被券商拒），
+        # shadow 现金也按 2000 股入账 → 买入清单被虚增现金放大（R12B-F3）。
+        last_day = panel.dates[-1]
+        sellable = int(sum(q for q, d in slot["lots"] if d < last_day))
         account.positions[symbol] = Position(
             symbol=symbol, quantity=qty, sellable_quantity=sellable,
             avg_cost=entry_price, entry_date=buy_date, entry_price=entry_price,
@@ -245,6 +252,17 @@ def generate_daily_list(
     }
     symbols = _live_universe_symbols(db, config, held_symbols)
     pad_start = (pd.Timestamp(day) - pd.Timedelta(days=400)).date()
+    # 持仓入场日可能早于 400 天窗口：那样 `_rebuild_stop_state` 的 `date_pos(buy_date)`
+    # 返回 None → stop=None → 该持仓在清单里**永不产生止损卖出意图**（R12B-F2 实测：
+    # 2025-06 买入的持仓在 2026-09 的清单里止损被静默取消，只有一句 heat 语义 caveat）。
+    # 把窗口起点前移到最早未平仓买入日 − 60 自然日（覆盖 ATR 预热与余量）。
+    _open_buy_dates = [
+        pd.Timestamp(t["buy_date"]).date()
+        for t in db.list_manual_trades(user_id)
+        if t["status"] == "open" and t.get("buy_date")
+    ]
+    if _open_buy_dates:
+        pad_start = min(pad_start, min(_open_buy_dates) - pd.Timedelta(days=60))
     panel = gateway.get_panel(
         symbols=symbols, start=pad_start, end=day,
         fields=["open", "high", "low", "close", "volume", "amount"],

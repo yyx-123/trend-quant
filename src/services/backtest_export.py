@@ -96,15 +96,23 @@ def _round_trips_frame(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(flat)
 
 
-def _live_trades_frame(db: Database) -> pd.DataFrame:
+def _live_trades_frame(db: Database, *, user_id: int | None = None) -> pd.DataFrame:
     """实盘逐笔（已清仓）+ 同口径 post-exit 漂移（方案 §8.1 live_trades.csv）。
 
     价格为实盘实际成交价（未复权），post-exit 漂移用 raw 行情（同一口径）。
+
+    `user_id` 是**权限边界**：HTTP 导出端点必须传调用者 id（否则任何已登录用户都能
+    拿到别人的实盘成交——实测非 admin 用户可导出全体用户的 15 笔已清仓记录）；
+    仅本地脚本（单操作员场景）可传 None 表示全部用户。
     """
+    sql = "SELECT * FROM manual_trades WHERE status = 'closed'"
+    params: tuple = ()
+    if user_id is not None:
+        sql += " AND user_id = ?"
+        params = (int(user_id),)
+    sql += " ORDER BY user_id, id"
     with db._connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM manual_trades WHERE status = 'closed' ORDER BY user_id, id"
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     out: list[dict[str, Any]] = []
     bars_cache: dict[str, pd.DataFrame] = {}
     for row in rows:
@@ -155,6 +163,7 @@ def export_batch_analysis(
     alt_batch_id: str | None = None,
     out_dir: Path | str = Path("exports"),
     include_live: bool = True,
+    user_id: int | None = None,
 ) -> dict:
     """导出一个批次（可选与另一批次对比）的全部分析文件，返回导出目录与文件清单。"""
     batch = db.get_batch_run(batch_id)
@@ -208,7 +217,8 @@ def export_batch_analysis(
         files["compare_meta.json"] = 1
 
     if include_live:
-        live = _live_trades_frame(db)
+        # 权限边界：HTTP 端点传调用者 user_id；本地脚本传 None（单操作员，导出全体）
+        live = _live_trades_frame(db, user_id=user_id)
         files["live_trades.csv"] = _write_csv(live, target / "live_trades.csv")
 
     config = json.loads(batch.get("config_json") or "{}")
@@ -238,6 +248,10 @@ def export_batch_analysis(
         ),
         "calibers": {
             "price_adjustment": "qfq 前复权（回测行情与 round-trip 价格；live_trades 为未复权实际成交价）",
+            "live_trades_scope": (
+                f"user_id={user_id}（HTTP 导出按调用者过滤）"
+                if user_id is not None else "全部用户（本地脚本口径）"
+            ),
             "fees": "pnl 已扣佣金与印花税；滑点含在成交价中",
             "none_means": "NULL = 数据不足或不适用（如区间末尾出场的 post-exit 字段、无硬止损时的 r_multiple）",
             "sweep_chandelier_ratio": (

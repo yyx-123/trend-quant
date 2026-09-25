@@ -875,7 +875,26 @@ class BatchBacktestService:
     # ------------------------------------------------------------------
     # execution (background thread)
     # ------------------------------------------------------------------
+    def run_batch_frozen(
+        self, batch_id: str, cancel_event: threading.Event | None = None
+    ) -> None:
+        """批次执行 = `run_batch` + 运行期数据冻结（决策 A3）。
+
+        批次实测耗时 37~44 分钟且**逐格惰性读行情**，而 16:30 日更会对有新 bar 的
+        标的重写 qfq（历史价格随除权因子变化，实测一次因子更新改写 1551/1632 行）。
+        不冻结时，先跑的格与后跑的格可能落在两版价格上，而格子行不带版本、只有批次头
+        一个 `data_version` → 血缘失真（R12B-F4：旧栈此前 0 处冻结门，新栈在
+        `run_backtest` 内部取门）。
+        代价：批次与日更重叠时日更顺延（`job_runs` 有 `daily_update_deferred` 留痕），
+        这是决策 A3 的既定取舍。
+        """
+        from core import run_freeze
+
+        with run_freeze.frozen_writes():
+            self.run_batch(batch_id, cancel_event=cancel_event)
+
     def run_batch(self, batch_id: str, cancel_event: threading.Event | None = None) -> None:
+        """批次主体（**调用方应优先用 `run_batch_frozen`**：单跑本方法不带冻结门）。"""
         cancel_event = cancel_event or threading.Event()
         batch = self.db.get_batch_run(batch_id)
         if batch is None:

@@ -98,15 +98,39 @@ def test_zero_or_negative_close_never_claims_limit_down():
         assert row["limit_down_price"] is not None, "限价本身仍应照常给出（仅不用于比较）"
 
 
-def test_extreme_ex_factor_is_ignored_not_amplified():
-    """极端因子（1e12/1e-12）视为脏数据跳过，不得产出 limit_up=0.0 这类坏数字。"""
-    huge = _row(_frame(ETF, ETF_NAME, 0.616, 0.678, ex_factors=[("2024-09-27", 1e12)]), D2)
-    assert huge["limit_up_price"] == 0.678, "极端因子应被跳过（基准回到前收）"
-    tiny = _row(_frame(ETF, ETF_NAME, 0.616, 0.678, ex_factors=[("2024-09-27", 1e-12)]), D2)
-    assert tiny["limit_up_price"] == 0.678
-    # 正常因子（0.2~10 区间）必须照常生效，不能被守卫误伤
-    legit = _row(_frame(ETF, ETF_NAME, 0.616, 0.678, ex_factors=[("2024-09-27", 1.5)]), D2)
-    assert legit["limit_up_price"] == 0.452  # 0.616/1.5=0.41067 ×1.1 = 0.4517 → 0.452
+def test_ex_factor_must_be_corroborated_by_observed_jump():
+    """因子必须与观测跳变互证：极端/带内脏因子一律跳过，合法因子照常生效。
+
+    曾经的纯幅值带（[1e-3, 1e3]）挡不住带内的脏因子——R12A-F2 实证 f=1e3 会产出
+    `limit_up=0.001` 且 `is_limit_up=True`（与 1e12 同形）；f∈[0.78,1.28] 也会因
+    基准价被压低而伪造涨停。现在改为：implied = raw(上一根) / raw(除权那根)，
+    |log f − log implied| > max(25%, 3×tick/前收) 即跳过。
+    """
+    # ① 带外脏因子（1e12 / 1e-12 / 1e3 / 1e-3）与"带内但跳变严重不一致"的 f=2.0
+    #    （夹具 implied=0.9085 → |log2 − log0.9085| = 0.789 > 0.6）都必须跳过
+    for bad in (1e12, 1e-12, 1e3, 1e-3, 2.0):
+        row = _row(_frame(ETF, ETF_NAME, 0.616, 0.678, ex_factors=[("2024-09-27", bad)]), D2)
+        assert row["limit_up_price"] == 0.678, f"f={bad} 未被互证判据拦下"
+    # ② 合法因子 + 匹配的 raw 跳变（0.616 → 0.410667 = /1.5）：照常生效
+    #    0.616/1.5 = 0.41067 ×1.1 = 0.4517 → 0.452
+    legit = compute_tradability(
+        None, symbols=[ETF], dates=[D1, D2],
+        raw_closes={ETF: pd.Series({D1: 0.616, D2: 0.410667})},
+        ex_factors={ETF: [("2024-09-27", 1.5)]},
+        listing_dates={ETF: None},
+        asset_info={ETF: {"asset_type": "etf", "name": ETF_NAME}},
+    )
+    row = _row(legit, D2)
+    assert abs(row["limit_up_price"] - 0.452) < 1e-9, "跳变互证的合法因子必须生效"
+    # ③ 大额份额折算（f=0.2，跳变互证）：生效而非被幅值带误杀
+    consol = compute_tradability(
+        None, symbols=[ETF], dates=[D1, D2],
+        raw_closes={ETF: pd.Series({D1: 0.616, D2: 3.08})},   # 0.616/0.2 = 3.08
+        ex_factors={ETF: [("2024-09-27", 0.2)]},
+        listing_dates={ETF: None},
+        asset_info={ETF: {"asset_type": "etf", "name": ETF_NAME}},
+    )
+    assert abs(_row(consol, D2)["limit_up_price"] - 3.388) < 1e-9
 
 
 def test_tail_slippage_whitelist_is_direction_sensitive():

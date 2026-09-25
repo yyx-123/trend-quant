@@ -13,6 +13,7 @@ from rule_backtest.metrics import (
     compute_monthly_heatmap,
     compute_summary,
     monthly_returns,
+    sanitize_ratio_metrics,
 )
 from rule_backtest.models import (
     BacktestExecutionConfig,
@@ -231,14 +232,25 @@ class SingleSymbolAllInBacktestEngine:
                 progress_callback(day_no, total_days)
 
         drawdown = compute_drawdown(daily_nav)
-        summary = compute_summary(daily_nav=daily_nav, trades=trades, turnover_total=turnover_total)
+        # 摘要出口过幅值闸门（单点收口）：退化腿（零成交/全现金/极短窗口如 IPO 一字板）
+        # 的比值型指标是浮点噪声，实测单跑路径可给出 benchmark 年化 sharpe = 3680.68
+        # 并经 HTTP 直达前端表格；闸门放在引擎出口后，旧栈所有消费面（单策略 API、
+        # 批量落库、导出、前端）自动覆盖，不必逐个消费面补。
+        summary = sanitize_ratio_metrics(
+            compute_summary(daily_nav=daily_nav, trades=trades, turnover_total=turnover_total)
+        )
         benchmark = self._buy_and_hold_benchmark(
             bars=bars,
             initial_capital=execution.initial_capital,
             lot_size=execution.lot_size,
         )
         benchmark_nav = (benchmark or {}).get("series", [])
-        benchmark_summary = compute_summary(daily_nav=benchmark_nav, trades=[], turnover_total=0.0) if benchmark_nav else {}
+        benchmark_summary = (
+            sanitize_ratio_metrics(
+                compute_summary(daily_nav=benchmark_nav, trades=[], turnover_total=0.0)
+            )
+            if benchmark_nav else {}
+        )
         kline_payload = self._build_kline_payload(bars=bars, trades=trades, skipped_buys=skipped_buys)
 
         return {

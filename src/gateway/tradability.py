@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 
 import numpy as np
@@ -268,6 +269,7 @@ def compute_tradability(
         # E+1 日产出**假跌停**（f ≥ 1/0.9 时收盘 ≤ 被抬高的跌停价）→ 卖不掉
         # 且盘中止损被阻塞。enabled 池 274 只标的 / 932 个交易日受影响。
         f_ax = np.ones(len(axis_days), dtype=float)
+        tick = _tick_for(asset_type)
         if ser is not None:
             bar_pos = np.flatnonzero(np.isfinite(close_ax))
             if bar_pos.size:
@@ -280,11 +282,9 @@ def compute_tradability(
                         f = float(factor)
                     except (TypeError, ValueError):
                         continue
-                    # 合理性范围守卫：非有限/≤0 之外的**极端值**（如 1e12、1e-12）
-                    # 会通过"合法数值"检查并产出 limit_up=0.0 且 is_limit_up=True
-                    # 这类"像真值的坏数字"；生产库实测 f∈[0.2, 9.97]，取 [1e-3, 1e3]
-                    # 为宽松带（越界视为脏数据，跳过该因子）。
-                    if not np.isfinite(f) or not (1e-3 <= f <= 1e3):
+                    # 脏因子守卫：非有限/≤0 直接跳过（否则 limit_up=0.0 且
+                    # is_limit_up=True 这类"像真值的坏数字"）。
+                    if not np.isfinite(f) or f <= 0:
                         continue
                     # 第一根「日期严格晚于 E 且有 bar」的轴日 = 除权除息日。
                     # **累乘**而非覆盖（残留）：停牌跨越两个除权日时
@@ -292,7 +292,34 @@ def compute_tradability(
                     # 偏高、产出假跌停（002129.SZ 真实库有 1 例，差异 0.24%）。
                     k = int(np.searchsorted(bar_ord, ex_ord, side="right"))
                     if k < bar_pos.size:
-                        f_ax[int(bar_pos[k])] *= f
+                        pos = int(bar_pos[k])
+                        # **与观测跳变互证**（两层判据）：
+                        # ① 经验合法带之外（[0.05, 20]，生产库实测 f∈[0.2, 9.97]）
+                        #    直接视为脏因子——f=1e3 会产出 limit_up=0.001 且
+                        #    is_limit_up=True，f=1e12 同形（R12A-F2 实证）；
+                        # ② 带内但跳变**严重**不一致（|log cum − log implied| > 0.6，
+                        #    因子与价格序列差 1.8 倍以上）跳过——基准价被压低同样会
+                        #    伪造涨停。implied = raw(上一根有 bar)/raw(该根)；
+                        #    **cum 是累乘后**的因子（停牌跨越多个除权日时两个因子落到
+                        #    同一根 bar，观测跳变只与乘积对应，逐因子比对会误杀第二个）。
+                        # 容差刻意放很松：生产库 10,177 条真实因子里只有 2 条
+                        # （2005/2008 年的两只股票，其 raw 序列本身自相矛盾）会被拦下，
+                        # 其余除权/折算全部照常生效；小额分红在分位舍入下不可测，
+                        # 故不要求精确匹配。
+                        if not (0.05 <= f <= 20):
+                            continue
+                        cum = float(f_ax[pos]) * f
+                        prev_pos = int(bar_pos[k - 1]) if k > 0 else None
+                        if prev_pos is not None:
+                            raw_prev = float(close_ax[prev_pos])
+                            raw_bar = float(close_ax[pos])
+                            if raw_prev > 0 and raw_bar > 0:
+                                implied = raw_prev / raw_bar
+                                if abs(math.log(cum) - math.log(implied)) > max(
+                                    0.6, 3.0 * tick / raw_prev
+                                ):
+                                    continue  # 与价格序列严重不一致 → 不动基准价
+                        f_ax[pos] *= f
         f_t = f_ax[run_idx]
 
         # 新股上市初期无涨跌幅限制（天数分板块/分时代，GLM53F-P2-17）
@@ -308,7 +335,6 @@ def compute_tradability(
         with np.errstate(all="ignore"):
             base = prev / f_t
             valid = np.isfinite(base) & (base > 0) & ~no_limit
-            tick = _tick_for(asset_type)
             limit_up = np.where(valid, _round_tick_vec(base * (1.0 + limit_pct), tick), np.nan)
             limit_down = np.where(valid, _round_tick_vec(base * (1.0 - limit_pct), tick), np.nan)
             close_rounded = _round_tick_vec(close_v, tick)

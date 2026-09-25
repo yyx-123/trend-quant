@@ -586,6 +586,30 @@ def compute_annual_returns(
     return sanitize_annual_blocks(out)
 
 
+def sanitize_ratio_metrics(summary: dict | None) -> dict:
+    """把摘要里**不可能**的比值型指标置 None（返回副本，不改入参）。
+
+    与 `sanitize_annual_blocks` 同一口径（幅值 > `DEGENERATE_SHARPE_ABS_LIMIT`），
+    供**引擎 summary 出口**使用——这是"单点收口"：旧栈的每个消费面（单策略 API、
+    批量落库、导出、前端）都从引擎结果取值，闸门放在出口就不必逐个消费面补
+    （R12A-F1 实测：只补批量面时，单跑路径的 `benchmark_summary.sharpe = 3680.68`
+    仍经 HTTP 直达前端表格）。`calmar` 不在闸门内（低回撤/短窗口可合法 > 50）。
+    """
+    if not isinstance(summary, dict):
+        return {}
+    out = dict(summary)
+    for key in _RATIO_METRIC_KEYS + ("benchmark_sharpe", "excess_sharpe"):
+        value = out.get(key)
+        if value is None:
+            continue
+        try:
+            if abs(float(value)) > DEGENERATE_SHARPE_ABS_LIMIT:
+                out[key] = None
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def sanitize_annual_blocks(blocks: list[dict] | None) -> list[dict]:
     """年度块的**幅值闸门**（写入面与读取面共用）：不可能的比值型指标置 None。
 
@@ -598,20 +622,7 @@ def sanitize_annual_blocks(blocks: list[dict] | None) -> list[dict]:
     显示并进 CSV，而写入面闸门管不到历史行。`calmar` 不在闸门内（低回撤/短窗口
     可合法 > 50）。
     """
-    out: list[dict] = []
-    for row in blocks or []:
-        if not isinstance(row, dict):
-            out.append(row)
-            continue
-        cleaned = dict(row)
-        for key in _RATIO_METRIC_KEYS + ("benchmark_sharpe", "excess_sharpe"):
-            value = cleaned.get(key)
-            if value is None:
-                continue
-            try:
-                if abs(float(value)) > DEGENERATE_SHARPE_ABS_LIMIT:
-                    cleaned[key] = None
-            except (TypeError, ValueError):
-                continue
-        out.append(cleaned)
-    return out
+    return [
+        sanitize_ratio_metrics(row) if isinstance(row, dict) else row
+        for row in (blocks or [])
+    ]

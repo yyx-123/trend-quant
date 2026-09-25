@@ -189,3 +189,66 @@ def test_live_account_rebuild_aggregates_same_symbol(market, registry):
     # 加权成本 = (1000×20 + 500×22) / 1500 ≈ 20.667
     assert pos.avg_cost == pytest.approx((1000 * 20.0 + 500 * 22.0) / 1500, abs=1e-6)
     assert pos.entry_date == pd.Timestamp("2024-03-13").date()  # 最早入场
+
+
+def test_live_sellable_quantity_is_per_lot(market, registry):
+    """R12B-F3：同标的多次买入时 T+1 可卖量必须**逐笔**判定。
+
+    旧实现按聚合后的"最早入场日"判整笔：`昨日买 1000 + 今日买 1000` 得到
+    sellable=2000（实际只有 1000 可卖），清单会下发 executable=true 的 2000 股
+    卖出（人工照做被券商拒），shadow 现金也按 2000 股入账 → 买入清单被虚增现金放大。
+    """
+    from datetime import datetime as _dt
+
+    from gateway.service import Gateway
+    from portfolio.live import rebuild_account_from_manual_trades
+
+    versions = _seed(market, registry)
+    user = _user(market)
+    # 昨日买 1000（可卖）+ 当日买 1000（T+1 不可卖）
+    market.create_manual_trade(user["id"], "LIV000.SS", "2024-03-14", 20.0, 1000)
+    market.create_manual_trade(user["id"], "LIV000.SS", "2024-03-15", 22.0, 1000)
+    as_of = _dt(2024, 3, 15, 14, 0)
+    generate_daily_list(
+        market, strategy_version_id=versions["base-v1"], user_id=user["id"],
+        as_of=as_of, initial_capital=100_000,
+    )
+    panel = Gateway(market).get_panel(
+        symbols=["LIV000.SS"], start=None, end=as_of.date(),
+        fields=["open", "high", "low", "close", "volume", "amount"],
+        adjust="qfq", as_of=as_of, mode="live", caller_layer="live",
+    )
+    from portfolio.slots import REGISTRY as _R
+
+    prisk = _R.require("hard_stop@1", slot="position_risk").factory({"atr_mul": 1.5})
+    account = rebuild_account_from_manual_trades(
+        market, user_id=user["id"], initial_capital=100_000,
+        panel=panel, position_risk_module=prisk,
+    )
+    pos = account.positions["LIV000.SS"]
+    assert pos.quantity == 2000
+    assert pos.sellable_quantity == 1000, "当日买入的那 1000 股不可卖（T+1）"
+
+
+def test_live_panel_window_covers_old_positions(market, registry):
+    """R12B-F2：持仓入场日早于 400 天窗口时必须仍能重建止损状态。
+
+    旧实现固定 `pad_start = 决策日 − 400 天`：更早买入的持仓 `date_pos(buy_date)`
+    返回 None → stop=None → 该持仓在清单里**永不产生止损卖出意图**（止损被静默取消）。
+    修复后窗口起点前移到最早未平仓买入日 − 60 天。
+    """
+    from datetime import datetime as _dt
+
+    versions = _seed(market, registry)
+    user = _user(market)
+    # 行情从 2023-01-02 起（320 根）；买在首日 → 距 2024-03-15 约 440 天 > 400
+    first_day = market.load_market_data("LIV000.SS", price_mode="qfq").iloc[0]["time"]
+    buy_date = str(pd.Timestamp(first_day).date())
+    market.create_manual_trade(user["id"], "LIV000.SS", buy_date, 15.0, 1000)
+
+    target = generate_daily_list(
+        market, strategy_version_id=versions["base-v1"], user_id=user["id"],
+        as_of=_dt(2024, 3, 15, 14, 0), initial_capital=100_000,
+    )
+    caveats = " ".join(target.get("caveats") or [])
+    assert "持仓无止损价" not in caveats, f"老持仓的止损状态应已重建，实际 caveats: {caveats}"

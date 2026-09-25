@@ -71,7 +71,7 @@ def main() -> None:
     print("运行中可安全关闭（Ctrl+C）：已完成格子已落库，半成品批次在页面删除即可")
     try:
         t0 = time.time()
-        service.run_batch(batch_id)
+        service.run_batch_frozen(batch_id)
         run = db.get_batch_run(batch_id)
         print(
             f"完成：{run['status']}，ok={run['ok_cells']} failed={run['failed_cells']} "
