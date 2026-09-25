@@ -471,50 +471,85 @@ def test_heat_cap_passes_candidates_without_stop_estimate():
 # ----------------------------------------------------------------------
 
 
+def _engine_shaped_run(n_buys: int, *, slip: float = 0.001, qty: int = 1000,
+                       price: float = 10.0, equity: float = 1_000_000.0):
+    """构造**引擎形态**的两侧结果（nav 带 cash/持仓市值，两侧各自内部自洽）。
+
+    恒等式校验要求 nav 行携带 cash + 持仓市值字段（真实引擎就是这么写的）；
+    自制的精简 nav 会让恒等式无法校验（如实跳过而非判负）。
+    """
+    buy_n = [{"date": date(2023, 1, 4), "side": "BUY", "qty": qty,
+              "price": price * (1 + slip)} for _ in range(n_buys)]
+    buy_o = [{"date": date(2023, 1, 4), "side": "BUY", "qty": qty,
+              "price": price} for _ in range(n_buys)]
+
+    def _nav(trades):
+        held = sum(t["qty"] for t in trades if t["side"] == "BUY")
+        spent = sum(t["qty"] * t["price"] for t in trades if t["side"] == "BUY")
+        cash = equity - spent
+        pv = held * price
+        # 逐日自洽：建仓前 cash=全额、持仓市值 0；建仓后 cash + 市值 = equity
+        return [
+            {"date": "2023-01-03", "cash": equity, "positions_value": 0.0,
+             "market_value": 0.0, "qty": 0, "close": price, "equity": equity},
+            {"date": "2023-01-04", "cash": cash, "positions_value": pv,
+             "market_value": pv, "qty": held, "close": price,
+             "equity": cash + pv},
+        ]
+
+    new = {"trades": buy_n, "daily_nav": _nav(buy_n)}
+    old = {"trades": [
+        {"date": t["date"], "side": t["side"], "qty": t["qty"],
+         "exec_price": t["price"]} for t in buy_o
+    ], "daily_nav": _nav(buy_o)}
+    return new, old
+
+
 def test_parity_attribution_rejects_large_qty_and_nav_errors():
+    """伪造的净值与伪造的成交数量都必须被判超纲（**引擎形态**的 nav）。
+
+    R1 的版本用"纯数量界"来抓数量漂移；最终口径下数量界是物理量界（会随轮数
+    放宽），真正承重的是**精确恒等式**：伪造净值破坏 `equity == cash + 市值`，
+    伪造成交量破坏 `持仓市值 == Σ成交数量 × 收盘价`——两者都不随窗口长度退化。
+    """
     from engine.parity import attribute_diffs
 
-    d = date(2023, 1, 4)
+    n_buys = 12
+    new, old = _engine_shaped_run(n_buys)
+    base = attribute_diffs(new, old)
+    assert base["unexplained"] == [], base["unexplained"][:2]
+    assert base["nav_identity_checked_days"] > 0, "恒等式必须真的校验过"
+    assert base["nav_identity_residual"] < 1e-12
 
-    def _res(trades, nav, legacy=False):
-        if legacy:
-            trades = [{"date": t["date"], "side": t["side"], "qty": t["qty"],
-                       "exec_price": t["price"]} for t in trades]
-        return {"trades": trades, "daily_nav": nav}
+    # (a) 伪造净值：+100% / +60% / +5% 都必须被抓（且不依赖窗口长度）
+    for mult in (2.0, 1.6, 1.05):
+        import copy
 
-    # (a) 一笔合法尾盘价差 + 净值 +100% → 净值点必须进 unexplained
-    nav_new = [{"date": "2023-01-03", "equity": 500_000.0},
-               {"date": "2023-01-04", "equity": 1_000_300.0}]
-    nav_old = [{"date": "2023-01-03", "equity": 500_000.0},
-               {"date": "2023-01-04", "equity": 500_000.0}]
-    out = attribute_diffs(
-        _res([{"date": d, "side": "BUY", "qty": 1000, "price": 10.03}], nav_new),
-        _res([{"date": d, "side": "BUY", "qty": 1000, "price": 10.0}], nav_old, legacy=True),
-    )
-    assert out["unexplained"], "净值 +100% 错误不得被单笔合法价差吸收（父树会吸收）"
+        inj = copy.deepcopy(new)
+        inj["daily_nav"][-1]["equity"] *= mult
+        out = attribute_diffs(inj, old)
+        kinds = {u.get("kind") for u in out["unexplained"]}
+        assert "nav_identity_broken" in kinds, (mult, kinds)
 
-    # (b) 末笔数量漂移 60%：父树的数量界随笔数线性放大（i=119 时远超整仓）→
-    # 被吸收；修复后以"该笔数量的 1/2"为硬上限 → 必须进 unexplained
-    tr_new, tr_old = [], []
-    for i in range(120):
-        tr_new.append({"date": d, "side": "BUY",
-                       "qty": 1600 if i == 119 else 1000, "price": 10.01})
-        tr_old.append({"date": d, "side": "BUY", "qty": 1000, "price": 10.0})
-    out2 = attribute_diffs(
-        _res(tr_new, [{"date": "2023-01-04", "equity": 1e6}]),
-        _res(tr_old, [{"date": "2023-01-04", "equity": 1e6}], legacy=True),
-    )
-    assert any(u.get("kind") == "trade_mismatch" for u in out2["unexplained"]), \
-        "数量漂移 60% 不得被当作滑点下游（父树会吸收）"
+    # (b) 伪造成交量（末笔 +60%）：恒等式抓（位置市值与成交清单不符）
+    import copy
 
-    # 反向：小漂移（一手）仍属合法下游，必须被归类而非误报
-    out3 = attribute_diffs(
-        _res([{"date": d, "side": "BUY", "qty": 900, "price": 10.03}],
-             [{"date": "2023-01-04", "equity": 1e6}]),
-        _res([{"date": d, "side": "BUY", "qty": 1000, "price": 10.0}],
-             [{"date": "2023-01-04", "equity": 1e6}], legacy=True),
-    )
-    assert not out3["unexplained"], "一手内的数量漂移是滑点的合法下游"
+    inj2 = copy.deepcopy(new)
+    inj2["trades"][-1]["qty"] = int(inj2["trades"][-1]["qty"] * 1.6)
+    out2 = attribute_diffs(inj2, old)
+    kinds2 = {u.get("kind") for u in out2["unexplained"]}
+    assert "nav_position_identity_broken" in kinds2, kinds2
+
+    # (c) 超出滑点带的价差 → trade_mismatch（白名单不吸收）
+    inj3 = copy.deepcopy(new)
+    inj3["trades"][-1]["price"] = inj3["trades"][-1]["price"] * 1.05
+    out3 = attribute_diffs(inj3, old)
+    assert any(u.get("kind") == "trade_mismatch" for u in out3["unexplained"])
+
+    # (d) 合法滑点差异仍必须被归类（不得假报警）
+    new4, old4 = _engine_shaped_run(200)
+    out4 = attribute_diffs(new4, old4)
+    assert out4["unexplained"] == [], out4["unexplained"][:2]
 
 
 # ----------------------------------------------------------------------
@@ -623,9 +658,27 @@ def test_plateau_items_accepts_dict_form_and_zero_values():
     params = {i["param"] for i in items}
     assert "atr_mul" in params, "字典形态 to 必须被枚举（R1-P2-6）"
     assert "slippage_tail" in params, "合法零值参数也必须能进邻域探查"
+    # 邻域点必须落在**生效位置**（`apply_diff` 的 `to.params or item.params`）；
+    # 断言解析后的有效值，而不是某个具体 dict 的键（R2/V3 复核后 _with_param
+    # 改为单参数扰动，键的位置随形态变化）。
+    from portfolio.slots import REGISTRY, ensure_builtins
+    from portfolio.strategy import apply_diff, parse_strategy_yaml
+
+    ensure_builtins()
+    yaml_text = (
+        "name: t\n"
+        "universe: {module: category_filter@1}\n"
+        "signal: {module: macd_cross@1}\n"
+        "rank: {module: by_freshness@1}\n"
+        "sizing: {module: all_in@1}\n"
+        "portfolio_risk: []\n"
+        "position_risk: {module: hard_stop@1, params: {atr_mul: 1.5}}\n"
+        "execution: {module: tail_session@1}\n"
+    )
+    cfg = parse_strategy_yaml(yaml_text, REGISTRY)
     out = _with_param(diff, "position_risk", "atr_mul", 2.4)
-    assert out[0]["params"]["atr_mul"] == 2.4
-    assert out[0]["to"]["params"]["atr_mul"] == 2.4
+    effective = apply_diff(cfg, out, REGISTRY).slots["position_risk"].params
+    assert effective["atr_mul"] == 2.4
 
 
 def test_plateau_unknown_verdict_is_surfaced_as_absent():

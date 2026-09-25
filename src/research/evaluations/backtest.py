@@ -857,17 +857,33 @@ def _plateau_items(diff: list[dict]) -> list[dict]:
 
 
 def _with_param(diff: list[dict], slot: str, param: str, value) -> list[dict]:
-    """diff 深拷贝并把 (slot, param) 替换为邻域值（两种 to 形态都覆盖）。"""
+    """diff 深拷贝并把 (slot, param) 替换为邻域值——**单参数扰动**。
+
+    必须复刻 `apply_diff` 的取值优先级（`to.params or item.params`）：
+    V3 复核实证，此前"两边都写"的写法在"字典形态 to 无 params + 多个 item
+    级参数"时会把 `to.params` 变成非空，从而**整体接管**并丢掉其余 item 参数
+    ——邻域点实际改了 2 个参数（`atr_period` 被重置为默认），高原/孤峰判定
+    因此对着错误的基准算。现在只在**生效位置**写入：
+
+    - `to` 是字符串 → 写 item.params；
+    - `to` 是字典且 `to.params` 非空（生效）→ 写 to.params，并清掉同名的
+      item 级键，保持"to.params 整体接管"的语义；
+    - `to` 是字典且 `to.params` 为空（item.params 生效）→ 写 item.params，
+      不动 to.params（保持为空，优先级不变）。
+    """
     import copy
 
     out = copy.deepcopy(diff)
     for item in out:
         if item.get("slot") != slot:
             continue
-        item.setdefault("params", {})[param] = value
         to = item.get("to")
-        if isinstance(to, dict):
+        to_params = to.get("params") if isinstance(to, dict) else None
+        if isinstance(to, dict) and to_params:
             to.setdefault("params", {})[param] = value
+            (item.get("params") or {}).pop(param, None)
+        else:
+            item.setdefault("params", {})[param] = value
     return out
 
 

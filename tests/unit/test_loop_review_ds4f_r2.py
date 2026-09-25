@@ -32,18 +32,26 @@ def _res(trades, nav, legacy=False):
     return {"trades": trades, "daily_nav": nav}
 
 
-def _slippage_run(n_prefix: int, *, slip: float = 0.001, qty: int = 1000,
-                  price: float = 10.0, last_qty_mult: float = 1.0,
-                  nav_rel: float = 0.0, equity: float = 1e6):
-    """n_prefix 笔合法尾盘价差 + 末笔可注入异常。"""
+def _full_in_run(n_rounds: int, *, slip: float = 0.001, price: float = 10.0,
+                 equity: float = 100_000.0, lot: int = 100,
+                 position_pct: float = 1.0,
+                 last_qty_mult: float = 1.0, nav_rel: float = 0.0):
+    """复刻真实引擎形态的**满仓**往返（每轮买卖各一笔，仓位 ≈ 全额权益）。
+
+    真实引擎的合法数量漂移是"整手取整的量化随机游走"（每轮至多差一手），
+    满仓形态才复现这一点；小额订单的合成形态会高估界的相对松紧。
+    """
     d = date(2023, 1, 4)
     new, old = [], []
-    for _ in range(n_prefix):
-        new.append({"date": d, "side": "BUY", "qty": qty, "price": price * (1 + slip)})
-        old.append({"date": d, "side": "BUY", "qty": qty, "price": price})
-    new.append({"date": d, "side": "BUY", "qty": int(qty * last_qty_mult),
-                "price": price * (1 + slip)})
-    old.append({"date": d, "side": "BUY", "qty": qty, "price": price})
+    for _ in range(n_rounds):
+        q = int(equity * position_pct / price / lot) * lot
+        # 真实引擎的滑点方向：买入更贵、卖出更便宜（两侧都对我方不利）
+        new.append({"date": d, "side": "BUY", "qty": q, "price": price * (1 + slip)})
+        old.append({"date": d, "side": "BUY", "qty": q, "price": price})
+        new.append({"date": d, "side": "SELL", "qty": q, "price": price * (1 - slip)})
+        old.append({"date": d, "side": "SELL", "qty": q, "price": price})
+    if last_qty_mult != 1.0:
+        new[-1]["qty"] = int(new[-1]["qty"] * last_qty_mult)
     nav_new = [{"date": "2023-01-03", "equity": equity},
                {"date": "2023-01-04", "equity": equity * (1 + nav_rel)}]
     nav_old = [{"date": "2023-01-03", "equity": equity},
@@ -51,49 +59,66 @@ def _slippage_run(n_prefix: int, *, slip: float = 0.001, qty: int = 1000,
     return _res(new, nav_new), _res(old, nav_old, legacy=True)
 
 
-def test_parity_physical_bound_rejects_absurd_nav_error_on_long_prefix():
-    """**R2A-P1-1 的核心回归**：长前缀下 +100% 净值错误必须仍被判超纲。
+def test_parity_no_false_positives_on_long_legitimate_runs():
+    """**R2A-P2-1 / V3-P1-1 的核心回归**：合法（纯尾滑点）长 run 必须零假报警。
 
-    旧口径（滑点上界复合乘积 Π(1+slip)，300 笔时 ≈ 0.39 → ×3 = 1.17）
-    会把 +100% 错误吸收；新口径（累计额外成本 ÷ 权益 × 5）在 300 笔时
-    ≈ 1%，远小于 100%。
+    R1 的"数量 1/2 硬帽"在 4000~6000 日给出 76~229 笔假报警、R2 的"纯现金项"
+    在 260 日就给出 7 笔——合法漂移是整手量化的随机游走（每轮至多一手），
+    界必须同时含**现金项**与**量化项**。这里同时断言两端：
+    短 run 与长 run 的 unexplained 都必须为空。
     """
     from engine.parity import attribute_diffs
 
-    new, old = _slippage_run(300, nav_rel=1.0)
-    out = attribute_diffs(new, old)
-    assert any(u.get("kind") == "nav_point_diff_beyond_interest" for u in out["unexplained"]), \
-        f"长前缀下的 +100% 净值错误必须判超纲（实际 {out['unexplained']}）"
-    assert out["nav_cascade_bound"] < 0.2, f"上界应仍紧（实际 {out['nav_cascade_bound']}）"
+    for rounds in (10, 130, 300, 500, 1000):
+        new, old = _full_in_run(rounds)
+        out = attribute_diffs(new, old)
+        assert out["unexplained"] == [],             f"{rounds} 轮合法运行被误判：{out['unexplained'][:2]}"
+        assert out["classified"]["tail_slippage"] == 2 * rounds
 
 
-def test_parity_physical_bound_rejects_absurd_qty_drift():
-    """数量漂移超过"累计额外成本能买的股数"→ 必须判超纲（R2A-P2-2 收口）。"""
+def test_parity_acceptance_scale_is_discriminating():
+    """stage-1 验收尺度（少笔数、紧界）必须**未饱和**且能抓住荒谬错误。
+
+    验收判据的适用前提就是"未饱和"：此时 `unexplained == []` 才等价于
+    "引擎力学一致"。三种注入（+100% 净值 / +9% 净值 / ×2 数量）都必须落在
+    `unexplained`。
+    """
     from engine.parity import attribute_diffs
 
-    # 120 笔 × 0.1% × 1000 股 ≈ 1200 元额外成本 → 只能解释 120 股
-    new, old = _slippage_run(120, last_qty_mult=2.0)
-    out = attribute_diffs(new, old)
-    assert any(u.get("kind") == "trade_mismatch" for u in out["unexplained"]), \
-        "数量 +100% 不得被当作滑点下游"
-    # 反向：漂移在累计成本能解释的范围内 → 必须归类（不得假报警）
-    new2, old2 = _slippage_run(600, last_qty_mult=1.05)
-    out2 = attribute_diffs(new2, old2)
-    assert not [u for u in out2["unexplained"] if u.get("kind") == "trade_mismatch"], \
-        "累计成本能解释的漂移不得判超纲（Round 1 的 1/2 硬帽会误报）"
+    # 10 轮 = 20 笔差异（≤ 饱和阈值），满仓形态
+    base_new, base_old = _full_in_run(10)
+    base = attribute_diffs(base_new, base_old)
+    assert base["saturated"] is False
+    assert base["unexplained"] == []
+    assert base["nav_cascade_bound"] < 0.05
+
+    for nav_rel, qty_mult, expected in ((1.0, 1.0, "nav"), (0.09, 1.0, "nav"),
+                                        (0.0, 2.0, "trade")):
+        import copy
+
+        new = copy.deepcopy(base_new)
+        if nav_rel:
+            new["daily_nav"][-1]["equity"] *= (1 + nav_rel)
+        if qty_mult != 1.0:
+            new["trades"][-1]["qty"] = int(new["trades"][-1]["qty"] * qty_mult)
+        out = attribute_diffs(new, base_old)
+        assert out["unexplained"], f"nav_rel={nav_rel} qty={qty_mult} 必须判超纲"
+        assert out["saturated"] is False, "注入不改变饱和状态（尺度未变）"
+        kinds = {u.get("kind") for u in out["unexplained"]}
+        assert any(expected in str(k) for k in kinds), kinds
 
 
 def test_parity_reports_saturation_flag():
     """判别力饱和必须显式标注（长 run 的 `unexplained == []` 不等于一致）。"""
     from engine.parity import attribute_diffs
 
-    short_new, short_old = _slippage_run(30, nav_rel=0.0)
+    short_new, short_old = _full_in_run(10)
     short = attribute_diffs(short_new, short_old)
-    assert short["saturated"] is False, "stage-1 验收尺度不饱和"
+    assert short["saturated"] is False
     assert short["attribution_note"] == ""
     assert "n_trade_diffs" in short and "nav_cascade_bound" in short
 
-    long_new, long_old = _slippage_run(600, nav_rel=0.0)
+    long_new, long_old = _full_in_run(300)
     long_out = attribute_diffs(long_new, long_old)
     assert long_out["saturated"] is True
     assert "判别力饱和" in long_out["attribution_note"]
@@ -336,3 +361,64 @@ def _capture_lifespan_jobs(monkeypatch, test_db):
     _frozen_guard = None
     _, jobs = _capture_lifespan(monkeypatch, test_db)
     return jobs
+
+
+def test_plateau_neighbor_probe_changes_one_param_only():
+    """邻域点必须只改被探查的那一个参数（V3-P2-2 复核）。
+
+    字典形态 `to` 无 params + 多个 item 级参数时，邻域注入必须写回
+    **生效位置**（item.params），不得新建 `to.params`——后者会让
+    `apply_diff` 的"to.params 整体接管"生效并静默丢掉其余参数（实测
+    `atr_period` 被重置为默认），高原/孤峰判定因此对着错误基准计算。
+    """
+    from portfolio.slots import REGISTRY, ensure_builtins
+    from portfolio.strategy import apply_diff, parse_strategy_yaml
+    from research.evaluations.backtest import _plateau_items, _with_param
+
+    ensure_builtins()
+    yaml_text = (
+        "name: t\n"
+        "universe: {module: category_filter@1}\n"
+        "signal: {module: macd_cross@1}\n"
+        "rank: {module: by_freshness@1}\n"
+        "sizing: {module: all_in@1}\n"
+        "portfolio_risk: []\n"
+        "position_risk: {module: hard_stop@1, params: {atr_mul: 1.5, atr_period: 20}}\n"
+        "execution: {module: tail_session@1}\n"
+    )
+    # 字典形态 to 只给模块；两个 item 级参数都生效
+    diff = [{"slot": "position_risk", "from": "hard_stop@1",
+             "to": {"module": "hard_stop@1"},
+             "params": {"atr_mul": 2.0, "atr_period": 30}}]
+    cfg = parse_strategy_yaml(yaml_text, REGISTRY)
+    center = apply_diff(cfg, diff, REGISTRY).slots["position_risk"].params
+    assert center["atr_mul"] == 2.0 and center["atr_period"] == 30
+
+    items = {i["param"] for i in _plateau_items(diff)}
+    assert items == {"atr_mul", "atr_period"}
+
+    probe = _with_param(diff, "position_risk", "atr_mul", 2.4)
+    resolved = apply_diff(cfg, probe, REGISTRY).slots["position_risk"].params
+    assert resolved["atr_mul"] == 2.4
+    assert resolved["atr_period"] == 30, \
+        f"邻域点改了第二个参数（实际 {resolved}）——高原判定基准错误"
+
+    probe2 = _with_param(diff, "position_risk", "atr_period", 36)
+    resolved2 = apply_diff(cfg, probe2, REGISTRY).slots["position_risk"].params
+    assert resolved2["atr_period"] == 36
+    assert resolved2["atr_mul"] == 2.0, f"邻域点改了第二个参数（实际 {resolved2}）"
+
+
+def test_parity_saturates_on_many_diffs_even_with_a_tight_bound():
+    """饱和判据必须包含"差异笔数"这一条：小额订单形态下 `drag/equity` 很小
+    （上界紧），但差异笔数已远超 stage-1 尺度——逐笔位置对齐同样不可靠。
+    """
+    from engine.parity import attribute_diffs
+
+    # 1000 股订单、100 万权益 → 仓位仅 1%，drag 相对权益极小；但差异 300 笔
+    new, old = _full_in_run(150, equity=1_000_000.0, price=10.0, lot=100,
+                            position_pct=0.01)
+    out = attribute_diffs(new, old)
+    assert out["n_trade_diffs"] == 300
+    assert out["nav_cascade_bound"] <= 0.05, "该形态的上界应当很紧"
+    assert out["saturated"] is True, "笔数超尺度必须判饱和（判据含 n_trade_diffs）"

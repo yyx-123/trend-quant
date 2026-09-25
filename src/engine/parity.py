@@ -207,14 +207,32 @@ def attribute_diffs(
        不买/跌停日不卖）。``unexplained`` 在卡控场景**必然非空**（级联
        错位的 trade/NAV 差异），不得作为该场景的验收断言。
 
-    **适用区间（R2A 复核校准，务必按此读结果）**：归因界是**物理量**——
-    "新引擎相对旧引擎累计多付/少收的现金"能买多少股、能解释多少净值偏离，
-    而不是滑点上界的复合乘积（后者在数千笔时发散，会把荒谬错误吸收掉）。
-    代价是：**长窗口**下尾滑点成本本身会复合，真实引擎实测合法净值偏离
-    2500 日 47% / 4000 日 63% / 6000 日 74%（零引擎逻辑差异、零卡控）。
-    故本函数的判别力只在短/中窗口（≲200 笔差异）成立；超出时结果里
-    ``saturated=True`` 且 ``attribution_note`` 非空——**不得**再把
-    ``unexplained == []`` 当"引擎力学一致"的验收断言，改用 ``violations``。
+    判据分三层（四轮复核收敛后的最终口径）：
+
+    1. **白名单归类**（差异必须可归因）：tail_slippage / limit_card /
+       t_plus / cash_interest。数量界是**物理量**——"累计多付/少收的现金
+       能买多少股" ＋ "整手取整的量化随机游走"，而不是滑点上界的复合乘积
+       （后者在数千笔时发散，会把荒谬错误吸收掉）。
+    2. **精确恒等式**（不依赖任何启发式界，长窗口同样有效）：
+       - 每侧的 ``equity == cash + 持仓市值``——两个引擎都是这么算的，合法
+         run 残差是浮点级（实测 0.0）；**任何伪造/漂移的净值**（+5% / +100%
+         / 任意窗口长度）都会立刻破坏它（kinds: nav_identity_broken /
+         nav_identity_residual_high）；
+       - 新侧 ``positions_value == Σ(成交清单推出来的持仓量) × 当日收盘价``
+         （收盘价取自旧侧 nav，两侧同一市场价）——任何伪造/错配的成交数量
+         都会立刻破坏它（kind: nav_position_identity_broken）。
+       这两条使"长窗口下伪造净值与合法偏离不可区分"的旧论断失效：合法偏离
+       **满足**恒等式，伪造净值**破坏**恒等式。
+    3. **饱和标注**：白名单归类在长窗口仍会放宽（合法净值偏离实证 260 日
+       2.0% / 1200 日 26% / 2500 日 47% / 4000 日 63% / 6000 日 74%），
+       此时 ``saturated=True`` 且 ``attribution_note`` 非空——``unexplained``
+       的**空白**不能再当作"引擎力学一致"的验收断言，须以恒等式与
+       ``violations`` 为准。
+
+    前置条件（务必如实）：本函数假定两侧**除尾盘滑点外配置相同**（同一
+    profile/费率/计息）。费率或计息参数不同造成的差异**不**在判别范围内
+    （恒等式两侧各自成立，白名单也不覆盖）——那属于"配置差异"，应由
+    run_params 对账而不是归因器发现。
 
     白名单归类规则：
     - trade_mismatch：同日同向且价差幅度在尾盘滑点界限内 → tail_slippage。
@@ -242,37 +260,47 @@ def attribute_diffs(
 
     classified = {k: 0 for k in ATTRIBUTION_WHITELIST}
     unexplained: list[dict] = []
-    # 累计"额外成本"（**物理量**，不是上界）：新引擎相对旧引擎因尾盘滑点
-    # 多付/少收的现金。它是数量漂移与 NAV 漂移唯一的合法来源——
-    #   * 买入：新价更高 → 多付 (P_new − P_old) × qty_old；
-    #   * 卖出：新价更低 → 少收 (P_old − P_new) × qty_old。
-    # loop-review-ds4f R2A-P1-1/P2-1：R1 用"滑点上界的乘积 Π(1+slip)"当界限，
-    # 在生产尺度（数千笔）上 Π 发散到 25%+ → NAV 上限被推到 75%，+100% 的净值
-    # 错误又被吸收；同时"该笔数量的 1/2"硬帽会把**合法**的长 run 漂移判成超纲
-    # （4000~6000 日、零卡控场景下 76~229 笔假报警，而 docstring 要求该场景
-    # `unexplained == []`）。物理量两头都对：能买多少股，取决于已经多花了多少钱。
+    # 累计"额外成本"（**物理量**，不是上界）：新引擎相对旧引擎因尾盘滑点多付
+    # /少收的现金 = Σ |P_new − P_old| × qty_old（买入多付、卖出少收同号）。
+    #
+    # 界的量纲（三轮审查收敛后的最终口径，实测驱动）：
+    #   1. **现金项** `cum_extra_cost / price`：多花的钱能买多少股；
+    #   2. **量化项** `lot_size × n_in_band`：整手取整的**随机游走**——真实的
+    #      合法漂移不是连续量，而是"每轮最多差一手"的量化跳变（实测 260 日
+    #      19 笔差异里 drift 恒为 1~2 手的整数倍、与已发生轮数同阶）。只算
+    #      现金项会低估约 3×（每跳一手值 1 手 × 价，驱动它的现金差小得多）
+    #      → R1 的"数量 1/2 硬帽"与 R2 的"纯现金项"都会把合法 run 判超纲
+    #      （实测 260 日 7 笔 / 4000 日 294 笔假报警）。
+    #   3. 现金项对**所有**同日同向、价差在带内的差异累积（不因数量检验失败
+    #      而冻结——冻结会造成"一笔不归类 → 界的增速停摆 → 连环误杀"）。
     cum_extra_cost = 0.0
-    for i, d in enumerate(diff["trade_diffs"]):
+    n_in_band = 0
+    for d in diff["trade_diffs"]:
         if d["kind"] == "trade_mismatch":
             nt, ot = d["new"], d["old"]
-            if (
-                nt["date"] == ot["date"] and nt["side"] == ot["side"]
-                and ot["price"] > 0
-            ):
-                slip_ratio = abs(nt["price"] / ot["price"] - 1.0)
-                ref_price = float(nt["price"]) or float(ot["price"])
-                # 本笔**之前**累计的额外成本所能解释的股数（+一手取整噪声）
-                qty_bound = (
-                    int(cum_extra_cost / ref_price) + int(lot_size)
-                    if ref_price > 0 else int(lot_size)
-                )
-                qty_drift = abs(int(nt["qty"]) - int(ot["qty"]))
-                if 0 < slip_ratio <= max_tail_slippage and qty_drift <= qty_bound:
-                    classified["tail_slippage"] += 1
-                    cum_extra_cost += abs(float(nt["price"]) - float(ot["price"])) * abs(
-                        int(ot["qty"])
+            try:
+                ot_price = float(ot["price"])
+                nt_price = float(nt["price"])
+                ot_qty = int(ot["qty"])
+                nt_qty = int(nt["qty"])
+            except (TypeError, ValueError):
+                # 形状异常（None/NaN/非数值）→ 显式判超纲，而不是抛异常穿出
+                unexplained.append({**d, "kind": "trade_shape_invalid"})
+                continue
+            if nt["date"] == ot["date"] and nt["side"] == ot["side"] and ot_price > 0:
+                slip_ratio = abs(nt_price / ot_price - 1.0)
+                if 0 < slip_ratio <= max_tail_slippage:
+                    ref_price = nt_price if nt_price > 0 else ot_price
+                    lot = int(lot_size)
+                    qty_bound = (
+                        (int(cum_extra_cost / ref_price) + lot * max(1, n_in_band))
+                        if ref_price > 0 else lot
                     )
-                    continue
+                    n_in_band += 1
+                    cum_extra_cost += abs(nt_price - ot_price) * abs(ot_qty)
+                    if abs(nt_qty - ot_qty) <= qty_bound:
+                        classified["tail_slippage"] += 1
+                        continue
             unexplained.append(d)
         elif d["kind"] == "count_mismatch":
             row = d["new"] or d["old"] or {}
@@ -284,26 +312,97 @@ def attribute_diffs(
         else:
             unexplained.append(d)
 
+    # ---- 精确恒等式校验（V3/V4 复核后的收口；不依赖任何启发式界）----
+    # (a) 内部一致：每侧的 equity 必须等于 cash + 持仓市值。两个引擎都是这么算
+    #     的，故合法 run 的残差是浮点级（~1e-16）；任何**伪造的净值**（无论
+    #     窗口多长、偏离多大）都会立刻破坏它——这是"长窗口下无法判别"论断的
+    #     反例：伪造净值与合法偏离在**恒等式**下完全不同。
+    # (b) 仓位一致：新引擎的 positions_value 必须等于"新成交清单推出来的持仓
+    #     量 × 当日收盘价（取自旧侧 nav，两侧同一市场价）"。伪造/错配的成交
+    #     数量会立刻破坏它。
+    # 两条都**只做判定不吸收**：破坏即 unexplained（同族判定见 tests）。
+    identity_tol = 1e-9
+    identity_equity = 0.0
+    identity_checked_days = 0
+    for side, rows, mv_key in (
+        ("new", new_result.get("daily_nav") or [], "positions_value"),
+        ("legacy", legacy_result.get("daily_nav") or [], "market_value"),
+    ):
+        for row in rows:
+            try:
+                eq_v = float(row["equity"])
+                cash_v = float(row["cash"])
+                mv_v = float(row[mv_key])
+            except (KeyError, TypeError, ValueError):
+                # 字段缺失（外部自制的精简 nav）→ **跳过**而不是判负：恒等式
+                # 是"可用时的精确校验"，不是 schema 强制；可用性由
+                # nav_identity_checked_days 如实报告。
+                continue
+            identity_checked_days += 1
+            scale = max(abs(eq_v), abs(cash_v) + abs(mv_v), 1.0)
+            resid = abs(eq_v - (cash_v + mv_v)) / scale
+            identity_equity = max(identity_equity, resid)
+            if resid > identity_tol:
+                unexplained.append({
+                    "kind": "nav_identity_broken", "side": side,
+                    "date": row.get("date"), "residual": resid,
+                })
+    # (b) 新侧仓位一致（旧侧 nav 提供市场价；新侧持仓量由成交清单累加）
+    qty_from_trades = 0
+    trade_cursor = 0
+    _new_trades = new_result.get("trades") or []
+    _old_nav = legacy_result.get("daily_nav") or []
+    if _new_trades and _old_nav:
+        close_by_day = {}
+        for row in _old_nav:
+            try:
+                close_by_day[str(row.get("date"))[:10]] = float(row["close"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        for row in new_result.get("daily_nav") or []:
+            day = row.get("date")
+            while (
+                trade_cursor < len(_new_trades)
+                and str(_new_trades[trade_cursor].get("date"))[:10] == str(day)[:10]
+            ):
+                t = _new_trades[trade_cursor]
+                try:
+                    qty = int(t["qty"])
+                except (KeyError, TypeError, ValueError):
+                    qty = 0
+                qty_from_trades += qty if t.get("side") == "BUY" else -qty
+                trade_cursor += 1
+            close_v = close_by_day.get(str(day)[:10])
+            if close_v is None:
+                continue
+            try:
+                pv = float(row["positions_value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            expected_pv = qty_from_trades * close_v
+            scale = max(abs(pv), abs(expected_pv), 1.0)
+            if abs(pv - expected_pv) / scale > identity_tol:
+                unexplained.append({
+                    "kind": "nav_position_identity_broken", "date": day,
+                    "positions_value": pv, "expected": expected_pv,
+                })
     daily_interest_bound = cash_interest_rate / 252.0
     # NAV 逐点差异的归类语境：若已有 trade 级白名单归类（如 tail_slippage），
     # NAV 路径漂移是其复利下游——同归该类；**零差异语境**（无任何 trade 级
     # 白名单命中）下超界 NAV 差异=超纲（如计息误加进持仓市值），必须判负。
     downstream_kind = "tail_slippage" if classified["tail_slippage"] > 0 else None
-    # 级联上限（R1-P2-7 + R2A-P1-1）：净值偏离 ≤ 累计额外成本占权益的比例
-    # （放宽 5× 余量，覆盖持仓规模差带来的市值差），并叠加**绝对天花板 50%**
-    # ——任何 ≥50% 的净值错误无条件判超纲，避免"长 run 上限发散"再次把
-    # 荒谬错误吸收掉。物理量 + 天花板：两头都堵。
     _eqs = [float(r["equity"]) for r in new_result.get("daily_nav") or []
             if r.get("equity") is not None]
     avg_equity = (sum(_eqs) / len(_eqs)) if _eqs else 0.0
     drag_ratio = (cum_extra_cost / avg_equity) if avg_equity > 0 else 0.0
-    # R2A-P1-1 复核后的最终口径：**只用物理量**，不加绝对天花板。
-    # 真实引擎实测（纯尾滑点差异、零卡控、零引擎逻辑差异）：合法净值偏离
-    # 随窗口增长到 2500 日 47%、4000 日 63%、6000 日 74%——任何"≥X% 一律
-    # 判超纲"的绝对阈值都会把**合法**长 run 判成失败。反过来物理量界在
-    # 短/中窗口上是紧的：300 笔前缀时把 +100% 净值错误与 +100% 数量错误
-    # 都判超纲（钉子在案）。判别力边界由 saturated 显式标注。
-    nav_cascade_bound = max(daily_interest_bound * 2.0, drag_ratio * 5.0)
+    # NAV 界 = 累计额外成本占权益的比例（放宽 2× 余量：持仓规模差的市值差与
+    # 现金差同量级，实测合法偏离 ≤ drag_ratio）。**不加绝对天花板**——真实
+    # 引擎实测（纯尾滑点、零卡控、零引擎逻辑差异）合法净值偏离随窗口增长到
+    # 260 日 2.2% / 1200 日 26% / 2500 日 47% / 4000 日 63% / 6000 日 74%，
+    # 任何绝对阈值都会把合法长 run 判成失败。代价：长窗口下归因不再有判别力
+    # ——由 saturated 显式标注，并规定该情形改用 violations 验收。
+    nav_cascade_bound = max(daily_interest_bound * 2.0, drag_ratio * 2.0)
+    absorbed_max_rel = 0.0
     for nd in diff["nav_divergence"]:
         if nd.get("kind") == "length_mismatch":
             unexplained.append({**nd, "kind": "nav_length_mismatch"})
@@ -315,6 +414,7 @@ def attribute_diffs(
             classified["cash_interest"] += 1
         elif downstream_kind is not None and rel <= nav_cascade_bound:
             classified[downstream_kind] += 1
+            absorbed_max_rel = max(absorbed_max_rel, rel)
         else:
             unexplained.append({**nd, "kind": "nav_point_diff_beyond_interest"})
     # 判别力饱和标记（R2A-P1-1/P2-2 口径收口）：笔数一多，逐笔位置对齐退化、
@@ -322,20 +422,15 @@ def attribute_diffs(
     # `unexplained == []` **不再等价于"引擎力学一致"**。凡是越出判别区间的
     # 归因结果都显式标注，避免把"解释不了"与"判别不了"混为一谈。
     n_trade_diffs = len(diff["trade_diffs"])
-    # 阈值取 25%：实测 stage-1 验收尺度（260 日 / 22 笔 / 尾滑点 0.001~0.003）
-    # 的合法净值偏离为 2.2%~6.3% → 不饱和、判据照常有效；1200 日已到 26%
-    # → 饱和。这样"未饱和"才真正等价于"归因有判别力"。
+    # 判别力饱和的判据（R2 复核后**收紧**）：只要"归因还能吸收显著偏离"或
+    # "差异笔数已超出 stage-1 验收尺度"，就判饱和——而不是等笔数上千。
+    # 实测锚点：260 日 / 尾滑点 0.001（stage-1 验收尺度）合法净值偏离 2.0%、
+    # 差异 19 笔 → 不饱和，`unexplained == []` 可作验收断言。判定"不饱和"
+    # 必须同时满足三条：笔数少、上界紧、且从未吸收过 >5% 的偏离。
     saturated = bool(
-        n_trade_diffs > 200
-        or nav_cascade_bound > 0.25
-        or any(
-            (
-                float(nd.get("old") or 0.0) > 0
-                and abs(float(nd["new"]) - float(nd["old"])) / float(nd["old"]) > 0.25
-            )
-            for nd in diff["nav_divergence"]
-            if nd.get("kind") != "length_mismatch"
-        )
+        n_trade_diffs > 20
+        or nav_cascade_bound > 0.05
+        or absorbed_max_rel > 0.05
     )
     return {
         "violations": violations,
@@ -346,6 +441,8 @@ def attribute_diffs(
         "n_trade_diffs": n_trade_diffs,
         "nav_cascade_bound": nav_cascade_bound,
         "drag_ratio": drag_ratio,
+        "nav_identity_residual": identity_equity,
+        "nav_identity_checked_days": identity_checked_days,
         "saturated": saturated,
         "attribution_note": (
             "判别力饱和：差异笔数/漂移幅度超出逐笔归因的判别区间，"

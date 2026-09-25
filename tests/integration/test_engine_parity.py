@@ -162,3 +162,88 @@ def test_parity_limit_up_card_blocks_buy():
     assert report["violations"] == []
     # 但"卡控日拒买"这一事实本身仍可机器验证：新引擎在被卡控日无买入成交
     assert first_buy_day not in new_buy_days
+
+
+# ----------------------------------------------------------------------
+# loop-review-ds4f Round 2：归因界的适用区间（真实引擎形态）
+# ----------------------------------------------------------------------
+
+
+def test_parity_stage1_scale_has_no_false_positive_and_still_discriminates():
+    """**stage-1 验收尺度**（260 日 / 尾滑点 0.001）：
+    合法纯尾滑点 run 必须零假报警且**未饱和**（判据才有效），同一 run 上
+    注入 +100% 净值错误必须被判超纲。
+
+    R1 的"数量 1/2 硬帽"与 R2 的"纯现金项"都在此形态上出过假报警
+    （合法漂移是整手取整的量化随机游走，界必须同时含现金项与量化项）。
+    """
+    import copy
+
+    bars = _bars()
+    legacy = _run_legacy(bars)
+    new = _run_new(bars, slippage_tail=0.001)
+    report = attribute_diffs(new, legacy)
+    assert report["unexplained"] == [], f"stage-1 尺度假报警：{report['unexplained'][:2]}"
+    assert report["saturated"] is False, "判据有效的必要条件是未饱和"
+    assert report["nav_cascade_bound"] < 0.05
+
+    injected = copy.deepcopy(new)
+    injected["daily_nav"][-1]["equity"] *= 2.0
+    out2 = attribute_diffs(injected, legacy)
+    assert any(
+        u.get("kind") == "nav_point_diff_beyond_interest" for u in out2["unexplained"]
+    ), "+100% 净值错误必须被判超纲"
+
+
+def test_parity_long_runs_have_no_false_positives_but_are_saturated():
+    """长窗口：合法纯尾滑点 run 仍必须零假报警（旧两版都在此误杀数百笔），
+    但归因**不再有判别力**——`saturated=True` 且 `attribution_note` 非空，
+    该场景的验收判据是 `violations == []` 而非 `unexplained == []`。
+    """
+    for n_days, tail in ((1200, 0.003), (4000, 0.003), (6000, 0.002)):
+        bars = _bars(n_days=n_days, seed=13)
+        legacy = _run_legacy(bars)
+        new = _run_new(bars, slippage_tail=tail)
+        report = attribute_diffs(new, legacy)
+        assert report["unexplained"] == [], \
+            f"n={n_days} tail={tail} 合法 run 被误判：{len(report['unexplained'])} 条"
+        assert report["saturated"] is True, f"n={n_days} 长窗口必须标注饱和"
+        assert report["attribution_note"], "饱和必须带可读说明"
+        assert report["violations"] == []
+
+
+def test_parity_identity_checks_catch_fabrication_at_every_horizon():
+    """**精确恒等式**在任意窗口长度上都抓得住伪造净值与伪造成交量。
+
+    这是"长窗口下伪造净值与合法偏离不可区分"（R2A/R2/V3 三轮的困境）的反例：
+    合法偏离**满足**恒等式（残差浮点级），伪造净值**破坏**恒等式。
+
+    - 每侧 `equity == cash + 持仓市值`；
+    - 新侧 `持仓市值 == Σ成交数量 × 收盘价`（收盘价取自旧侧 nav）。
+    """
+    import copy
+
+    for n_days, tail in ((260, 0.001), (2500, 0.003), (6000, 0.003)):
+        bars = _bars(n_days=n_days, seed=11)
+        legacy = _run_legacy(bars)
+        new = _run_new(bars, slippage_tail=tail)
+        base = attribute_diffs(new, legacy)
+        assert base["nav_identity_checked_days"] > 0, "恒等式必须真的被校验"
+        assert base["nav_identity_residual"] < 1e-12, \
+            f"合法 run 的恒等式残差必须浮点级（实际 {base['nav_identity_residual']}）"
+
+        # 伪造净值：+5% 与 +100% 都必须被抓（长窗口也不例外）
+        for mult in (1.05, 2.0):
+            inj = copy.deepcopy(new)
+            inj["daily_nav"][-1]["equity"] *= mult
+            out = attribute_diffs(inj, legacy)
+            assert any(u.get("kind") == "nav_identity_broken"
+                       for u in out["unexplained"]), \
+                f"n={n_days} 净值 ×{mult} 未被恒等式抓住"
+
+        # 伪造成交量：破坏"持仓市值 = Σ成交数量 × 收盘价"
+        inj2 = copy.deepcopy(new)
+        inj2["trades"][-1]["qty"] = int(inj2["trades"][-1]["qty"] * 1.6)
+        out2 = attribute_diffs(inj2, legacy)
+        assert any(u.get("kind") == "nav_position_identity_broken"
+                   for u in out2["unexplained"]), f"n={n_days} 数量 ×1.6 未被恒等式抓住"
