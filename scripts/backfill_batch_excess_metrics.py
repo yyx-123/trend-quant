@@ -61,10 +61,12 @@ def _slice_window(bars: pd.DataFrame, start: str | None, end: str | None) -> pd.
 
 
 def _benchmark_sharpe_calmar(
-    window_bars: pd.DataFrame, initial_capital: float, lot_size: int
+    window_bars: pd.DataFrame, initial_capital: float, lot_size: int,
+    *, symbol: str | None = None, asset_type: str | None = None,
 ) -> tuple[float | None, float | None]:
     bench = SingleSymbolAllInBacktestEngine._buy_and_hold_benchmark(
-        bars=window_bars, initial_capital=initial_capital, lot_size=lot_size
+        bars=window_bars, initial_capital=initial_capital, lot_size=lot_size,
+        symbol=symbol, asset_type=asset_type,
     )
     nav = (bench or {}).get("series", [])
     if not nav:
@@ -140,7 +142,10 @@ def backfill(batch_id: str | None, dry_run: bool) -> None:
             if window.empty:
                 skipped += 1
                 continue
-            bench_sharpe, bench_calmar = _benchmark_sharpe_calmar(window, capital, lot)
+            bench_sharpe, bench_calmar = _benchmark_sharpe_calmar(
+                window, capital, lot,
+                symbol=cell.get("symbol"), asset_type=cell.get("asset_type"),
+            )
             flat_days = _avg_flat_days(cell["trades_json"], window)
             sharpe, calmar = cell["sharpe"], cell["calmar"]
             excess_sharpe = (

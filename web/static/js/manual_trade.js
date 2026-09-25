@@ -995,8 +995,11 @@
       tradeListEl.innerHTML = '';
       return;
     }
-    // 仓位占比的分母：全部持仓交易的资产总和（指标失败的行无持仓金额，不计入）
-    const totalValue = trades.reduce(function(sum, t) {
+    // 仓位占比的分母：**全部未清仓持仓**的资产总和（与悬停文案"全部持仓总资产"一致）。
+    // 此前用时间筛选后的 trades 作分母 → 存在 >筛选窗口 的老持仓时占比会被系统性夸大
+    // （R17B backlog：会误导加减仓判断）。指标失败的行无持仓金额，不计入。
+    const allOpen = currentTrades.filter(function(t) { return t.status !== 'closed'; });
+    const totalValue = allOpen.reduce(function(sum, t) {
       return sum + (t.error ? 0 : (numOrNull(t.position_value) || 0));
     }, 0);
     trades.forEach(function(t) {

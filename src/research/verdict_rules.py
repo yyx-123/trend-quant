@@ -40,9 +40,18 @@ DEFAULT_RULES = {
     "significant_deterioration_delta_sharpe": -0.2,
     "regime_collapse_delta_sharpe": -0.3,
     "min_t_stat": 1.645,               # 配对 t ≥ 95% 单尾（大样本渐近值）
-    "min_dsr_on_diff": 0.0,              # DSR（差序列，尝试次数校正）> 0
+    # DSR（差序列，尝试次数校正）阈值。**注意（R18B-P2-1）**：DSR = Φ(z) ∈ (0,1]，
+    # 阈值 0.0 下该门**恒真**（t 门通过已蕴含 z>0）→ 平台实际上没有任何多重检验
+    # 折扣；论文口径是 DSR ≥ 0.95（Bailey & López de Prado 2014），且需要
+    # 跨试验方差 sr_var 才有判别力。是否采纳属研究纪律决策（R18-D-1）。
+    "min_dsr_on_diff": 0.0,
     "plateau_sigma": 1.0,  # Alvarez 式标准差检查：选定参数偏离邻域均值 1σ → 孤峰
 }
+
+
+def dsr_gate_binding(rules: dict | None = None) -> bool:
+    """该阈值下 DSR 门是否可能否决（False = 名义存在但恒真，不得声称有折扣）。"""
+    return float((rules or DEFAULT_RULES).get("min_dsr_on_diff", 0.0)) > 0.0
 
 
 def _t_critical_95(df: int) -> float:
@@ -118,6 +127,25 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
 
     arr = np.asarray(neighbor_deltas, dtype=float)
     mean = float(arr.mean())
+    # 邻域点太少时 σ 没有意义，判据必须**停止**而不是给一个随机答案（R18B-P2-2）：
+    #  - 1 个点（合法配置 max_positions/top_n/per_day/n=1 等，或两个邻域点取值相同）
+    #    → σ=0 → 旧实现 `deviates=False` → 孤立峰被**静默**记成"高原"、台账永记"非孤峰"；
+    #  - 2 个点 → σ 由 df=1 估计，H0（三点可交换）下 1σ 规则误判"孤峰"的概率实测 56%
+    #    （与噪声尺度无关）→ 真高原半数被挡、且把"疑似过拟合"写进 append-only 台账。
+    # 统一按"证据不足 = unknown + 可见告警"处理（与该函数对"无邻域点"的既有口径一致）。
+    distinct = np.unique(arr)
+    if distinct.size < 3:
+        return {
+            "verdict": "unknown",
+            "reason": f"neighbor_points_insufficient({distinct.size})",
+            "neighbor_mean": mean,
+            "neighbor_std": float(arr.std(ddof=1)) if len(arr) > 1 else 0.0,
+            "selected": float(selected_delta),
+            "same_direction": None,
+            "deviates_over_1sigma": None,
+            "skipped": int(skipped),
+            "insufficient_neighbors": True,
+        }
     std = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
     same_direction = all(
         (d > 0) == (selected_delta > 0) for d in arr

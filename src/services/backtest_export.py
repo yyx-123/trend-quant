@@ -257,7 +257,7 @@ def export_batch_analysis(
                 f"user_id={user_id}（HTTP 导出按调用者过滤）"
                 if user_id is not None else "全部用户（本地脚本口径）"
             ),
-            "fees": "pnl 已扣佣金与印花税；滑点含在成交价中",
+            "fees": "回测的 pnl 已扣佣金与印花税、滑点含在成交价中；**live_trades.realized_pnl 为毛额**（(卖价−买价)×股数，未扣实际费用——实盘成交费用以券商对账单为准）",
             "none_means": "NULL = 数据不足或不适用（如区间末尾出场的 post-exit 字段、无硬止损时的 r_multiple）",
             "sweep_chandelier_ratio": (
                 f"sweep 批次吊灯倍数固定 = hard × {SWEEP_CHANDELIER_RATIO}（方案 §10 拍板）"

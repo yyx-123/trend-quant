@@ -207,7 +207,11 @@ execution: {module: tail_session@1, params: {}}
     plateau = v["evidence"]["plateau"]
     assert plateau is not None
     assert len(plateau["probes"]) >= 2  # ±20% 两个邻域点
-    assert plateau["verdict"] in ("plateau", "peak")
+    # R18B-P2-2 修正后：2 个邻域点的 σ 由 df=1 估计不可靠（实测 1σ 规则误判孤峰 56%）
+    # → 判据按"证据不足"处理并显式标注（不再抛硬币）；探针本身照常跑
+    assert plateau["verdict"] == "unknown"
+    assert plateau.get("insufficient_neighbors") is True
+    assert "neighbor_points_insufficient" in (plateau.get("reason") or "")
     # 每个探针都是真实的引擎 run（落 research_runs plateau_probe）
     from research import runs as runs_mod
 

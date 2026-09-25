@@ -247,6 +247,8 @@ class SingleSymbolAllInBacktestEngine:
             bars=bars,
             initial_capital=execution.initial_capital,
             lot_size=execution.lot_size,
+            symbol=request.symbol,
+            asset_type=execution.instrument_type,
         )
         benchmark_nav = (benchmark or {}).get("series", [])
         benchmark_summary = (
@@ -643,7 +645,9 @@ class SingleSymbolAllInBacktestEngine:
         }
 
     @staticmethod
-    def _buy_and_hold_benchmark(bars: pd.DataFrame, initial_capital: float, lot_size: int) -> dict | None:
+    def _buy_and_hold_benchmark(bars: pd.DataFrame, initial_capital: float, lot_size: int,
+                                *, symbol: str | None = None,
+                                asset_type: str | None = None) -> dict | None:
         if bars.empty:
             return {"name": "buy_and_hold", "series": []}
         first_close = float(bars.iloc[0]["close"])
@@ -655,6 +659,12 @@ class SingleSymbolAllInBacktestEngine:
             )
             return None
         qty = int((initial_capital // first_close) // lot_size) * lot_size
+        # 分品种最小申报数量（R18A-F1）：科创板基准腿同样不得以 100 股建仓——
+        # 生产库 42 个格子的 benchmark_*/excess_* 因此偏差（至少 1 格 excess 变号）。
+        # 现金买不起最小申报 → 基准记为全程现金（qty=0，净值恒为初始资金）。
+        min_qty = min_buy_qty(symbol or "", asset_type=asset_type, lot_size=int(lot_size))
+        if 0 < qty < min_qty:
+            qty = 0
         cash = initial_capital - qty * first_close
         series = [
             {"date": day.isoformat(), "equity": float(cash + qty * float(close_))}

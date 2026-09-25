@@ -702,9 +702,17 @@ def test_plateau_unknown_verdict_is_surfaced_as_absent():
     assert plateau_warnings(None, is_creation=False)[0].startswith("plateau_evidence_absent")
     assert plateau_warnings(None, is_creation=True) == []
     assert plateau_warnings(unknown, is_creation=True) == []
-    peak = plateau_verdict(1.0, [0.1, 0.2])
+    # 孤峰必须能用 ≥3 个邻域点识别（2 点属"证据不足"，见 R18B-P2-2 的判据修正）
+    peak = plateau_verdict(1.0, [0.1, 0.12, 0.11])
     assert peak["verdict"] == "peak"
     assert plateau_warnings(peak, is_creation=False)[0].startswith("plateau_peak")
+    # 2 点/1 点邻域：不再是随机答案，而是**证据不足**（unknown + 可见告警）
+    for neighbors in ([0.1, 0.2], [0.5]):
+        insuf = plateau_verdict(1.0, neighbors)
+        assert insuf["verdict"] == "unknown" and insuf["insufficient_neighbors"] is True
+        assert "neighbor_points_insufficient" in insuf["reason"]
+        warn = plateau_warnings(insuf, is_creation=False)
+        assert warn and warn[0].startswith("plateau_evidence_absent")
 
 
 # ----------------------------------------------------------------------

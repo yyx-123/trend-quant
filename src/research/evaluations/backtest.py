@@ -643,6 +643,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     from research.stats.psr import moments as _moments
     from research.stats.psr import psr as _psr
     from research.verdict_rules import (
+        dsr_gate_binding,
         load_rules,
         plateau_neighbors,
         plateau_verdict,
@@ -690,6 +691,9 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     )
     stats = {
         "paired": paired,
+        # 该实验落定时 DSR（尝试次数校正）门是否具备约束力——阈值 0 时恒真，
+        # 记录在案以免把"无折扣"误读成"已做多重检验校正"（R18B-P2-1）
+        "dsr_gate_binding": dsr_gate_binding(),
         "psr": _psr(sr_hat, sr_base, len(exp_rets), skew, kurt),
         "psr_sortino": _psr(sortino_hat, sortino_base, len(exp_rets), skew, kurt),
         "dsr": _dsr(sr_hat, len(exp_rets), skew, kurt, max(attempt_index, 1)),
