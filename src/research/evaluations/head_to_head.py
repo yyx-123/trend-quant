@@ -157,9 +157,21 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
                 if _v ** 0.5 <= max(abs(_m), 1e-12) * 1e-6:
                     _degenerate_legs.append(_name)
     _degenerate = bool(_degenerate_legs)
+    if _degenerate:
+        # R7-F1（Round 7 复核）：退化腿的噪声必须**在组装 evidence/report 之前**
+        # 清掉——此前只把局部 `d_band` 置 None，而 evidence["paired"] 里已经拷进去
+        # 的那份噪声置信带与 summary_a/summary_b 的 6.1e12 Sharpe 仍会被持久化。
+        d_band = None
+        psr_ab = None
+        for _summary in (summary_a, summary_b):
+            _summary["sharpe"] = None
+            _summary["sortino"] = None
+            _summary["degenerate_leg"] = True
 
     def _d(key: str, a_val, b_val):
-        if _degenerate and key == "delta_sharpe":
+        if _degenerate and key in ("delta_sharpe", "delta_sortino"):
+            return None
+        if a_val is None or b_val is None:
             return None
         return float(a_val - b_val)
 
@@ -194,9 +206,8 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
         # **不判定**，并如实告警（此前会把正常腿判成 rejected）
         warnings.append(
             "degenerate_leg(" + "/".join(_degenerate_legs)
-            + " 腿零成交或全现金：Sharpe 及其差值为浮点噪声，判定按 inconclusive)"
+            + " 腿零成交或全现金：Sharpe/置信带/PSR 均为浮点噪声，已记 None，判定按 inconclusive)"
         )
-        d_band = None
     elif d_band is not None and len(joined) >= 30:
         if d_band["low"] > 0 and psr_ab >= 0.95:
             suggested = "confirmed"   # A 显著优于 B

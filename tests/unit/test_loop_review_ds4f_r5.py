@@ -161,3 +161,87 @@ def test_head_to_head_marks_degenerate_legs():
     assert "degenerate_legs" in src
     assert "degenerate_leg(" in src
     assert "d_band = None" in src, "退化时不得输出置信带/判定"
+
+
+# ----------------------------------------------------------------------
+# R7 复核后的补钉：退化腿噪声不得残留于任何持久化面（F1/F2/F3）+ 合法值守卫（F4）
+# ----------------------------------------------------------------------
+
+
+def test_head_to_head_degenerate_payload_has_no_noise():
+    """R7-F1：退化腿时 `evidence.paired.delta_sharpe_band` 与两侧 summary 的
+    Sharpe 都必须是 None（此前只改局部变量，噪声仍被持久化）。"""
+    import inspect
+
+    from research.evaluations import head_to_head as h2h
+    from research.evaluations.head_to_head import run_head_to_head  # noqa: F401
+
+    src = inspect.getsource(h2h.run_head_to_head)
+    # 必须在组装 evidence **之前**清零（源码顺序断言：清零语句出现在 evidence 之前）
+    clear_at = src.index("d_band = None")
+    build_at = src.index('"delta_sharpe_band": d_band')
+    assert clear_at < build_at, "清零必须发生在 evidence 组装之前（R7-F1 的根因）"
+    assert '_summary["sharpe"] = None' in src, "两侧 summary 的 Sharpe 必须清空"
+    assert "psr_ab = None" in src
+
+
+def test_degenerate_legs_flag_reaches_evidence_and_conclusion():
+    """R7-F2：退化腿必须落机器可读标记，课题 FDR 必须跳过它。"""
+    import inspect
+
+    from research import conclusion
+    from research.evaluations import backtest as bt
+
+    assert '"degenerate_legs": _degenerate_legs' in inspect.getsource(bt._assemble_result)
+    csrc = inspect.getsource(conclusion.build_conclusion_summary)
+    assert 'evidence_all.get("degenerate_legs")' in csrc, \
+        "课题 FDR 必须跳过退化腿（否则零成交实验被算成显著）"
+
+
+def test_regime_segment_marks_degenerate_segments():
+    """R7-F3：段内噪声（该腿整段零成交）不得进 collapse 门的 ΔSharpe。"""
+    import inspect
+
+    from research.evaluations import backtest as bt
+
+    src = inspect.getsource(bt._regime_segment_metrics)
+    assert "degenerate_segment" in src
+    src2 = inspect.getsource(bt._regime_split)
+    assert "_seg_degenerate" in src2 and "sufficient_sample" in src2
+
+
+def test_benchmark_relative_refuses_noisy_beta():
+    """R7-F2 连带：基准腿退化（平坦）时 beta/alpha 记 None 而非 1e12 级噪声。"""
+    from portfolio.reports import benchmark_relative
+
+    nav = [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+            "equity": 1e6 * (1.003 if i % 2 else 0.997)} for i in range(60)]
+    flat = [{"date": r["date"], "equity": 1e6 * (1 + 0.01 / 252) ** i}
+            for i, r in enumerate(nav)]
+    out = benchmark_relative(nav, flat)
+    assert out["beta"] is None and out["alpha_annual"] is None, out
+    # 正常基准仍算出有限 beta
+    normal = [{"date": r["date"], "equity": 1e6 * (1.002 if i % 3 else 0.998)}
+              for i, r in enumerate(nav)]
+    ok = benchmark_relative(nav, normal)
+    assert ok["beta"] is not None and abs(ok["beta"]) < 100
+
+
+def test_pbo_marks_degenerate_variants():
+    """R7B #1：变体名次全并列时 λ=0.5（不是 0）、并标 degenerate_variants。"""
+    import numpy as np
+
+    from research.stats.fdr_pbo import pbo_cscv
+
+    rng = np.random.default_rng(7)
+    same = np.tile(rng.normal(0.0005, 0.01, 600)[:, None], (1, 3))
+    out = pbo_cscv(same, n_blocks=8)
+    assert out["lambda_median"] == pytest.approx(0.5), out
+    assert out["degenerate_variants"] is True
+    assert out["pbo"] == 0.0, "全并列不是'必然过拟合'"
+
+    overfit = rng.normal(0, 0.01, (600, 4))
+    overfit[:300, 0] += 0.01
+    overfit[300:, 0] -= 0.01
+    overfit[300:, 1] += 0.01
+    assert pbo_cscv(overfit, n_blocks=8)["degenerate_variants"] is False

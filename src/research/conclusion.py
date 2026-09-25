@@ -102,7 +102,11 @@ def build_conclusion_summary(db, topic_id: str) -> dict:
         evidence_all = loads(v.get("evidence_json"), {})
         stats = evidence_all.get("stats") or {}
         p_val = None
-        if stats.get("psr") is not None:
+        # R7-F2（Round 7 复核）：退化腿（零成交/全现金）的 p 值是浮点噪声，
+        # **不进课题 FDR 家族**（否则"零成交"实验会被算成显著）
+        if evidence_all.get("degenerate_legs"):
+            p_val = None
+        elif stats.get("psr") is not None:
             p_val = max(0.0, min(1.0, 1.0 - float(stats["psr"])))
         elif evidence_all.get("p_value") is not None:
             p_val = max(0.0, min(1.0, float(evidence_all["p_value"])))

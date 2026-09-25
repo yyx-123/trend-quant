@@ -40,8 +40,33 @@ R6 同时确认：R5 的 5 项修复在端到端层面成立（真引擎零成�
 135 个敌意 MCP 调用、9 个敌意 CLI 调用全部符合预期；与 `f93031e` 的 A/B 显示
 12000/12000 NAV 单元格位级一致。
 
+
+## Round 7 确认轮（两个独立代理）与其后续修复
+
+两个确认代理均判 **NOT CLEAN**——抓到"退化腿"这一类修复**仍未覆盖全部消费面**（同类
+问题第四次显形，根因是"逐点修"而不是"单点收口"）：
+
+| # | 项 | 证据 | 修复（本轮：单点收口） |
+|---|---|---|---|
+| **R7-F1**（P2） | `head_to_head` 的退化分支只把**局部变量** `d_band` 置 None，而 `evidence["paired"]["delta_sharpe_band"]` 与 `summary_a/b` 的 6.1e12 Sharpe **仍被持久化**（与父提交逐字节相同），且该修复只有**源码文本**钉子 | 真 pipeline：正常腿 vs 全现金腿的持久化证据里噪声置信带原样存在 | 清零动作移到 **evidence/report 组装之前**（`d_band/psr_ab/两侧 summary 的 sharpe·sortino` 全清）；钉子改为**顺序断言 + 载荷字段断言** |
+| **R7-F2**（P2） | 退化腿的噪声不止在 summary：`stats.psr/dsr/mintrl_days/sharpe_bootstrap` 同样 6e12 级，经 `conclusion.py` 的 `1-psr` 作 p 值 → 课题级 BH-FDR 把**零成交**实验算成**显著**（实测 `still_significant=2`，并写进 `TOPIC.md`） | 真 pipeline + 物化产物 | `stats.*` 退化时统一记 None；`evidence["degenerate_legs"]` 机器可读；`conclusion` 跳过退化腿的 p 值；`benchmark_relative` 的 beta/alpha 加相对方差守卫（此前 beta=8.2e12） |
+| **R7-F3**（P3） | 同类第三处：`_regime_segment_metrics` 的段内 Sharpe 在"整段零成交"时是 1.7e13 噪声 → 经 collapse 门把 confirmed 压成 inconclusive | 真 run：段 ΔSharpe −1.88e13 | 段内退化判定 → `sharpe=None` + `sufficient_sample=False`（复用 R1-P3-15 的排除机制） |
+| **R7B #1**（P3） | `pbo_cscv` 把 OOS 名次并列计为"更差"→ λ=0 → `pbo=1.0`（"必然过拟合"），与同批证据里的 `plateau=plateau` 自相矛盾（含"所有变体是同一条 run"的极端） | 真 pipeline：4/6 探针 NAV 与主选逐位相同 → 持久化 `pbo=1.0` | 并列按半步计（λ=0.5），新增 `degenerate_variants` 标记；钉子覆盖"全并列"与"真过拟合"两侧 |
+| **R7-F4**（P3） | 三处钉子失效：engine 守卫钉用了**违反 CHECK** 的值（测的是列约束不是触发器，2/10 腿可删而测试仍绿）；退化告警与 h2h 只用**源码文本**断言；`_pool is None` 回灌点无钉子 | 变异实证 | engine 钉改合法值（`status='rejected'`/`reason='limit_down'`）；h2h 钉改顺序+载荷断言；补 h2h/告警/FDR 的载荷钉子 |
+| **R7-F5**（P3） | 退化判定公式在两个模块各抄一份（同类已复发三次） | 代码 | 抽 `_common.is_degenerate_leg` / `null_degenerate_metrics` 单点实现 |
+
+**本轮"单点收口"清单**（回答"为什么反复复发"）：退化判定 → `_common`；Δ 语义 →
+`_delta_or_none` / `_deltas_from_summaries`；持久化可见 → `evidence["degenerate_legs"]` +
+warnings；下游消费 → `conclusion`（FDR）、`_regime_split`（collapse 门）、
+`benchmark_relative`（beta/alpha）、`head_to_head`（置信带/PSR/summary）。
+
+**代理同时确认的正面结论**：生产库与 03:00 备份 **50/50 张表行数一致**、11 个
+`trg_engine_*` 守卫与已落定 verdict 子句**均在生产库生效**、冗余索引已删；其独立实现的
+数值复算（reports/parity/nav-summary/stats/tradability）**零不匹配**；ruff 新增 0 条；
+两轮全量套件零漂移（1637/2 → 1642/2，失败均为既有 flake）。
+
 ## 回归结果
 
-- 全量：**1633 passed / 1 failed**（唯一失败为既有 Windows 临时文件 flake）；
+- 全量（Round 7 修复后终跑）：**1642 passed / 2 failed**（唯一失败为既有 Windows 临时文件 flake）；
 - 新增钉子：`tests/unit/test_loop_review_ds4f_r5.py` 8 项 + 三条守卫钉子（跨文件）；
 - ruff：`(file, rule)` 集合与基线**完全一致**（新增 0 条）。

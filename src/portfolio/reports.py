@@ -40,8 +40,16 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
         return {}
     p, b = joined["p"].to_numpy(), joined["b"].to_numpy()
     var_b = float(np.var(b, ddof=1))
-    beta = float(np.cov(p, b, ddof=1)[0, 1] / var_b) if var_b > 0 else 0.0
-    alpha_daily = float(p.mean() - beta * b.mean())
+    # R7-F2 连带：基准腿若是"平坦"序列（零成交/全现金，方差只有浮点残差），
+    # beta 会爆成 1e12 级噪声 —— 以相对方差为门槛，退化即记 None（不可用），
+    # 而不是除以一个噪声方差。
+    _b_scale = max(abs(float(np.mean(b))), 1e-12)
+    if var_b > (_b_scale * 1e-6) ** 2:
+        beta = float(np.cov(p, b, ddof=1)[0, 1] / var_b)
+        alpha_daily = float(p.mean() - beta * b.mean())
+    else:
+        beta = None
+        alpha_daily = None
     excess = p - b
     te = float(excess.std(ddof=1) * np.sqrt(252)) if len(excess) > 1 else 0.0
     ir = float(excess.mean() / excess.std(ddof=1) * np.sqrt(252)) if excess.std(ddof=1) > 0 else 0.0
@@ -50,7 +58,7 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
     up_capture = float(p[up].mean() / b[up].mean()) if up.any() and b[up].mean() != 0 else None
     down_capture = float(p[down].mean() / b[down].mean()) if down.any() and b[down].mean() != 0 else None
     return {
-        "alpha_annual": alpha_daily * 252,
+        "alpha_annual": None if alpha_daily is None else alpha_daily * 252,
         "beta": beta,
         "information_ratio": ir,
         "tracking_error": te,

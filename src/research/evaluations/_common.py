@@ -220,6 +220,36 @@ def overlap_and_cluster_stats(events, *, max_h: int, event_days) -> tuple[float 
     return overlap_ratio, top_share
 
 
+def is_degenerate_leg(nav_rows) -> bool:
+    """该腿是否"退化"（零成交/全现金：日收益只有空仓计息的浮点残差）。
+
+    单点实现（R7-F5：此前在 backtest 与 head_to_head 各抄一份，同类缺陷已复发三次）。
+    判据：日收益标准差相对均值不可分辨（`std <= |mean|·1e-6`）。退化腿的
+    Sharpe/Sortino/PSR 等全是浮点噪声（实测 ≈6e12），**不得**参与任何作差、
+    判定或台账统计。
+    """
+    eq = [float(r["equity"]) for r in (nav_rows or []) if r.get("equity") is not None]
+    if len(eq) < 3:
+        return False
+    rets = [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq)) if eq[i - 1]]
+    if not rets:
+        return False
+    mean_r = sum(rets) / len(rets)
+    var = (
+        sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1)
+        if len(rets) > 1 else 0.0
+    )
+    return (var ** 0.5) <= max(abs(mean_r), 1e-12) * 1e-6
+
+
+def null_degenerate_metrics(summary: dict) -> dict:
+    """把退化腿摘要里的噪声指标统一记 None（原地改并返回同一 dict）。"""
+    for key in ("sharpe", "sortino"):
+        summary[key] = None
+    summary["degenerate_leg"] = True
+    return summary
+
+
 def regime_labels(panel, benchmark_symbol: str = "510500.SS", ma: int = 200) -> np.ndarray:
     """逐日 regime：benchmark 收盘在 SMA(ma) 上/下（"unknown" 数据不足）。"""
     col = panel._symbol_index.get(benchmark_symbol)

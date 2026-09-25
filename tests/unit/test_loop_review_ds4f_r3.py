@@ -333,9 +333,9 @@ def test_engine_sub_tables_are_append_only(test_db):
             "atr_at_entry) VALUES ('R-guard','2024-01-02','X.SS',100,0,10.0,10.0,9.0,10.0,0.2)"
         )
         for table, update_sql in (
-            ("engine_orders", "UPDATE engine_orders SET status='x'"),
+            ("engine_orders", "UPDATE engine_orders SET status='rejected'"),
             ("engine_fills", "UPDATE engine_fills SET quantity=1"),
-            ("engine_unfilled", "UPDATE engine_unfilled SET reason='x'"),
+            ("engine_unfilled", "UPDATE engine_unfilled SET reason='limit_down'"),
             ("engine_positions", "UPDATE engine_positions SET quantity=1"),
             ("engine_daily_nav", "UPDATE engine_daily_nav SET equity=999999"),
         ):

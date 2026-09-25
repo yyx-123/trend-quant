@@ -68,8 +68,14 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
         is_sharpe = _sharpe_vec(r[is_idx, :])
         oos_sharpe = _sharpe_vec(r[oos_idx, :])
         best_is = int(np.argmax(is_sharpe))
-        # OOS 相对秩（0..1；λ<0.5 = IS 最优在 OOS 中位数以下 = 过拟合）
-        rank = int(np.sum(oos_sharpe < oos_sharpe[best_is]))
+        # OOS 相对秩（0..1；λ<0.5 = IS 最优在 OOS 中位数以下 = 过拟合）。
+        # R7 复核（R7B #1）：**同名次按半步计**——变体互不相上下（乃至所有变体
+        # 是同一条 run）时，`oos < best` 会把并列全判为"更差"→ 秩 0 → λ=0 →
+        # pbo=1.0（"必然过拟合"），与同一批证据里的 `plateau=plateau` 自相矛盾。
+        _best_oos = oos_sharpe[best_is]
+        rank = float(np.sum(oos_sharpe < _best_oos)) + 0.5 * float(
+            np.sum(oos_sharpe == _best_oos) - 1
+        )
         lam = rank / (n - 1) if n > 1 else 0.0
         lambdas.append(lam)
 
@@ -79,6 +85,9 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
         "pbo": pbo,
         "n_combinations": comb(n_blocks, half),
         "lambda_median": float(np.median(lambdas)),
+        # R7B #1：全并列（含"所有变体同一条 run"）时 λ 恒 0.5、PBO 无判别力——
+        # 显式标注，避免把 0.0 读成"绝不过拟合"
+        "degenerate_variants": bool(np.all(lambdas == 0.5)),
     }
 
 

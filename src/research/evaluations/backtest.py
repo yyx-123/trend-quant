@@ -204,19 +204,11 @@ def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict
     summary = compute_summary(nav_rows, trades=[], turnover_total=turnover_total or 0.0)
     if turnover_total is None:
         summary["turnover"] = None
-    # 退化判定：日收益标准差相对均值不可分辨（纯浮点噪声）
-    eq = [float(r["equity"]) for r in nav_rows if r.get("equity")]
-    if len(eq) >= 3:
-        rets = [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq)) if eq[i - 1]]
-        if rets:
-            mean_r = sum(rets) / len(rets)
-            var = sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1) if len(rets) > 1 else 0.0
-            std_r = var ** 0.5
-            scale = max(abs(mean_r), 1e-12)
-            if std_r <= scale * 1e-6:
-                summary["sharpe"] = None
-                summary["sortino"] = None
-                summary["degenerate_leg"] = True
+    # 退化判定（R5-P2-2 + R7-F1/F2）：统一走 _common.is_degenerate_leg
+    from research.evaluations._common import is_degenerate_leg, null_degenerate_metrics
+
+    if is_degenerate_leg(nav_rows):
+        null_degenerate_metrics(summary)
     return summary
 
 
@@ -342,9 +334,18 @@ def _regime_segment_metrics(nav_rows: list[dict], days: set) -> dict:
         return {}
     arr = np.asarray(sel)
     std = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
-    sharpe = float(arr.mean() / std * np.sqrt(252)) if std > 0 else 0.0
-    annual = float(arr.mean() * 252)
-    return {"annual_return": annual, "sharpe": sharpe, "n_days": len(arr)}
+    mean_r = float(arr.mean())
+    # R7-F3：段内只有浮点残差（该腿整段零成交/全现金）→ Sharpe 是噪声（实测
+    # 1.7e13），记 None 并由 sufficient_sample=False 阻止其行使塌陷否决
+    _degenerate_segment = std <= max(abs(mean_r), 1e-12) * 1e-6
+    sharpe = None if _degenerate_segment else (
+        float(mean_r / std * np.sqrt(252)) if std > 0 else 0.0
+    )
+    annual = float(mean_r * 252)
+    return {
+        "annual_return": annual, "sharpe": sharpe, "n_days": len(arr),
+        "degenerate_segment": bool(_degenerate_segment),
+    }
 
 
 def _regime_split(exp_nav: list[dict], base_nav: list[dict], bench_nav: list[dict] | None) -> dict:
@@ -369,14 +370,23 @@ def _regime_split(exp_nav: list[dict], base_nav: list[dict], bench_nav: list[dic
         m_base = _regime_segment_metrics(base_nav, days)
         if not m_exp or not m_base:
             continue
+        _seg_degenerate = bool(
+            m_exp.get("degenerate_segment") or m_base.get("degenerate_segment")
+        )
         out[label] = {
             "n_days": m_exp["n_days"],
             "delta_annual_return": m_exp["annual_return"] - m_base["annual_return"],
-            "delta_sharpe": m_exp["sharpe"] - m_base["sharpe"],
+            "delta_sharpe": (
+                None if (_seg_degenerate or m_exp["sharpe"] is None
+                         or m_base["sharpe"] is None)
+                else m_exp["sharpe"] - m_base["sharpe"]
+            ),
             # R1-P3-15：ΔSharpe 在极短分段上噪声极大（实测 9 个交易日可给出
             # −2.19），却足以经 collapse 门否决 confirmed。样本不足的段显式
             # 标记，由 verdict_rules 只对够长的段施加塌陷否决。
-            "sufficient_sample": bool(m_exp["n_days"] >= 30),
+            "sufficient_sample": bool(
+                m_exp["n_days"] >= 30 and not _seg_degenerate
+            ),
         }
     return out
 
@@ -678,6 +688,21 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
         "sharpe_bootstrap": sharpe_block_bootstrap(exp_rets, seed=7),
         "attempt_index": attempt_index,
     }
+    # R7-F2（Round 7 复核）：退化腿的噪声不止在 summary —— `stats.*`（PSR/DSR/
+    # MinTRL/Sharpe 自举点估计）同样是 6e12 级浮点噪声，会经课题级 BH-FDR
+    # （conclusion.py 用 `1 - stats.psr` 当 p 值）把"零成交"实验算成**显著**
+    # （实测 still_significant=2）。退化时统一记 None，并落机器可读标记。
+    _degenerate_legs = [
+        name for name, summary in (("experiment", exp_summary), ("base", base_summary or {}))
+        if summary.get("degenerate_leg")
+    ]
+    if _degenerate_legs:
+        for _key in ("psr", "psr_sortino", "dsr", "mintrl_days"):
+            stats[_key] = None
+        if isinstance(stats.get("sharpe_bootstrap"), dict):
+            stats["sharpe_bootstrap"] = {
+                k: None for k in stats["sharpe_bootstrap"]
+            }
 
     # MC 置信带（交易序列 bootstrap；阶段 5 审计 G 项接纳）
     # walk-forward 拼接路径无逐笔成交（exp_fills 保持空列表）——与上面
@@ -781,14 +806,12 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     warnings: list[str] = list(extra_warnings)
     warnings.extend(exp_result.get("warnings") or [])  # 运行级告警（heat_cap 退化等）
     # R6-P3-3：退化腿必须落进持久化记录的 warnings（否则记录里只有 null 无解释）
-    _degen_legs = [
-        name for name, summary in (("实验腿", exp_summary), ("基准腿", base_summary or {}))
-        if summary.get("degenerate_leg")
-    ]
-    if _degen_legs:
+    _degen_labels = [("实验腿" if n == "experiment" else "基准腿") for n in _degenerate_legs]
+    if _degen_labels:
         warnings.append(
-            "degenerate_leg(" + "/".join(_degen_legs)
-            + " 零成交或全现金：Sharpe/Sortino 为浮点噪声，已记 None 且不参与 Δ 判定)"
+            "degenerate_leg(" + "/".join(_degen_labels)
+            + " 零成交或全现金：Sharpe/Sortino/PSR/DSR 均为浮点噪声，已记 None "
+            "且不参与 Δ 判定与课题 FDR)"
         )
     # 长窗口三注记（详设 §6.6.4，评审 DS-P2-5：进实验路径，不只进脚本产物；
     # DS-复审-R2 §4-1：共享件，event/bucket/distribution 同口径）
@@ -829,6 +852,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
             None if exp_result.get("unfilled") is None
             else _count_by_reason(exp_result["unfilled"])
         ),
+        "degenerate_legs": _degenerate_legs,  # R7-F2：机器可读（课题 FDR 据此跳过）
         "is_compound": bool(spec.get("is_compound")),
         "plateau": plateau,
         "pbo": pbo_info,
