@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from engine.models import Account, Position
+from engine.profiles import min_buy_qty
 from gateway.service import Gateway
 from portfolio import library
 from portfolio.backtester import (
@@ -410,12 +411,22 @@ def generate_daily_list(
             "tradability": _card_dict(card),
         })
     buy_list = []
+    min_order_caveats: list[str] = []
     for intent in admitted:
         price = close_today.get(intent.symbol)
         if intent.intent_type == "quantity":
             qty_est = int(intent.value // lot) * lot if intent.value else 0
         else:
             qty_est = int(intent.value / price // lot) * lot if price else 0
+        # 分品种最小申报数量（R16-D-1）：科创板 200 股——低于该数的清单会让人工
+        # 下出必被拒的委托；同时不得自动抬到 200（那会超预算）。
+        _meta = db.get_instrument_metadata(intent.symbol) or {}
+        min_qty = min_buy_qty(intent.symbol, asset_type=_meta.get("asset_type"))
+        if 0 < qty_est < min_qty:
+            min_order_caveats.append(
+                f"{intent.symbol}: 预算只够 {qty_est} 股 < 最小申报 {min_qty} 股，本次不下单"
+            )
+            continue
         if qty_est <= 0:
             continue
         card = cards.get((panel.dates[t_idx], intent.symbol))
@@ -441,6 +452,7 @@ def generate_daily_list(
         "heat": None if shadow_view.heat() is None else round(shadow_view.heat(), 2),
         "caveats": [
             *freshness_caveats,
+            *min_order_caveats,
             *_live_caveats(config),
             # 组合止损重建不全（如 any_of 含 time_stop/breakeven 等
             # 无止损价成员）时，heat/heat_cap 语义受限必须显式可见

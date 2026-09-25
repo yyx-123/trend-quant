@@ -26,7 +26,7 @@ from typing import Literal
 
 from engine import fees
 from engine.models import Account, Fill, Position, Unfilled
-from engine.profiles import MarketProfile
+from engine.profiles import MarketProfile, min_buy_qty
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +76,10 @@ def match_buy(
         return _unfilled(order_id, symbol, day, "suspended", snapshot)
 
     lot = max(int(profile.lot_size), 1)
+    # 分品种最小申报数量（R16-D-1）：科创板股票单笔不小于 200 股——低于该数的
+    # 委托在现实中必被拒单，不得记账成交（旧实现按 lot=100 对齐 → 会产出 100 股
+    # 的科创板"成交"）。注意不能把数量自动抬到 200：target_value 语义下那会超预算。
+    min_qty = min_buy_qty(symbol, asset_type=asset_type, lot_size=lot)
     exec_price_est = bar_close * (1.0 + slippage_base + slippage_tail)
 
     if intent_type == "quantity":
@@ -85,6 +89,10 @@ def match_buy(
         qty = (intended // lot) * lot
         if qty <= 0:
             return _unfilled(order_id, symbol, day, "lot_rounding", snapshot)
+        # 整手对齐后仍低于该品种最小申报数量（科创板 200）→ 现实中不可下
+        # （保留 `lot_rounding` 给"不足一手"的原语义）
+        if qty < min_qty:
+            return _unfilled(order_id, symbol, day, "below_min_order", snapshot)
         # 现金校验（含预估费用）不足 → 逐手递减（解析式直达可负担上限，
         # 语义与逐手递减完全一致：max_affordable_quantity 内部同口径校验）
         affordable = fees.max_affordable_quantity(
@@ -110,6 +118,9 @@ def match_buy(
                 else "insufficient_cash"
             )
             return _unfilled(order_id, symbol, day, reason, snapshot)
+        if qty < min_qty:
+            # 预算只够最小申报数量以下（科创板 200 股）→ 该单在现实中不可下
+            return _unfilled(order_id, symbol, day, "below_min_order", snapshot)
     else:
         raise ValueError(f"unknown intent_type: {intent_type}")
 

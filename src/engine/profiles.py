@@ -41,6 +41,22 @@ CN_STOCK = MarketProfile(
     cash_interest_rate=0.01,     # 空仓资金按固定年化 1% 计息（国债逆回购近似；2026-09-23 用户定：写死）
 )
 
+# 分品种最小申报数量（R16-D-1）：科创板（688xxx）限价/市价申报单笔**不小于 200 股**
+# （超 200 股部分可按 1 股递增）；其余品种 100 股/份起。旧实现一律按 lot_size 对齐，
+# 在科创板会产出 100 股委托——券商必然拒单，却被记账成交（实测 match_buy 对
+# 688498.SS 返回 filled qty=100）→ 持仓/现金/NAV 与台账全部偏离。
+STAR_MIN_ORDER_QTY = 200
+
+
+def min_buy_qty(symbol: str, *, asset_type: str | None = None, lot_size: int = 100) -> int:
+    """买入的最小申报数量（分品种）。科创板股票 = 200，其余 = lot_size（默认 100）。"""
+    from core.symbols import symbol_suffix, symbol_to_code
+
+    if str(asset_type or "").lower() == "stock" and symbol_suffix(symbol) == "SS"             and symbol_to_code(symbol).startswith("68"):
+        return STAR_MIN_ORDER_QTY
+    return max(int(lot_size), 1)
+
+
 _PROFILES = {CN_STOCK.name: CN_STOCK}
 
 

@@ -83,7 +83,8 @@ def rebuild_symbol(symbol: str, trend_cfg: dict, db=None) -> dict:
     return {"symbol": symbol, "status": "rebuilt", "rows": ind_rows, "trend_rows": trend_rows}
 
 
-def rebuild_all(symbols: list[str] | None = None, trend_cfg: dict | None = None, db=None) -> dict:
+def rebuild_all(symbols: list[str] | None = None, trend_cfg: dict | None = None, db=None,
+                *, partial: bool = False) -> dict:
     # 运行期冻结（决策 A3）守卫**下沉到此处**：三个整段重写入口（HTTP 补齐后的
     # rebuild_after_backfill / 启动补偿 rebuild_if_needed / 日更尾 pipeline）全部经过
     # 本函数，在此拦一次即可（R15A-F2 实证：此前只有 rebuild_after_backfill 有闸，
@@ -104,7 +105,12 @@ def rebuild_all(symbols: list[str] | None = None, trend_cfg: dict | None = None,
         except Exception:
             failed += 1
             logger.exception("Indicator rebuild failed for %s", symbol)
-    register_default_param_set(trend_cfg, db=db)
+    # 只在**全量**重建时登记 default 参数集（R16B-B2）：部分重建（冻结后的
+    # 日更尾只重建当日标的）若也登记，会把"配置漂移 → 需全量重建"的标记冲掉，
+    # 未被重建的标的因此永远停在旧参数缓存上（实测：漂移检测由 True 变 False、
+    # 未被重建标的 trend_daily 行数 0）。
+    if symbols is None or not partial:
+        register_default_param_set(trend_cfg, db=db)
     return {"total": len(symbols), "rebuilt": rebuilt, "failed": failed}
 
 
@@ -204,7 +210,7 @@ def rebuild_after_backfill(symbols: list[str], db=None) -> dict:
     db = db or get_db()
     try:
         trend_cfg = get_strategy_config()
-        result = rebuild_all(symbols=symbols, trend_cfg=trend_cfg, db=db)
+        result = rebuild_all(symbols=symbols, trend_cfg=trend_cfg, db=db, partial=True)
         logger.info("Post-backfill indicator rebuild for %s: %s", symbols, result)
         return result
     except Exception:
@@ -242,6 +248,6 @@ def run_post_update_pipeline(settings, data_service, update_payload: dict, symbo
     if not targets:
         return {"status": "up_to_date", "dividend_breaks": broken, "rebuilt": 0}
 
-    result = rebuild_all(symbols=targets, trend_cfg=trend_cfg, db=db)
+    result = rebuild_all(symbols=targets, trend_cfg=trend_cfg, db=db, partial=True)
     result["dividend_breaks"] = broken
     return result

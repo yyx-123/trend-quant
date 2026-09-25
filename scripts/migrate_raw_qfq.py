@@ -155,7 +155,8 @@ def main() -> int:
         from services.indicator_builder import rebuild_all
 
         print("[migrate] 重建指标/趋势缓存 ...", flush=True)
-        result = rebuild_all(symbols=sorted(state["done"]), trend_cfg=get_strategy_config(), db=db)
+        result = rebuild_all(symbols=sorted(state["done"]), trend_cfg=get_strategy_config(),
+                             db=db, partial=True)
         print(f"[migrate] 缓存重建: {result}")
 
     print("[migrate] 完成。请重跑批量回测（旧批次结果是脏数据口径的产物）。")
