@@ -47,8 +47,29 @@ PERIOD_HISTORY_START = date(1990, 1, 1)
 ROLLING_TREND_LOOKBACK_DAYS = 450
 
 
+class FrozenWritesError(RuntimeError):
+    """运行期冻结（决策 A3）期间拒绝整段重写类写操作（补齐/物化/指标重建）。
+
+    冻结门此前只在**调度面**（日更顺延）与**批次侧**（持锁）生效，而 HTTP 触发的
+    写路径（任何登录用户可点）不检查 → 批次运行中仍能整段重写 qfq 与指标缓存，
+    先跑的格子与后跑的格子落在两版价格上且血缘不可见（R14B-F1 实证：冻结态下
+    `rebuild_after_backfill` 仍写入 indicator_daily/trend_daily 各 300 行）。
+    """
+
+
 class DataProviderError(RuntimeError):
     """Raised when the configured market data provider cannot return usable data."""
+
+
+def assert_writes_unfrozen(action: str) -> None:
+    """写入侧冻结守卫：冻结中抛 FrozenWritesError（调用方转 409/延后）。"""
+    from core import run_freeze
+
+    if run_freeze.is_frozen_anywhere():
+        raise FrozenWritesError(
+            f"{action} 暂不可用：有回测批次/研究 run 正在跑（运行期数据冻结，"
+            f"避免一次 run 读到两版行情）。请稍后重试。"
+        )
 
 
 def _symbol_lock(symbol: str) -> threading.Lock:
@@ -399,6 +420,7 @@ class DataService:
         return fetched, changed
 
     def rematerialize_qfq(self, symbol: str, factors: list | None = None, *, db=None) -> dict:
+        assert_writes_unfrozen(f"{symbol} 的 qfq 物化")
         """由本地 raw + 除权因子全量重写该标的的 qfq 表（纯本地操作）。
 
         raw 覆盖不如存量 qfq（过渡期半迁移状态）时拒绝物化并返回
@@ -614,6 +636,7 @@ class DataService:
         return date_span(df)
 
     def backfill_daily_history(self, symbol: str, start_date: date, end_date: date, adjust: str = "qfq") -> dict:
+        assert_writes_unfrozen(f"{symbol} 的历史补齐")
         if end_date < start_date:
             start_date, end_date = end_date, start_date
 

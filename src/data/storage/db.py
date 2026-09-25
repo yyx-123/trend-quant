@@ -84,6 +84,21 @@ def _dt_str(dt: datetime) -> str:
 # （status / final_verdict / reasoning 等）在白名单内允许更新，状态机合法性由
 # research/lifecycle.py 代码层强制。设计出处：详设 §4.1/§5.5/§6.3/§6.6.7/§6.7。
 # ---------------------------------------------------------------------------
+_LIVE_LISTS_DDL = """CREATE TABLE IF NOT EXISTS portfolio_live_lists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    list_date TEXT NOT NULL,              -- 决策日（交易日）
+    strategy_version_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL DEFAULT 1,   -- 清单归属的操作者（逐用户隔离，见 R14B-F2）
+    as_of TEXT NOT NULL,                  -- 取数时刻（如 2026-09-23 14:00:00）
+    engine_run_id TEXT,
+    target_json TEXT NOT NULL DEFAULT '{}',   -- 目标持仓 + 应买应卖 + 风控拦截说明
+    reconcile_json TEXT,                      -- 次日对账结果
+    reconciled_at TEXT,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(user_id, list_date, strategy_version_id)
+);"""
+
+
 _RESEARCH_STACK_DDL = """
 -- ===== L1.5 数据门面层 =====
 CREATE TABLE IF NOT EXISTS gateway_audit (
@@ -310,18 +325,7 @@ CREATE TABLE IF NOT EXISTS portfolio_strategy_versions (
 );
 
 -- 实盘运行器每日清单（详设 §5.7）：一次运行一行，清单/对账结果存 payload。
-CREATE TABLE IF NOT EXISTS portfolio_live_lists (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    list_date TEXT NOT NULL,              -- 决策日（交易日）
-    strategy_version_id TEXT NOT NULL,
-    as_of TEXT NOT NULL,                  -- 取数时刻（如 2026-09-23 14:00:00）
-    engine_run_id TEXT,
-    target_json TEXT NOT NULL DEFAULT '{}',   -- 目标持仓 + 应买应卖 + 风控拦截说明
-    reconcile_json TEXT,                      -- 次日对账结果
-    reconciled_at TEXT,
-    created_at TEXT DEFAULT (datetime('now','localtime')),
-    UNIQUE(list_date, strategy_version_id)
-);
+__LIVE_LISTS_DDL__
 
 -- ===== L4 投研层（详设 §6.3/§6.6.7） =====
 CREATE TABLE IF NOT EXISTS research_sessions (
@@ -579,6 +583,7 @@ WHEN OLD.id <> NEW.id
   OR OLD.created_at <> NEW.created_at
 BEGIN SELECT RAISE(ABORT, 'module_drafts content is append-only'); END;
 """
+_RESEARCH_STACK_DDL = _RESEARCH_STACK_DDL.replace("__LIVE_LISTS_DDL__", _LIVE_LISTS_DDL)
 
 
 class Database:
@@ -1188,6 +1193,32 @@ class Database:
                 "idx_engine_daily_nav_run",
             ):
                 conn.execute(f"DROP INDEX IF EXISTS {redundant_index}")
+            # portfolio_live_lists 的 user 维度（R14B-F2）：旧定义的
+            # UNIQUE(list_date, strategy_version_id) 无用户维度——两用户同策略同日
+            # 会互相覆盖，且任何登录用户都能从台账页读到操作者的实盘计划。
+            # SQLite 不能改约束，故"新建→搬运→替换"（表为 0 行时是空操作）。
+            live_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table'"
+                " AND name='portfolio_live_lists'"
+            ).fetchone()
+            if live_row is not None and "user_id" not in (live_row["sql"] or ""):
+                _logger.warning(
+                    "migrating portfolio_live_lists to per-user schema (rebuild)"
+                )
+                conn.execute(
+                    "ALTER TABLE portfolio_live_lists RENAME TO portfolio_live_lists_old"
+                )
+                conn.executescript(_LIVE_LISTS_DDL)
+                conn.execute(
+                    "INSERT INTO portfolio_live_lists (list_date, strategy_version_id,"
+                    " user_id, as_of, engine_run_id, target_json, reconcile_json,"
+                    " reconciled_at, created_at)"
+                    " SELECT list_date, strategy_version_id, 1, as_of, engine_run_id,"
+                    " target_json, reconcile_json, reconciled_at, created_at"
+                    " FROM portfolio_live_lists_old"
+                )
+                conn.execute("DROP TABLE portfolio_live_lists_old")
+
             for table, new_columns in targets.items():
                 existing = {
                     row["name"] for row in conn.execute(f"PRAGMA table_info({table})")

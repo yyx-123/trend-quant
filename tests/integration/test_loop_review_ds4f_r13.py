@@ -162,3 +162,39 @@ def test_cross_process_freeze_is_visible(tmp_path, monkeypatch):
     os.utime(lock, (old, old))
     assert run_freeze.file_frozen(lock) is False
     assert run_freeze.is_frozen_anywhere(lock) is False
+
+
+def test_daily_update_defers_when_freeze_sentinel_present(monkeypatch, tmp_path, test_db):
+    """R13A-F2 的接线钉子：日更必须**看**跨进程哨兵（此前只有哨兵本身的钉子）。
+
+    模拟"CLI 批次在跑"（哨兵文件存在）→ 日更进入 deferred 分支且**不**执行取数；
+    不真等 30 分钟（打桩 sleep），也不真跑日更。
+    """
+    import time as _time
+
+    from core import jobs, run_freeze
+
+    lock = tmp_path / "run_freeze.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("999999 0", encoding="utf-8")
+    monkeypatch.setenv(run_freeze._FREEZE_FILE_ENV, str(lock))
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+
+    recorded: list[tuple] = []
+    monkeypatch.setattr(
+        jobs, "record_job_run_safely",
+        lambda *a, **kw: recorded.append((a, kw)),
+    )
+    # 真去取数就会被这里抓住（deferred 分支必须在取数之前）
+    def _must_not_fetch(*a, **kw):
+        raise AssertionError("冻结期间日更不得执行取数")
+
+    monkeypatch.setattr(jobs, "DataService", _must_not_fetch)
+
+    payload = jobs._daily_market_update_job_locked(
+        jobs.get_settings() if hasattr(jobs, "get_settings") else None,
+        None,
+        force=True,
+    )
+    assert payload.get("status") == "deferred_backtest_running", payload
+    assert any("daily_update_defer" in str(a[0]) for a in recorded), recorded

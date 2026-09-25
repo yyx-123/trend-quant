@@ -62,13 +62,14 @@ def frozen_writes():
 # `is_frozen()` 同时看计数器与未见期的哨兵文件；超过 _STALE_SECONDS 的文件
 # 视为崩溃残留（批次最长 44 分钟，6 小时足够宽松），不会造成永久冻结。
 # ----------------------------------------------------------------------
+from pathlib import Path
+
 _STALE_SECONDS = 6 * 3600
 _FREEZE_FILE_ENV = "TREND_QUANT_FREEZE_FILE"
 
 
 def freeze_file_path():
     """哨兵文件路径（测试可用 TREND_QUANT_FREEZE_FILE 注入）。"""
-    import os
     from pathlib import Path
 
     override = os.environ.get(_FREEZE_FILE_ENV)
@@ -85,9 +86,12 @@ def cross_process_frozen(path=None):
 
     @_cm
     def _ctx():
-        target = path or freeze_file_path()
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target = Path(path) if path is not None else freeze_file_path()
         try:
+            # mkdir 也必须在 try 内：路径被普通文件占用/不可建时**不得**崩批次
+            # （R14A-B1 实证：父路径是文件时抛 FileExistsError，与下面的承诺相反），
+            # 此时降级为纯进程内冻结。
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
                 f"{os.getpid()} {time.time():.0f}\n", encoding="utf-8"
             )
@@ -108,7 +112,7 @@ def cross_process_frozen(path=None):
 
 def file_frozen(path=None) -> bool:
     """哨兵文件是否存在且**未过期**（过期=崩溃残留，按未冻结处理）。"""
-    target = path or freeze_file_path()
+    target = Path(path) if path is not None else freeze_file_path()
     try:
         stat = target.stat()
     except OSError:

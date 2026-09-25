@@ -179,7 +179,13 @@ def rebuild_after_backfill(symbols: list[str], db=None) -> dict:
 
     Keeps caches fresh outside the daily 16:30 pipeline so dashboards never
     fall into the stale-cache fallback path after manual backfills.
+
+    运行期冻结（决策 A3）中**拒绝**重建：批次运行中整段重写指标缓存会让先/后跑的
+    格子落在两版数据上（R14B-F1）。写入侧守卫与日更的顺延口径一致。
     """
+    from data.service import assert_writes_unfrozen
+
+    assert_writes_unfrozen("指标缓存重建")
     db = db or get_db()
     try:
         trend_cfg = get_strategy_config()

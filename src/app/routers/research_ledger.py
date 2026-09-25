@@ -86,7 +86,11 @@ def ledger_board(request: Request):
     topic_rows = service.list_topics()
     experiments = service.list_experiments(include_archived=True)
     stale = service.stale_experiments(days=7)
-    live_lists = _recent_live_lists()
+    # 实盘清单按调用者过滤（R14B-F2）；admin 看全量
+    _user = getattr(request.state, "user", None) or {}
+    live_lists = _recent_live_lists(
+        user_id=None if _user.get("is_admin") else int(_user.get("id") or 0)
+    )
     worker_status = _worker_status()
     return templates.TemplateResponse(
         name="research_ledger.html",
@@ -229,12 +233,18 @@ def grant_holdout(
     return RedirectResponse("/research-ledger", status_code=303)
 
 
-def _recent_live_lists(limit: int = 10) -> list[dict]:
+def _recent_live_lists(limit: int = 10, *, user_id: int | None = None) -> list[dict]:
+    """最近清单：**按调用者过滤**（R14B-F2：此前无 WHERE，任何登录用户可读到
+    操作者的持仓与次日买卖计划）。admin 传 user_id=None 时看全量。"""
+    sql = "SELECT * FROM portfolio_live_lists"
+    params: tuple = ()
+    if user_id is not None:
+        sql += " WHERE user_id = ?"
+        params = (int(user_id),)
+    sql += " ORDER BY list_date DESC, id DESC LIMIT ?"
+    params = (*params, int(limit))
     with db_module.get_db().connect() as conn:
-        rows = conn.execute(
-            """SELECT * FROM portfolio_live_lists ORDER BY list_date DESC, id DESC LIMIT ?""",
-            (int(limit),),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     out = []
     for r in rows:
         d = dict(r)

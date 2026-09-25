@@ -465,12 +465,13 @@ def generate_daily_list(
     with db.connect() as conn:
         conn.execute(
             """INSERT INTO portfolio_live_lists
-               (list_date, strategy_version_id, as_of, engine_run_id, target_json)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(list_date, strategy_version_id)
+               (list_date, strategy_version_id, user_id, as_of, engine_run_id, target_json)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, list_date, strategy_version_id)
                DO UPDATE SET as_of = excluded.as_of, target_json = excluded.target_json,
                             engine_run_id = excluded.engine_run_id""",
-            (day.isoformat(), strategy_version_id, as_of.isoformat(sep=" "),
+            (day.isoformat(), strategy_version_id, int(user_id),
+             as_of.isoformat(sep=" "),
              live_run_id, json.dumps(target, ensure_ascii=False, sort_keys=True)),
         )
     gateway.flush_audit()
@@ -500,8 +501,8 @@ def reconcile_daily_list(db, *, list_date: str, strategy_version_id: str, user_i
     with db.connect() as conn:
         row = conn.execute(
             """SELECT * FROM portfolio_live_lists
-               WHERE list_date = ? AND strategy_version_id = ?""",
-            (list_date, strategy_version_id),
+               WHERE list_date = ? AND strategy_version_id = ? AND user_id = ?""",
+            (list_date, strategy_version_id, int(user_id)),
         ).fetchone()
     if row is None:
         return None

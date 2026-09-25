@@ -488,12 +488,17 @@ async def backfill_instrument(symbol: str, payload: InstrumentBackfillRequest, r
     adjust = str(payload.adjust or _default_adjust()).strip().lower() or "qfq"
 
     data_service = get_data_service()
-    result = data_service.backfill_daily_history(
+    from data.service import FrozenWritesError
+
+    try:
+        result = data_service.backfill_daily_history(
         symbol=normalized_symbol,
         start_date=start_date,
         end_date=end_date,
-        adjust=adjust,
-    )
+            adjust=adjust,
+        )
+    except FrozenWritesError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     result["adjust"] = adjust
     result["requested_symbol"] = symbol
     result["symbol"] = normalized_symbol
