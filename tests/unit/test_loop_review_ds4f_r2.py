@@ -52,11 +52,29 @@ def _full_in_run(n_rounds: int, *, slip: float = 0.001, price: float = 10.0,
         old.append({"date": d, "side": "SELL", "qty": q, "price": price})
     if last_qty_mult != 1.0:
         new[-1]["qty"] = int(new[-1]["qty"] * last_qty_mult)
-    nav_new = [{"date": "2023-01-03", "equity": equity},
-               {"date": "2023-01-04", "equity": equity * (1 + nav_rel)}]
-    nav_old = [{"date": "2023-01-03", "equity": equity},
-               {"date": "2023-01-04", "equity": equity}]
-    return _res(new, nav_new), _res(old, nav_old, legacy=True)
+    # nav 必须是**引擎形态**（cash + 持仓市值 + close）：否则恒等式两条腿都是
+    # 空转（V6 复核实证：nav 精简时只剩启发式界在防守，把界删掉就失效）
+    def _nav(trades, rel=0.0):
+        held = 0
+        for t in trades:
+            held += t["qty"] if t["side"] == "BUY" else -t["qty"]
+        cash = equity - sum(
+            t["qty"] * t["price"] for t in trades if t["side"] == "BUY"
+        ) + sum(t["qty"] * t["price"] for t in trades if t["side"] == "SELL")
+        # 注入的净值偏离落在 cash 上（保持 equity = cash + 市值 的恒等式成立，
+        # 即"自洽地重写 nav"——恒等式故意不抓这一类，由白名单界/饱和标注处理）
+        cash += equity * rel
+        pv = held * price
+        return [
+            {"date": "2023-01-03", "cash": equity, "positions_value": 0.0,
+             "market_value": 0.0, "qty": 0, "close": price, "equity": equity},
+            {"date": "2023-01-04", "cash": cash, "positions_value": pv,
+             "market_value": pv, "qty": held, "close": price,
+             "equity": cash + pv},
+        ]
+
+    return (_res(new, _nav(new, nav_rel)),
+            _res(old, _nav(old, 0.0), legacy=True))
 
 
 def test_parity_no_false_positives_on_long_legitimate_runs():
@@ -73,7 +91,8 @@ def test_parity_no_false_positives_on_long_legitimate_runs():
         new, old = _full_in_run(rounds)
         out = attribute_diffs(new, old)
         assert out["unexplained"] == [],             f"{rounds} 轮合法运行被误判：{out['unexplained'][:2]}"
-        assert out["classified"]["tail_slippage"] == 2 * rounds
+        # 2×rounds 笔成交差异全部归类（另有 nav 级联点也归入同类）
+        assert out["classified"]["tail_slippage"] >= 2 * rounds
 
 
 def test_parity_acceptance_scale_is_discriminating():
@@ -422,3 +441,81 @@ def test_parity_saturates_on_many_diffs_even_with_a_tight_bound():
     assert out["n_trade_diffs"] == 300
     assert out["nav_cascade_bound"] <= 0.05, "该形态的上界应当很紧"
     assert out["saturated"] is True, "笔数超尺度必须判饱和（判据含 n_trade_diffs）"
+
+
+def test_parity_nonfinite_and_shape_guards():
+    """V5 复核的边界：NaN/inf 不得静默通过恒等式；旧侧形状异常不得抛异常穿出；
+    且恒等式与仓位恒等式的**覆盖计数**必须如实报告（否则可能静默空转）。"""
+    import math
+
+    from engine.parity import attribute_diffs
+
+    new, old = _engine_shaped_run_local(5)
+    base = attribute_diffs(new, old)
+    assert base["unexplained"] == []
+    assert base["nav_identity_checked_days"] == 4  # 两侧 × 2 天
+    assert base["nav_position_identity_checked_days"] == 2
+
+    # (a) NaN 塞进 cash：不得被判"恒等式通过"
+    for field in ("cash", "positions_value"):
+        import copy
+
+        inj = copy.deepcopy(new)
+        inj["daily_nav"][-1][field] = float("nan")
+        out = attribute_diffs(inj, old)
+        kinds = {u.get("kind") for u in out["unexplained"]}
+        assert "nav_identity_nonfinite" in kinds or "nav_identity_broken" in kinds, (field, kinds)
+
+    # (b) inf 同理
+    import copy
+
+    inj_inf = copy.deepcopy(new)
+    inj_inf["daily_nav"][-1]["equity"] = float("inf")
+    out_inf = attribute_diffs(inj_inf, old)
+    assert any(u.get("kind") in ("nav_identity_nonfinite", "nav_identity_broken")
+               for u in out_inf["unexplained"])
+
+    # (c) 旧侧形状异常（qty=None / date 垃圾）不得抛异常穿出
+    bad = {
+        "trades": [{"date": "garbage", "side": "BUY", "qty": None, "exec_price": 10.0}],
+        "daily_nav": [{"date": "2023-01-03", "cash": 1e6, "market_value": 0.0,
+                       "equity": 1e6, "qty": 0, "close": 10.0}],
+    }
+    out_bad = attribute_diffs(new, bad)
+    assert out_bad["unexplained"], "形状异常必须判超纲而不是静默通过"
+
+    # (d) 合法性数值不被误判
+    assert math.isclose(base["nav_identity_residual"], 0.0, abs_tol=1e-12)
+
+
+def _engine_shaped_run_local(n_buys: int, *, slip: float = 0.001, qty: int = 1000,
+                             price: float = 10.0, equity: float = 1_000_000.0):
+    """引擎形态的两侧结果（nav 带 cash + 持仓市值 + close）。
+
+    本文件自带一份，避免依赖别的测试模块的 sys.path 副作用（V6 复核：跨文件
+    import 会让用例单独运行时 ModuleNotFoundError）。
+    """
+    buy_n = [{"date": date(2023, 1, 4), "side": "BUY", "qty": qty,
+              "price": price * (1 + slip)} for _ in range(n_buys)]
+    buy_o = [{"date": date(2023, 1, 4), "side": "BUY", "qty": qty,
+              "price": price} for _ in range(n_buys)]
+
+    def _nav(trades):
+        held = sum(t["qty"] for t in trades)
+        spent = sum(t["qty"] * t["price"] for t in trades)
+        cash = equity - spent
+        pv = held * price
+        return [
+            {"date": "2023-01-03", "cash": equity, "positions_value": 0.0,
+             "market_value": 0.0, "qty": 0, "close": price, "equity": equity},
+            {"date": "2023-01-04", "cash": cash, "positions_value": pv,
+             "market_value": pv, "qty": held, "close": price,
+             "equity": cash + pv},
+        ]
+
+    return (
+        {"trades": buy_n, "daily_nav": _nav(buy_n)},
+        {"trades": [{"date": t["date"], "side": t["side"], "qty": t["qty"],
+                     "exec_price": t["price"]} for t in buy_o],
+         "daily_nav": _nav(buy_o)},
+    )

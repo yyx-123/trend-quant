@@ -132,3 +132,26 @@ event regime 口径——旧值保留为 `delta_mean_vs_global`）。
   `tests/test_instruments_bulk_backfill.py`，父提交上同样失败）；
 - 新增钉子：`tests/unit/test_loop_review_ds4f_r2.py` 9 项；
 - ruff：与基线逐条对比新增 0 条。
+
+## V5/V6 复核后的收口（最终）
+
+**V5（第 5 代理）：PASS**，列 7 项 P3。逐项修复：
+
+| # | 项 | 修复 |
+|---|---|---|
+| 1 | NaN/inf 静默通过恒等式（`nan > tol` 恒 False） | 残差比较前加 `math.isfinite` 守卫 → `nav_identity_nonfinite` |
+| 2 | 旧侧 `int(qty)`/`Timestamp(date)` 无保护（异常穿出，新侧的 `trade_shape_invalid` 守卫对旧侧不可达） | `diff_against_legacy` 旧侧转换改 sentinel（异常 → None，由差异清单判负） |
+| 3 | 仓位恒等式无覆盖计数（可能静默空转） | 新增 `nav_position_identity_checked_days` |
+| 4 | 数量界无钉子（删掉界仍能通过） | **V6 复核升级为 BLOCKING**：验收尺度 fixture 的 nav 是精简形态 → 恒等式空转、界成了唯一防线。已把 fixture 改为**引擎形态**（cash + 持仓市值 + close），删掉界后伪造数量仍被仓位恒等式抓住（变异反证在案） |
+| 5 | docstring 残留已删除的 kind | 清理并核对 kind 清单与实现一致 |
+| 6 | stage-1 钉子的"未饱和"断言按种子敏感（种子 2 的 drag 略大即踩 0.05 悬崖） | 多种子断言改为"零假报警 + 注入必被抓"（由恒等式保证、与饱和无关）；"未饱和"只在固定种子上作参考核对 |
+| 7 | doc 措辞过宽（自洽重写 nav 在长窗口会被吸收） | docstring 如实声明两类不在判别范围的差异（配置差异 / 自洽重写 nav） |
+
+**V6（第 6 代理）：FAIL（2 项）→ 已全部闭合**（上表第 4、6 项 + 新缺陷"钉子顺序依赖"已消除：
+r2 钉子文件自带本地 fixture，不再跨文件 import）。
+
+**最终变异反证（本轮）**：9 项定向变异 **9/9 被抓住**（数量界删除 → 验收尺度钉子失败；
+两条恒等式与覆盖计数各自关掉 → 专用钉子失败；非有限守卫/旧侧形状守卫关掉 → 边界钉子失败）。
+
+**最终回归**：**1594 passed / 1 failed**（既有 Windows 临时文件 flake）；ruff 与基线逐条对比
+**新增 0 条**。

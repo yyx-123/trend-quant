@@ -15,6 +15,7 @@ tests/unit/test_engine_stops_parity.py（与实盘侧 services/stop_loss.py
 
 from __future__ import annotations
 
+import math
 from datetime import date
 
 import pandas as pd
@@ -143,15 +144,26 @@ def diff_against_legacy(new_result: dict, legacy_result: dict) -> dict:
     第四类显式差异，parity 报告里单列）。
     """
     new_trades = new_result["trades"]
-    old_trades = [
-        {
-            "date": pd.Timestamp(t["date"]).date(),
-            "side": t["side"],
-            "qty": int(t["qty"]),
-            "price": float(t["exec_price"]),
-        }
-        for t in legacy_result["trades"]
-    ]
+    # 形状异常（None/NaN/非数值日期）不得让归因器抛异常穿出（V5 复核实证：
+    # 旧侧此前 int(qty)/Timestamp(date) 无保护，而"新侧 trade_shape_invalid"
+    # 的守卫对旧侧不可达）——统一转成 sentinel，由返回的差异清单判负。
+    old_trades = []
+    for t in legacy_result["trades"]:
+        try:
+            date_v = pd.Timestamp(t["date"]).date()
+        except (KeyError, TypeError, ValueError):
+            date_v = None
+        try:
+            qty_v: int | None = int(t["qty"])
+        except (KeyError, TypeError, ValueError):
+            qty_v = None
+        try:
+            price_v: float | None = float(t["exec_price"])
+        except (KeyError, TypeError, ValueError):
+            price_v = None
+        old_trades.append({
+            "date": date_v, "side": t.get("side"), "qty": qty_v, "price": price_v,
+        })
     diffs: list[dict] = []
     n = max(len(new_trades), len(old_trades))
     for i in range(n):
@@ -163,6 +175,7 @@ def diff_against_legacy(new_result: dict, legacy_result: dict) -> dict:
         if (
             new_t["date"] == old_t["date"] and new_t["side"] == old_t["side"]
             and new_t["qty"] == old_t["qty"]
+            and new_t["price"] is not None and old_t["price"] is not None
             and abs(new_t["price"] - old_t["price"]) < 1e-9
         ):
             continue
@@ -215,9 +228,9 @@ def attribute_diffs(
        （后者在数千笔时发散，会把荒谬错误吸收掉）。
     2. **精确恒等式**（不依赖任何启发式界，长窗口同样有效）：
        - 每侧的 ``equity == cash + 持仓市值``——两个引擎都是这么算的，合法
-         run 残差是浮点级（实测 0.0）；**任何伪造/漂移的净值**（+5% / +100%
-         / 任意窗口长度）都会立刻破坏它（kinds: nav_identity_broken /
-         nav_identity_residual_high）；
+         run 残差是浮点级（实测 0.0）；**内部不一致的伪造净值**（+5% / +100%
+         / 任意窗口长度）都会立刻破坏它（kind: nav_identity_broken；NaN/inf
+         另判 nav_identity_nonfinite）。
        - 新侧 ``positions_value == Σ(成交清单推出来的持仓量) × 当日收盘价``
          （收盘价取自旧侧 nav，两侧同一市场价）——任何伪造/错配的成交数量
          都会立刻破坏它（kind: nav_position_identity_broken）。
@@ -229,10 +242,14 @@ def attribute_diffs(
        的**空白**不能再当作"引擎力学一致"的验收断言，须以恒等式与
        ``violations`` 为准。
 
-    前置条件（务必如实）：本函数假定两侧**除尾盘滑点外配置相同**（同一
-    profile/费率/计息）。费率或计息参数不同造成的差异**不**在判别范围内
-    （恒等式两侧各自成立，白名单也不覆盖）——那属于"配置差异"，应由
-    run_params 对账而不是归因器发现。
+    前置条件（务必如实，V4/V5 复核后的准确边界）：本函数假定两侧**除尾盘
+    滑点外配置相同**（同一 profile/费率/计息），且成交清单与 nav 呈**逐笔
+    对齐**形态（极端滑点下新侧权益衰减到买不起一手时会结构性错位——此时
+    差异如实计入 `unexplained` 并标 `saturated=True`）。两类差异**不在**判别
+    范围内：① 费率/计息等配置差异（恒等式两侧各自成立、白名单不覆盖）——
+    应由 run_params 对账；② **自洽地重写** nav（equity 与 cash 同改）在长
+    窗口下也会被算术吸收——长窗口的 `unexplained == []` 本来就只表示"归类
+    没有超纲项"，恒等式负责抓"内部不一致的伪造"。
 
     白名单归类规则：
     - trade_mismatch：同日同向且价差幅度在尾盘滑点界限内 → tail_slippage。
@@ -339,6 +356,14 @@ def attribute_diffs(
                 # nav_identity_checked_days 如实报告。
                 continue
             identity_checked_days += 1
+            # NaN/inf 不可比较（`nan > tol` 恒为 False → 静默通过）：显式判负，
+            # 否则"往 cash 里塞 NaN"可以绕过恒等式（V5 复核实证）
+            if not (math.isfinite(eq_v) and math.isfinite(cash_v) and math.isfinite(mv_v)):
+                unexplained.append({
+                    "kind": "nav_identity_nonfinite", "side": side,
+                    "date": row.get("date"),
+                })
+                continue
             scale = max(abs(eq_v), abs(cash_v) + abs(mv_v), 1.0)
             resid = abs(eq_v - (cash_v + mv_v)) / scale
             identity_equity = max(identity_equity, resid)
@@ -350,6 +375,7 @@ def attribute_diffs(
     # (b) 新侧仓位一致（旧侧 nav 提供市场价；新侧持仓量由成交清单累加）
     qty_from_trades = 0
     trade_cursor = 0
+    position_checked_days = 0
     _new_trades = new_result.get("trades") or []
     _old_nav = legacy_result.get("daily_nav") or []
     if _new_trades and _old_nav:
@@ -373,12 +399,15 @@ def attribute_diffs(
                 qty_from_trades += qty if t.get("side") == "BUY" else -qty
                 trade_cursor += 1
             close_v = close_by_day.get(str(day)[:10])
-            if close_v is None:
+            if close_v is None or not math.isfinite(close_v) or close_v <= 0:
                 continue
             try:
                 pv = float(row["positions_value"])
             except (KeyError, TypeError, ValueError):
                 continue
+            if not math.isfinite(pv):
+                continue
+            position_checked_days += 1
             expected_pv = qty_from_trades * close_v
             scale = max(abs(pv), abs(expected_pv), 1.0)
             if abs(pv - expected_pv) / scale > identity_tol:
@@ -425,10 +454,12 @@ def attribute_diffs(
     # 判别力饱和的判据（R2 复核后**收紧**）：只要"归因还能吸收显著偏离"或
     # "差异笔数已超出 stage-1 验收尺度"，就判饱和——而不是等笔数上千。
     # 实测锚点：260 日 / 尾滑点 0.001（stage-1 验收尺度）合法净值偏离 2.0%、
-    # 差异 19 笔 → 不饱和，`unexplained == []` 可作验收断言。判定"不饱和"
+    # 差异 19~28 笔（随种子波动）→ 不饱和，`unexplained == []` 可作验收断言。
+    # 笔数阈值取 40（而非 20）以给 stage-1 尺度留出随种子波动的余量（V5 复核：
+    # 20 的阈值在 24 个种子里有 4 个因 21~28 笔而误判饱和）。判定"不饱和"
     # 必须同时满足三条：笔数少、上界紧、且从未吸收过 >5% 的偏离。
     saturated = bool(
-        n_trade_diffs > 20
+        n_trade_diffs > 40
         or nav_cascade_bound > 0.05
         or absorbed_max_rel > 0.05
     )
@@ -443,6 +474,7 @@ def attribute_diffs(
         "drag_ratio": drag_ratio,
         "nav_identity_residual": identity_equity,
         "nav_identity_checked_days": identity_checked_days,
+        "nav_position_identity_checked_days": position_checked_days,
         "saturated": saturated,
         "attribution_note": (
             "判别力饱和：差异笔数/漂移幅度超出逐笔归因的判别区间，"

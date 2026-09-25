@@ -170,29 +170,42 @@ def test_parity_limit_up_card_blocks_buy():
 
 
 def test_parity_stage1_scale_has_no_false_positive_and_still_discriminates():
-    """**stage-1 验收尺度**（260 日 / 尾滑点 0.001）：
-    合法纯尾滑点 run 必须零假报警且**未饱和**（判据才有效），同一 run 上
-    注入 +100% 净值错误必须被判超纲。
+    """**stage-1 验收尺度**（260 日 / 尾滑点 0.001，多随机种子）：
+    合法纯尾滑点 run 必须零假报警；同一 run 上注入 +100% 净值错误必须被判超纲。
 
-    R1 的"数量 1/2 硬帽"与 R2 的"纯现金项"都在此形态上出过假报警
-    （合法漂移是整手取整的量化随机游走，界必须同时含现金项与量化项）。
+    R1 的"数量 1/2 硬帽"与 R2 的"纯现金项"都在此形态上出过假报警（合法漂移是
+    整手取整的量化随机游走，界必须同时含现金项与量化项）。V6 复核指出单一种子
+    的 `saturated is False` 断言会踩 `nav_cascade_bound > 0.05` 的悬崖（种子 2
+    的 drag 略大即饱和）——故这里对**多种子**只断言"零假报警 + 注入必被抓"
+    （两者都由精确恒等式保证、与饱和状态无关），把"未饱和"作为**参考信息**
+    在固定种子上单独核对。
     """
     import copy
 
-    bars = _bars()
-    legacy = _run_legacy(bars)
-    new = _run_new(bars, slippage_tail=0.001)
-    report = attribute_diffs(new, legacy)
-    assert report["unexplained"] == [], f"stage-1 尺度假报警：{report['unexplained'][:2]}"
-    assert report["saturated"] is False, "判据有效的必要条件是未饱和"
-    assert report["nav_cascade_bound"] < 0.05
+    injected_kinds = set()
+    for seed in (11, 13, 7, 2, 18, 19, 23, 42):
+        bars = _bars(seed=seed)
+        legacy = _run_legacy(bars)
+        new = _run_new(bars, slippage_tail=0.001)
+        report = attribute_diffs(new, legacy)
+        assert report["unexplained"] == [],             f"seed={seed} stage-1 尺度假报警：{report['unexplained'][:2]}"
+        assert report["nav_identity_checked_days"] > 0, "恒等式必须真的被校验"
+        assert report["nav_identity_residual"] < 1e-12
 
-    injected = copy.deepcopy(new)
-    injected["daily_nav"][-1]["equity"] *= 2.0
-    out2 = attribute_diffs(injected, legacy)
-    assert any(
-        u.get("kind") == "nav_point_diff_beyond_interest" for u in out2["unexplained"]
-    ), "+100% 净值错误必须被判超纲"
+        injected = copy.deepcopy(new)
+        injected["daily_nav"][-1]["equity"] *= 2.0
+        out2 = attribute_diffs(injected, legacy)
+        assert any(
+            u.get("kind") == "nav_identity_broken" for u in out2["unexplained"]
+        ), f"seed={seed} +100% 净值错误必须被判超纲"
+        injected_kinds.add(tuple(sorted({u.get("kind") for u in out2["unexplained"]})))
+
+    # 固定种子的"未饱和"参考核对（判据精度的锚点；其他种子可能因 drag 略大而饱和，
+    # 属如实标注而非缺陷）
+    bars = _bars(seed=11)
+    base = attribute_diffs(_run_new(bars, slippage_tail=0.001), _run_legacy(bars))
+    assert base["saturated"] is False, "种子 11 的 stage-1 run 应当未饱和（判据有效）"
+    assert base["nav_cascade_bound"] < 0.05
 
 
 def test_parity_long_runs_have_no_false_positives_but_are_saturated():
