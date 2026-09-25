@@ -131,6 +131,21 @@ def instantiate_modules(config: StrategyConfig, registry) -> dict[str, Any]:
     return modules
 
 
+def heat_cap_of(config) -> float:
+    """读 heat_cap 门的声明参数（`max_heat_pct`，默认 0.06）。
+
+    R20A-F1：此处曾读 `params.get("cap")`——而 `cap` 不是该门的声明参数
+    （hot_cap 的参数域见 `portfolio/slots/portfolio_risk.py` 的 schema），
+    配置里写 `cap` 会被载入期拒绝，故该分支不可达、cap 恒为硬编码 6%，
+    导致非默认 cap 的 run 拿到"与配置矛盾"的告警数字（实测 cap=12% 时
+    仍写 6%、111/242 天与 5.35×，真值为 50/242 与 2.68×）。
+    """
+    for g in getattr(config, "gates", ()) or ():
+        if (getattr(g, "module", "") or "").startswith("heat_cap"):
+            return float((getattr(g, "params", None) or {}).get("max_heat_pct", 0.06))
+    return 0.06
+
+
 def heat_cap_ex_post_warning(nav_rows: list[dict], cap: float) -> str | None:
     """事后 heat 越线告警（纯函数，便于直接断言；R19B-F1）。
 
@@ -139,17 +154,20 @@ def heat_cap_ex_post_warning(nav_rows: list[dict], cap: float) -> str | None:
     标的 · cap 6% · 一年）264/365 天越线、峰值 4.15×cap，而旧实现无任何留痕。
     返回 None 表示未越线。
     """
+    comparable = [
+        r for r in nav_rows
+        if r.get("heat") is not None and r.get("equity") and float(r["equity"]) > 0
+    ]
     over = [
         float(r["heat"]) / float(r["equity"])
-        for r in nav_rows
-        if r.get("heat") is not None and r.get("equity")
-        and float(r["equity"]) > 0 and float(r["heat"]) > float(r["equity"]) * float(cap)
+        for r in comparable
+        if float(r["heat"]) > float(r["equity"]) * float(cap)
     ]
     if not over:
         return None
     peak = max(over)
     return (
-        f"heat_cap_exceeded(事后口径): {len(over)}/{len(nav_rows)} 个日结 heat 超"
+        f"heat_cap_exceeded(事后口径): {len(over)}/{len(comparable)} 个可比日结 heat 超"
         f"cap={float(cap):.2%}，峰值 {peak:.2%}（{peak / float(cap):.2f}×cap）——"
         "cap 仅在准入时刻卡控，已持仓 heat 随价格增长不受约束；"
         "不要把该 run 的敞口读作受 cap 约束"
@@ -403,11 +421,7 @@ def run_backtest(
     # 高于 cap，而旧实现无任何留痕。实测（12 只真实标的 · heat_cap 6% · 一年）
     # 264/365 天越线、峰值 4.15×cap。这里只**告警**不改行为（硬上限需要部分卖出）。
     if uses_heat_cap:
-        _cap = 0.06
-        for g in config.gates:
-            if (g.module or "").startswith("heat_cap"):
-                _cap = float((g.params or {}).get("cap", _cap))
-                break
+        _cap = heat_cap_of(config)
         _msg = heat_cap_ex_post_warning(nav_rows, _cap)
         if _msg:
             run_warnings.append(_msg)

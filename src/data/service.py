@@ -414,18 +414,31 @@ class DataService:
             logger.warning("ex-factor sync partial failure (%d symbols): %s", len(errors), errors)
         changed: list[str] = []
         for symbol, factors in fetched.items():
-            if not factors_equal(stored.get(symbol, []), factors):
-                db.replace_ex_factors(symbol, factors, provider="tickflow")
-                changed.append(symbol)
+            if factors_equal(stored.get(symbol, []), factors):
+                continue
+            # **清空守卫**（R20B-F1，P1）：上游响应缺键/为空/整批非 dict 时该标的
+            # 会得到空列表——而因子被清空会让 qfq 全历史回落到**不复权**口径
+            # （实测 002594.SZ 造出 −66.94% 的单日断裂），并把真实除权日判成
+            # **假跌停**（卖不出、止损顺延），全程无告警。因子"消失"不是正常的
+            # 公司行为：拒绝覆盖已有因子，响亮告警，等 vendor 恢复或人工处理。
+            if not factors and stored.get(symbol):
+                logger.warning(
+                    "ex-factor wipe refused for %s: upstream returned empty while %d "
+                    "local factors exist (possible vendor response gap) — 保留本地因子、qfq 不变",
+                    symbol, len(stored[symbol]),
+                )
+                continue
+            db.replace_ex_factors(symbol, factors, provider="tickflow")
+            changed.append(symbol)
         return fetched, changed
 
     def rematerialize_qfq(self, symbol: str, factors: list | None = None, *, db=None) -> dict:
-        assert_writes_unfrozen(f"{symbol} 的 qfq 物化")
         """由本地 raw + 除权因子全量重写该标的的 qfq 表（纯本地操作）。
 
         raw 覆盖不如存量 qfq（过渡期半迁移状态）时拒绝物化并返回
         raw_incomplete —— 宁可保留旧数据也不截断历史，等迁移脚本补全 raw。
         """
+        assert_writes_unfrozen(f"{symbol} 的 qfq 物化")
         db = db or get_db()
         symbol = str(symbol or "").strip().upper()
         raw = self.raw_store.load_history(symbol)

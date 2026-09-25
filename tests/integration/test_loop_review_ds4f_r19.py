@@ -139,5 +139,38 @@ def test_heat_cap_ex_post_warning_is_honest():
     over = flat + [{"date": "2024-01-03", "equity": 100_000.0, "heat": 24_910.0}]
     msg = heat_cap_ex_post_warning(over, 0.06)
     assert msg is not None and msg.startswith("heat_cap_exceeded(事后口径)")
-    assert "1/2 个日结" in msg and "4.15×cap" in msg
+    assert "1/2 个可比日结" in msg and "4.15×cap" in msg
     assert "不要把该 run 的敞口读作受 cap 约束" in msg
+    # 分母只算可比行（heat 有值且 equity>0）——R20A backlog
+    with_none = over + [{"date": "2024-01-04", "equity": 100_000.0, "heat": None},
+                        {"date": "2024-01-05", "equity": 0.0, "heat": 1.0}]
+    assert "1/2 个可比日结" in heat_cap_ex_post_warning(with_none, 0.06)
+
+
+def test_heat_cap_reads_declared_param_name():
+    """R20A-F1：cap 必须读**声明参数** `max_heat_pct`（读 "cap" 是死分支且写出错误数字）。
+
+    实测：配置 `max_heat_pct: 0.12` 时旧实现仍写"cap=6.00%、111/242 天、5.35×cap"，
+    按该 run 真实 cap 复算应为 50/242、2.68×cap。
+    """
+    from portfolio.backtester import heat_cap_of
+    from portfolio.registry import REGISTRY
+    from portfolio.slots import ensure_builtins
+    from portfolio.strategy import parse_strategy_yaml
+
+    ensure_builtins()
+    yaml_text = """name: t
+universe: {module: category_filter@1}
+signal: {module: macd_cross@1}
+rank: {module: by_freshness@1}
+sizing: {module: all_in@1}
+portfolio_risk: [{module: "heat_cap@1", params: {max_heat_pct: 0.12}}]
+position_risk: {module: hard_stop@1}
+execution: {module: tail_session@1}
+"""
+    cfg = parse_strategy_yaml(yaml_text, REGISTRY)
+    assert heat_cap_of(cfg) == 0.12
+    assert heat_cap_of(parse_strategy_yaml(
+        yaml_text.replace(
+            'portfolio_risk: [{module: "heat_cap@1", params: {max_heat_pct: 0.12}}]',
+            "portfolio_risk: []"), REGISTRY)) == 0.06
