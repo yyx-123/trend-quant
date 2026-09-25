@@ -543,3 +543,53 @@ def test_mcp_error_payload_classifies_library_errors():
         payload = _error_payload(exc)
         assert payload["ok"] is False
         assert "internal error" not in payload["error"], payload
+
+
+# ----------------------------------------------------------------------
+# V8 复核后的补钉
+# ----------------------------------------------------------------------
+
+
+def test_recompute_campaign_uses_the_service_topics_dir(test_db, registry, topic, human_session, tmp_path):
+    """V8 阻断 1：服务面必须把 `topics_dir` 透传给 campaign（否则产物落到仓库默认目录）。"""
+    import inspect
+
+    from research import api as research_api
+
+    monkeypatch_src = inspect.getsource(research_api.ResearchService.recompute_campaign)
+    assert "topics_dir=self.topics_dir" in monkeypatch_src, \
+        "ResearchService.recompute_campaign 必须透传 self.topics_dir"
+
+
+def test_primary_horizon_default_is_module_aware(test_db, registry, topic, human_session):
+    """V8 阻断 2：只有**声明了** `primary_horizon` 的模块才现算 `horizons[0]`。
+
+    给未声明该字段的 bucket_analysis 注入它，会让键集与省略形态不同 →
+    同 subject_key 的第二个分桶实验被判 similar_to（整类实验被误杀）。
+    """
+    from research.experiments import _expand_platform_defaults
+
+    bucket = _expand_platform_defaults(
+        {"signal_module": "macd_cross@1", "feature": "atr_pct", "horizons": [10, 20]},
+        "bucket_analysis@1",
+    )
+    assert "primary_horizon" not in bucket, "bucket_analysis 未声明 primary_horizon"
+
+    event = _expand_platform_defaults(
+        {"event": "macd_cross@1", "horizons": [5, 10, 20]}, "event_study@1",
+    )
+    assert event["primary_horizon"] == 5, "event_study 的缺省 = horizons[0]（runner 语义）"
+
+
+def test_falsy_defaults_are_normalized(test_db, registry, topic, human_session):
+    """V8 残留：runner 用 `or default` 的字段，falsy 值等价于省略。"""
+    from research.experiments import _expand_platform_defaults
+
+    for spec, module, key, expected in (
+        ({"n_folds": 0}, "portfolio_backtest@1", "n_folds", 4),
+        ({"window_mode": ""}, "portfolio_backtest@1", "window_mode", "static_holdout"),
+    ):
+        out = _expand_platform_defaults(
+            {"base": "b@1", "diff": [], **spec}, module,
+        )
+        assert out[key] == expected, (key, out)

@@ -56,6 +56,28 @@ verdict 状态守卫与行级认领、CLI 冻结与 skipped、哨兵 monkeypatch
 以无参 `init_db()` 打开并迁移**生产库**——每次全量测试都会对 `data/trend_quant.db` 跑一遍 DDL
 （行数不变、效果即"迁移到最新 schema"）。属存量测试卫生问题，记入最终报告的记录项。
 
+
+## V8 独立验收（第 8 个代理）：再判 FAIL（2 项阻断）→ 三次修复
+
+V8 逐项复核，确认 ND-2/ND-3(a)机制与声明字段矩阵/ND-4 四条腿/ND-5/ND-6/ND-1 的
+死代码半边**均已闭合**，但抓到 2 项阻断（均为我的实现问题）：
+
+| # | 项 | V8 证据 | 三次修复 |
+|---|---|---|---|
+| 阻断 1（P2） | `ResearchService.recompute_campaign` **仍未透传** `topics_dir` → 复核产物落到仓库默认目录 `research/topics` 而非服务配置的 topics_dir（既有测试也在往仓库里写 `T001_K3DS-课题`） | 真 campaign：`rematerialized_topics` 非空但 `svc_topics` 下 0 文件、产物出现在 `<repo>/research/topics/...` | 服务面补 `topics_dir=self.topics_dir` + 钉子（源码口径） |
+| 阻断 2（P2） | ND-3 的修复**误杀 bucket_analysis**：`primary_horizon = horizons[0]` 被注入到**未声明**该字段的 bucket 模块 → 键集与省略形态不同 → 同 subject_key 的第二个分桶实验恒判 `similar_to`（父提交同 spec 是 ACCEPTED） | A/B 对照（`c9a006d` monkeypatch vs `2fad537`） | 现算条件改为 `"primary_horizon" in known`（模块感知）+ 钉子断言 bucket 不得出现该键 |
+| P3 | 同族 falsy 逃逸仍在：`n_folds: 0` / `window_mode: ""` / `buckets: 0`（runner 用 `x or default`） | 逐一 ACCEPTED | 新增 `_FALSY_AS_DEFAULT` 归一 + 钉子 |
+| P3 | 新增 lint 1 条（`recompute.py` 的 I001，来自新增的 `from pathlib import Path`） | ruff pair 对比 | 已修（ruff 与基线持平） |
+
+**V8 已独立确认闭合**：ND-2（物化信封与 HTTP 逐键等价，10 键全等）、ND-3 机制钉子
+（3 项变异全被抓住）与**全字段矩阵**（无字段出现"显式缺省被放行"）、ND-4 四条腿
+（intake 三通道拒 + 既有实验 rerun/探针/晋升照常）、ND-5、ND-6、ND-1 的 (a)(c)(d)。
+
+**V8 记录的既有卫生问题（非本轮引入）**：`tests/integration/test_review_k3ds.py`
+构造服务时传了 `topics_dir=<db 旁路>` 但**复核路径**当时还不吃该参数，因此产物写进
+仓库 `research/topics/`——阻断 1 修好后该路径也归位（`research/topics/` 在
+`.gitignore`，无版本库污染）。
+
 ## 回归结果
 
 - 全量：**1605 passed / 1 failed**（唯一失败仍是改动前即 flaky 的 Windows 临时文件用例，在父提交上同样失败）；修复过程中另有一次全量 **1606 passed / 0 failed**。

@@ -296,6 +296,9 @@ class ResearchService:
         return _campaign(
             self.db, old_module_ref=old_module_ref, new_module_ref=new_module_ref,
             registry=self.registry, session_id=session_id, limit=limit,
+            # ND-1(b)（V8 复核）：物化根必须与服务面一致——否则复核产物落到
+            # 仓库默认目录（`research/topics`）而不是服务配置的 topics_dir
+            topics_dir=self.topics_dir,
         )
 
     def grant_holdout(self, *, session_id: str, purpose: str,

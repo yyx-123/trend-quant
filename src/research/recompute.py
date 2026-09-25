@@ -8,9 +8,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import json
+from pathlib import Path
 
 from audit.app_logger import get_logger
 from research import evaluations, lifecycle, verdict

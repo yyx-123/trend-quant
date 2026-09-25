@@ -77,6 +77,10 @@ def _coerce_scalar(v):
     return v
 
 
+# runner 侧以 `x or default` 取值的字段：falsy 值等价于省略（V8 复核残留）
+_FALSY_AS_DEFAULT = frozenset({"n_folds", "window_mode", "buckets"})
+
+
 def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
     """把"省略 = 平台缺省值"的字段展开成显式值（loop-review R1-P2-3）。
 
@@ -111,9 +115,16 @@ def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
         # **缺键或 None 都取平台缺省**——这正是"省略 ≡ 显式缺省"的归一（R3C-P2-2）
         if expanded.get(key) is None:
             expanded[key] = default() if callable(default) else default
+        # V8 复核残留：runner 侧用 `spec.get(k, d) or d` 的字段（falsy 也落缺省）
+        # ——`n_folds: 0` / `window_mode: ""` / `buckets: 0` 与省略等价，必须同样归一
+        elif key in _FALSY_AS_DEFAULT and not expanded.get(key):
+            expanded[key] = default() if callable(default) else default
     # runner 侧 `primary_horizon` 的缺省不是常量而是 `horizons[0]`（ND-3：
     # 显式写出该值必须与省略等价）
-    if module_key in ("event_study", "bucket_analysis") and expanded.get("primary_horizon") is None:
+    # 只对**声明了** primary_horizon 的模块现算（V8 反证：给 bucket_analysis
+    # 注入未声明字段会让其键集与省略形态不同 → 同 subject_key 的第二个分桶
+    # 实验被判 similar_to，整类实验被误杀）
+    if "primary_horizon" in known and expanded.get("primary_horizon") is None:
         horizons = expanded.get("horizons")
         if isinstance(horizons, (list, tuple)) and horizons:
             try:
