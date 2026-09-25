@@ -25,12 +25,9 @@ def t_sf_one_sided(t_stat: float, df: int) -> float:
     仅在"模块只产出配对 t（如 head_to_head 无 psr_on_diff）"时用于课题 FDR 家族
     （R23A-F3/F4）。
     """
-    try:
-        from scipy import stats as _scipy_stats
+    from research.stats.tdist import t_sf
 
-        return float(_scipy_stats.t.sf(float(t_stat), max(int(df), 1)))
-    except Exception:     # pragma: no cover - scipy 缺失时的保守回退
-        return 0.5 if t_stat > 0 else 1.0
+    return float(t_sf(float(t_stat), max(int(df), 1)))
 
 
 def paired_sharpe_comparison(

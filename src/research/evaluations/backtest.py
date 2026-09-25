@@ -730,6 +730,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     plateau = None
     plateau_items = _plateau_items(spec.get("diff") or [])
     pbo_info = None
+    warnings_pbo = None
     if plateau_items and not is_creation:
         neighbor_deltas: list[float] = []
         probes: list[dict] = []
@@ -806,17 +807,41 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
         try:
             from research.stats.fdr_pbo import pbo_cscv
 
-            variant_rets = [_safe_daily_rets(exp_result["daily_nav"])]
+            # R24A-F5：变体矩阵必须按**日期 join**对齐。此前取各自尾部等长切片
+            # （`r[-min_len:]`）做**位置**对齐——某探针 NAV 中间缺一天或起点晚几天
+            # 时会整体错位（实测注入 1 天内部缺口 ΔPBO 达 0.143、起点晚 20 天
+            # ΔPBO 0.129，且**全程无告警**）。这里按日期交集重建，并落
+            # `pbo_alignment`/`days_dropped` 供审计；交集不足 60 天则 PBO=None。
+            series = [_daily_rets_with_dates(exp_result["daily_nav"])]
             for probe in probes:
-                variant_rets.append(_safe_daily_rets(probe["_nav"]))
-            min_len = min(len(r) for r in variant_rets)
-            if len(variant_rets) >= 2 and min_len >= 60:
-                matrix = np.column_stack([np.asarray(r[-min_len:]) for r in variant_rets])
-                pbo_info = pbo_cscv(matrix, n_blocks=8)
-        except Exception:
+                series.append(_daily_rets_with_dates(probe["_nav"]))
+            common = None
+            for _dates, _rets in series:
+                keys = set(_dates)
+                common = keys if common is None else (common & keys)
+            if len(series) >= 2 and common:
+                common_sorted = sorted(common)
+                if len(common_sorted) >= 60:
+                    matrix = np.column_stack([
+                        np.asarray([_rets[_dates.index(d)] for d in common_sorted])
+                        for _dates, _rets in series
+                    ])
+                    pbo_info = pbo_cscv(matrix, n_blocks=8)
+                    pbo_info["alignment"] = "date_join"
+                    total_days = max(len(_dates) for _dates, _ in series)
+                    pbo_info["days_dropped"] = int(total_days - len(common_sorted))
+                else:
+                    warnings_pbo = (
+                        f"pbo_insufficient_overlap(变体共同交易日仅 {len(common_sorted)} < 60"
+                        "——PBO 记 None)"
+                    )
+        except Exception as exc:      # 数据形状异常等：如实可见（此前静默 None）
             pbo_info = None
+            warnings_pbo = f"pbo_unavailable({type(exc).__name__}: {exc})"
 
     warnings: list[str] = list(extra_warnings)
+    if warnings_pbo:
+        warnings.append(warnings_pbo)
     warnings.extend(exp_result.get("warnings") or [])  # 运行级告警（heat_cap 退化等）
     # 退化腿必须落进持久化记录的 warnings（否则记录里只有 null 无解释）
     _degen_labels = [("实验腿" if n == "experiment" else "基准腿") for n in _degenerate_legs]
@@ -1023,6 +1048,20 @@ def _with_param(diff: list[dict], slot: str, param: str, value) -> list[dict]:
     return out
 
 
+
+
+def _daily_rets_with_dates(nav_rows: list[dict]) -> tuple[list[str], list[float]]:
+    """(日期, 日收益) 序列——PBO 变体矩阵按日期对齐用（R24A-F5）。"""
+    import numpy as np
+
+    rows = [(str(r.get("date", ""))[:10], float(r["equity"]))
+            for r in nav_rows if r.get("equity") is not None]
+    if len(rows) < 2:
+        return [], []
+    dates = [rows[i][0] for i in range(1, len(rows))]
+    eq = np.asarray([v for _d, v in rows], dtype=float)
+    rets = np.diff(eq) / eq[:-1]
+    return dates, [float(x) for x in rets]
 
 
 def _safe_daily_rets(nav_rows: list[dict]) -> list[float]:

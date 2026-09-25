@@ -115,7 +115,11 @@ def test_gate_deterministic_blocks():
     assert suggest_backtest_verdict(ev()) == "confirmed"
     assert suggest_backtest_verdict(ev(paired_over={"t_stat": 1.0})) == "inconclusive"
     assert suggest_backtest_verdict(ev(paired_over={"dsr_on_diff": -0.1})) == "inconclusive"
-    assert suggest_backtest_verdict(ev(delta=-0.5)) == "rejected"
+    # R24B-F4：证伪也要过配对负向门——点估计恶化但配对不显著 → inconclusive
+    assert suggest_backtest_verdict(ev(delta=-0.5)) == "inconclusive"
+    assert suggest_backtest_verdict(
+        ev(delta=-0.5, paired_over={"t_stat": -6.0, "dsr_on_diff": 0.9})
+    ) == "rejected"
     assert suggest_backtest_verdict(ev(plateau={"verdict": "peak"})) == "inconclusive"
     assert suggest_backtest_verdict(ev(regime={"below": {"delta_sharpe": -0.5}})) == "inconclusive"
 

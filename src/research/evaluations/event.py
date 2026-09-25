@@ -180,7 +180,8 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
     start_day = pd.Timestamp(start).date()
     end_day = pd.Timestamp(end).date()
     fwd = forward_returns(panel, horizons, start, end)
-    labels = regime_labels(panel)
+    _regime_warnings: list[str] = []
+    labels = regime_labels(panel, warnings_out=_regime_warnings)
 
     # 逐日扫描事件（entry 事件即事件日）
     events: list[tuple[int, int]] = []  # (t_idx, symbol_col)
@@ -370,6 +371,9 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
     )
     warnings.extend(long_window_annotations(start))
     warnings.extend(panel_warnings)  # F2（R3A）：流动性过滤缩水进 evidence
+    # R24A-F4：regime 不可用/部分未知的**成因**（基准被过滤剔除 / 基准行情缺口 /
+    # 预热）——此前只有"预热不足"一种文案，把"基准不在面板"误报成预热问题
+    warnings.extend(_regime_warnings)
     # regime 预热透明度（DS-复审-R2 §4-2）：SMA200 预热不足的窗口前段，
     # regime 标签为 unknown / 条件掩码为 False 的事件被排除——必须显式可见，
     # 不能静默丢样本
@@ -381,9 +385,7 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
         if n_cf_excl:
             warnings.append(f"context_filter_warmup_excluded({n_cf_excl} 日条件掩码不可用)")
 
-    # 判定：主 horizon 的 delta_mean 方向 + bootstrap 噪声带
-    from research.evaluations._common import bootstrap_band
-
+    # 判定：主 horizon 的 delta_mean 方向 + bootstrap 噪声带（簇口径，见下）
     evidence = {
         "per_horizon": {str(h): per_h[h] for h in horizons},
         "path_stats": path,
@@ -396,22 +398,61 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
     primary = per_h.get(primary_h, {})
     if events and primary.get("delta_mean") is not None and len(events) >= 30:
         matrix = fwd[primary_h]
-        ev_vals = np.array([matrix[t, c] for t, c in events], dtype=float)
-        ev_vals = ev_vals[np.isfinite(ev_vals)]
-        band = bootstrap_band(ev_vals, seed=7)
+        # R24A-F1（P1）：噪声带与 p 值必须按**事件日簇**重抽样。此前是事件级 iid
+        # 重抽样（把 7393 个事件当独立样本），而事件按日成簇（同日均值 ACF(lag1)=0.42）
+        # 且 80% 前瞻窗口重叠 → 均值 SE 低估 1.77×（10 日区块口径 3.29×），
+        # 零效应下名义 5% 的实际拒绝率 17.0%（4000 次 MC；解析设计效应 3.18 吻合）。
+        # 后果：delta_mean∈(0.19%,0.63%) 的前瞻效应会被报"显著"，而真实 p>0.05。
+        pair_vals = [(t, c) for t, c in events]
+        ev_vals = np.array([matrix[t, c] for t, c in pair_vals], dtype=float)
+        ev_days = np.array([t for t, _c in pair_vals])
+        finite_keep = np.isfinite(ev_vals)
+        ev_vals_f = ev_vals[finite_keep]
+        ev_days_f = ev_days[finite_keep]
+        from research.evaluations._common import (
+            _bootstrap_means,
+            cluster_bootstrap_means,
+        )
+
+        boot_means = cluster_bootstrap_means(ev_vals_f, ev_days_f, seed=7)
+        if boot_means is None:      # 单事件日等退化情形 → 退回 iid 并如实告警
+            boot_means = _bootstrap_means(ev_vals_f, seed=7)
+            warnings.append(
+                "cluster_bootstrap_unavailable(事件日不足两个，退回事件级 iid 重抽样"
+                "——重叠/成簇下的显著性是乐观的)"
+            )
+        band = (
+            {"low": float(np.percentile(boot_means, 2.5)),
+             "high": float(np.percentile(boot_means, 97.5))}
+            if boot_means is not None and len(boot_means)
+            else {"low": np.nan, "high": np.nan}
+        )
         evidence["noise_band"] = band
         base_mean = baseline.get(primary_h, {}).get("mean", 0.0)
         # 经验 p 值（评审 DS-P2-3：bootstrap 均值越过基线均值的比例，供课题内
-        # FDR 家族校正——不再只有 backtest 贡献 p 值）
-        from research.evaluations._common import _bootstrap_means
-
-        boot_means = _bootstrap_means(ev_vals, seed=7)
+        # FDR 家族校正）——与噪声带同一簇分布
         if boot_means is not None and len(boot_means):
             p_emp = float(np.mean(
                 boot_means <= base_mean if expect == "positive"
                 else boot_means >= base_mean
             ))
             evidence["p_value"] = max(p_emp, 0.5 / len(boot_means))
+        # 设计效应与簇规模如实落库（供读者判断"名义水平是否可信"）
+        n_event_days = int(np.unique(ev_days_f).size) if ev_days_f.size else 0
+        design_effect = None
+        if n_event_days > 0 and ev_days_f.size > 0:
+            per_day = ev_days_f.size / n_event_days
+            if per_day > 0 and ev_vals_f.size > 1 and n_event_days > 1:
+                iid_var = float(np.var(ev_vals_f, ddof=1) / ev_vals_f.size)
+                clu_var = float(np.var(boot_means))
+                design_effect = (clu_var / iid_var) if iid_var > 0 else None
+        evidence["clustering"] = {
+            "n_events": int(ev_vals_f.size),
+            "n_event_days": n_event_days,
+            "events_per_day": (round(ev_vals_f.size / n_event_days, 3) if n_event_days else None),
+            "design_effect": (round(float(design_effect), 3) if design_effect else None),
+            "bootstrap": "cluster_by_event_day",
+        }
         significant = np.isfinite(band["low"]) and (
             band["low"] > base_mean or band["high"] < base_mean
         )

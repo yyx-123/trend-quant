@@ -204,14 +204,16 @@ def test_permutation_p_value_rejects_nan_and_none():
     from research.evaluations.bucket import permutation_p_value
 
     draws = [0.01, -0.02, 0.03, 0.005]
-    # 正常：|实际利差| 大于全部随机利差 → p=0.0（这是**真**的 0，不是伪造）
-    assert permutation_p_value(0.05, draws) == 0.0
+    # R24A-F2：p 有 (b+1)/(B+1) 下限——命中 0 次报 1/5 而不是 0.0
+    # （0.0 会被 BH 当成"最强证据"，而 4 次置换根本给不出 0 的信息量）
+    assert abs(permutation_p_value(0.05, draws) - 1.0 / 5.0) < 1e-12
     # NaN（空桶场景的 spread 形态）→ None（旧实现给 0.0 = 全族最显著）
     assert permutation_p_value(float("nan"), draws) is None
     assert permutation_p_value(None, draws) is None
     assert permutation_p_value(0.05, []) is None
     assert permutation_p_value(float("inf"), draws) is None
-    assert permutation_p_value(0.02, [0.01, 0.03]) == 0.5
+    # |0.02| 命中 1 个（0.03）→ (1+1)/(2+1) = 2/3
+    assert abs(permutation_p_value(0.02, [0.01, 0.03]) - 2.0 / 3.0) < 1e-12
 
 
 # ----------------------------------------------------------------------

@@ -79,6 +79,10 @@ def build_conclusion_summary(db, topic_id: str) -> dict:
         v = latest.get(exp["id"])
         if v is None:
             counts["no_verdict"] += 1
+            # R24B-F10：无 verdict 的实验（工程失败等）同样**不出可比 p**，
+            # 必须计入 n_excluded —— 否则 `n_tested < 课题实验数` 无法解释，
+            # 正是 R23A-F4 要消灭的"家族 m 少计而不可见"。
+            excluded += 1
             continue
         counts[v["final_verdict"]] += 1
         effect = _effect_size(v)

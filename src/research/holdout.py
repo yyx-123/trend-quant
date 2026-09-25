@@ -130,7 +130,7 @@ def get_token(db, token_id: str) -> dict | None:
     return row_to_dict(row)
 
 
-LINEAGE_MAX_DEPTH = 8
+LINEAGE_MAX_DEPTH = 32
 
 
 def experiment_lineage(db, experiment_id: str) -> list[str]:
@@ -209,6 +209,9 @@ def check_window(
     # ① 全局 token 必须显式声明用途（`experiment_id` 非空即"这是一次具名实验运行"）；
     # ② MCP 通道不再接受裸 token（见 trend_mcp.research_tools，只放行绑定到本实验/
     #    本复现链的 token）。
+    # R24B-F6：`"  "` 这类空白是真值、且此前从不校验实验是否存在 → 空白/不存在的
+    # experiment_id 都能消费全局 token（fail-open 的边界）。统一 strip + 存在性校验。
+    experiment_id = str(experiment_id or "").strip()
     if not experiment_id:
         raise HoldoutError(
             f"holdout token {token_id} requires an explicit experiment_id "
@@ -221,6 +224,16 @@ def check_window(
     ):
         raise HoldoutError(
             f"holdout token {token_id} is bound to experiment {token['experiment_id']}"
+        )
+    # R24B-F6：实验必须**真实存在**（放行绑定校验之后做，避免改掉"绑定到他人实验"
+    # 的既有文案）——否则"编一个 id"就能消费全局（未绑定）token。
+    with db.connect() as _conn:
+        _exists = _conn.execute(
+            "SELECT 1 FROM research_experiments WHERE id = ?", (experiment_id,)
+        ).fetchone()
+    if _exists is None:
+        raise HoldoutError(
+            f"holdout token {token_id} references unknown experiment {experiment_id}"
         )
     # 原子消费（TOCTOU：并发下检查+更新两步会让同一 token 被用两次）
     with db.connect() as conn:

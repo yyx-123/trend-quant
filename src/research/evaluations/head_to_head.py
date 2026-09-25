@@ -230,12 +230,17 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
         # 配对门（R23A-F1）：显著性 = 配对 t ≥ max(min_t_stat, t_crit(n−1)) 且
         # 差序列 DSR > min_dsr_on_diff，**且**区块 bootstrap 置信带不含 0
         # （带本身是配对构造，保留为双重确认而非 AND 一票否决）。
+        # R24A-F3：判定口径与 backtest **统一到 `paired_gate_ok`**（单尾 5%）。
+        # 此前 h2h 额外要求"区块 bootstrap 置信带整段不含 0"（≈单尾 2.5%），
+        # 于是同一份配对证据在 h2h 与 backtest 下可得出相反判定（合成 AR(1)
+        # ρ=0.3、t≈1.9 时 backtest 门过而带含 0 的比例 99%）。置信带保留为
+        # **展示证据**（`delta_sharpe_band`）不再当门；门的等效 α 一并落库。
         paired_ok = paired_gate_ok(paired_stats, rules=_rules)
-        if d_band["low"] > 0 and paired_ok:
+        evidence["gate_alpha"] = 0.05
+        evidence["gate"] = "paired_t_one_sided_5pct"
+        if paired_ok:
             suggested = "confirmed"   # A 显著优于 B
-        elif d_band["high"] < 0 and paired_gate_ok(
-            paired_stats, rules=_rules, direction="negative"
-        ):
+        elif paired_gate_ok(paired_stats, rules=_rules, direction="negative"):
             suggested = "rejected"    # A 显著劣于 B（对称的配对显著性）
 
     report = {

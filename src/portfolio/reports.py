@@ -177,7 +177,15 @@ def return_distribution(nav_rows: list[dict]) -> dict:
 
 def cost_drag(fills: list[dict]) -> dict:
     """成本拖累：费用合计 ÷ 毛收益（A 股成本环境下每条规则的及格线）。"""
-    total_fee = sum(float(f.get("fee_total", 0.0)) for f in fills)
+    # R24B-F9：费用口径以 fee_total 为准，缺失时退回 commission+stamp_tax
+    # （此前只认 fee_total，缺键时与 summary.total_trading_cost 互相矛盾：
+    # 同一载荷里 cost.total_fees=0 而 summary.total_trading_cost=21）
+    def _fill_fee(f: dict) -> float:
+        if f.get("fee_total") is not None:
+            return float(f["fee_total"])
+        return float(f.get("commission", 0.0) or 0.0) + float(f.get("stamp_tax", 0.0) or 0.0)
+
+    total_fee = sum(_fill_fee(f) for f in fills)
     gross_pnl = 0.0
     # 毛收益 = 卖出成交额 − 买入成交额 的逐笔配对（FIFO per symbol）
     rounds = pair_round_trips(fills)
@@ -234,6 +242,8 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
                 "qty": qty,
                 "pnl_gross": gross,
                 "pnl_net": gross - float(entry.get("fee_total", 0.0)) - float(f.get("fee_total", 0.0)),
+                # R24B-F5：回合级费用合计（买卖两端），供载荷内自洽核对
+                "fee_total": float(entry.get("fee_total", 0.0)) + float(f.get("fee_total", 0.0)),
             })
     return rounds
 
@@ -367,13 +377,48 @@ def build_report(
         "exposure_series": [{"date": r["date"], "exposure": r.get("exposure")} for r in nav_rows],
         "slot_utilization": _slot_utilization(positions_snapshots or [], slot_limit, nav_rows),
         "concentration_series": _concentration_series(db, positions_snapshots or []),
-        # round trips：优先回测器的富化版（R 倍数/MAE/MFE）；缺省由 fills 配对
-        "round_trips": round_trips if round_trips is not None else pair_round_trips(fills),
+        # round trips：优先回测器的富化版（R 倍数/MAE/MFE）；缺省由 fills 配对。
+        # R24B-F5：引擎富化版只有**毛额** `pnl`（= qty×(exit−entry)）且无费字段，
+        # 与 summary 的净额口径并存会让同一载荷自相矛盾（实测最小例：round_trips
+        # 说赚 5 元、summary 说胜率 0%）。这里统一补上 `pnl_net` 与 `fee_total`，
+        # 明确 `pnl_basis`；数值仍以成交配对（净额）为准。
+        "round_trips": _round_trips_with_net(round_trips, fills),
+        "pnl_basis": "net",
         "unfilled_by_reason": unfilled_by_reason,
         "gate_rejections": gate_by_name,
         "trade_count": len(fills),
     }
     return report
+
+
+def _round_trips_with_net(
+    round_trips: list[dict] | None, fills: list[dict]
+) -> list[dict]:
+    """回合明细补齐 `pnl_net`/`fee_total`（R24B-F5）。
+
+    - 传入的是报告形态（已有 `pnl_net`）→ 原样返回（只补缺的 `fee_total`）；
+    - 传入的是引擎富化形态（只有毛额 `pnl`）→ 用成交配对的净额**覆盖**
+      `pnl`（保留 `pnl_gross`），使同一载荷里的胜率/盈亏比口径一致。
+    """
+    if round_trips is None:
+        return pair_round_trips(fills)
+    net_by_key = {
+        (str(r.get("symbol", "")), str(r.get("exit_date", ""))[:10]): r
+        for r in pair_round_trips(fills or [])
+    }
+    out: list[dict] = []
+    for rt in round_trips:
+        item = dict(rt)
+        key = (str(item.get("symbol", "")), str(item.get("exit_date", ""))[:10])
+        net = net_by_key.get(key)
+        if net is not None:
+            item.setdefault("pnl_gross", item.get("pnl"))
+            item["pnl_net"] = net.get("pnl_net")
+            item["fee_total"] = net.get("fee_total")
+            if item.get("pnl") is not None and item["pnl_net"] is not None:
+                item["pnl"] = item["pnl_net"]      # 净额口径（与 summary 一致）
+        out.append(item)
+    return out
 
 
 def _traded_amount(fills: list[dict]) -> float:
@@ -382,7 +427,14 @@ def _traded_amount(fills: list[dict]) -> float:
     比率由 compute_summary 自己算（÷平均权益）；本函数**只**返回货币总额，
     绝不预除权益（教训）。
     """
-    return sum(abs(float(f["fill_price"]) * int(f["quantity"])) for f in fills)
+    total = 0.0
+    for f in fills:
+        price = f.get("fill_price", f.get("price"))
+        qty = f.get("quantity", f.get("qty"))
+        if price is None or qty is None:
+            continue      # 缺键不静默算成 0 之外的东西（R24B-F9：两套键名都接受）
+        total += abs(float(price) * int(qty))
+    return total
 
 
 def _slot_utilization(

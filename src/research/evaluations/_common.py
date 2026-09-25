@@ -20,6 +20,8 @@ from gateway.service import Gateway
 
 # 默认流动性池口径（universe=liquidity_default）：近 20 日成交额均值 ≥ 1e8。
 DEFAULT_MIN_AMOUNT20 = 1e8
+# regime 标签的基准（§6.6.3）：**受流动性过滤豁免**，见 load_eval_panel 的注释
+DEFAULT_REGIME_BENCHMARK = "510500.SS"
 
 
 class EmptyAccount:
@@ -109,9 +111,15 @@ def load_eval_panel(
             )
         if pre_idx:
             mean_amount = np.nanmean(panel.data["amount"][pre_idx, :], axis=0)
+            # R24A-F4：基准必须**豁免**流动性过滤。实测基准 510500.SS 的窗口前
+            # 20 日均成交额 0.93 亿 < 阈值 1 亿 → 被剔除 → `regime_labels` 全
+            # `unknown` → §6.6.3 的 regime 机制（event/bucket 的 regime_split 证据、
+            # backtest 的 regime 塌陷否决、single_regime 注记）在真实路径上**整体
+            # 失效**，而告警还把它误归因成"2431 日 SMA200 预热不足"。
             keep = [
                 s for j, s in enumerate(panel.symbols)
-                if np.isfinite(mean_amount[j]) and mean_amount[j] >= min_amount20
+                if (np.isfinite(mean_amount[j]) and mean_amount[j] >= min_amount20)
+                or s == DEFAULT_REGIME_BENCHMARK
             ]
             if keep:
                 panel = _subset_panel(panel, keep)
@@ -239,16 +247,38 @@ def null_degenerate_metrics(summary: dict) -> dict:
     return summary
 
 
-def regime_labels(panel, benchmark_symbol: str = "510500.SS", ma: int = 200) -> np.ndarray:
-    """逐日 regime：benchmark 收盘在 SMA(ma) 上/下（"unknown" 数据不足）。"""
+def regime_labels(panel, benchmark_symbol: str = DEFAULT_REGIME_BENCHMARK,
+                  ma: int = 200, *, warnings_out: list | None = None) -> np.ndarray:
+    """逐日 regime：benchmark 收盘在 SMA(ma) 上/下（"unknown" 数据不足）。
+
+    R24A-F4：基准不在面板时**显式告警**（此前静默返回全 unknown，消费方只能
+    看到"warmup 不足"这类误导文案）；且统计 unknown 天数与其成因。
+    """
     col = panel._symbol_index.get(benchmark_symbol)
     if col is None:
+        if warnings_out is not None:
+            warnings_out.append(
+                f"regime_unavailable(benchmark {benchmark_symbol} not in eval panel"
+                "——regime 分段/塌陷否决/single_regime 注记全部缺席)"
+            )
         return np.array(["unknown"] * len(panel.dates), dtype=object)
     close = panel.data["close"][:, col]
     sma = pd.Series(close).rolling(ma, min_periods=ma).mean().to_numpy()
     labels = np.array(["unknown"] * len(panel.dates), dtype=object)
     valid = np.isfinite(close) & np.isfinite(sma)
     labels[valid] = np.where(close[valid] > sma[valid], "above", "below")
+    if warnings_out is not None and (~valid).any():
+        n_unknown = int((~valid).sum())
+        total = len(labels)
+        # 只有**尾段**未知才真是预热不足；中间未知是基准自身行情缺口
+        n_nan_close = int((~np.isfinite(close)).sum())
+        reason = (
+            f"benchmark price gaps({n_nan_close} 日无收盘)"
+            if n_nan_close else f"warmup({ma} 日 SMA 预热)"
+        )
+        warnings_out.append(
+            f"regime_unknown_days({n_unknown}/{total}，{reason})"
+        )
     return labels
 
 
@@ -296,7 +326,13 @@ def collect_warnings(
 
 
 def _bootstrap_means(values, *, n_boot: int = 1000, seed: int = 7):
-    """事件均值的 bootstrap 分布（p 值换算用；与 bootstrap_band 同种子同口径）。"""
+    """事件均值的 bootstrap 分布（**iid** 事件级重抽样，p 值换算用）。
+
+    R24A-F1：事件按日成簇且前瞻窗口大量重叠时，这个 iid 分布低估均值的抽样
+    方差（实测 SE 低估 1.77×；零效应下名义 5% → 实际 17%）。有事件日标签时
+    请改用 `cluster_bootstrap_means`（两阶段簇重抽样）。
+    """
+    values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
     if len(values) < 5:
         return None
@@ -305,4 +341,36 @@ def _bootstrap_means(values, *, n_boot: int = 1000, seed: int = 7):
     n = len(values)
     for b in range(n_boot):
         means[b] = values[rng.integers(0, n, n)].mean()
+    return means
+
+
+def cluster_bootstrap_means(
+    values, event_days, *, n_boot: int = 1000, seed: int = 7
+) -> np.ndarray | None:
+    """**两阶段簇 bootstrap**：先重抽事件日、再抽该日的事件（R24A-F1）。
+
+    为什么必须按簇：ETF 事件在同一天高度相关（同日均值 ACF(lag1)=0.42）、
+    80% 前瞻窗口重叠，事件级 iid 重抽样把 7393 个事件当独立样本 →
+    零效应下名义 5% 的检验实际拒绝率 **17%**（我 4000 次 MC 实测；解析设计效应
+    `1+(k̄−1)ρ̄≈3.18 → SE 低估 1.78×` 与之吻合）。
+    簇口径把"同日多标的"当作一个抽样单位，恢复检验的名义水平。
+    """
+    values = np.asarray(values, dtype=float)
+    days = np.asarray(event_days)
+    if len(values) != len(days):
+        return None
+    keep = np.isfinite(values)
+    values, days = values[keep], days[keep]
+    if values.size < 5:
+        return None
+    uniq = np.unique(days)
+    if uniq.size < 2:
+        return None
+    idx_by_day = [np.flatnonzero(days == d) for d in uniq]
+    rng = np.random.default_rng(seed)
+    means = np.empty(n_boot)
+    for b in range(n_boot):
+        pick = rng.integers(0, len(idx_by_day), len(idx_by_day))
+        vals = np.concatenate([values[idx_by_day[i]] for i in pick])
+        means[b] = vals.mean()
     return means

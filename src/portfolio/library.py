@@ -132,6 +132,11 @@ def add_version(
         return existing
 
     with db.connect() as conn:
+        # R24B-F8：版本号分配（MAX+1）与 INSERT 必须同事务——此前是跨连接 TOCTOU，
+        # 8 进程并发晋升同一条线实测 5/80 抛 `UNIQUE constraint failed:
+        # portfolio_strategy_versions.strategy_id, version`，经 MCP 时被映射成
+        # "internal error"（模型误判平台故障并盲目重试）。
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT MAX(version) AS v FROM portfolio_strategy_versions WHERE strategy_id = ?",
             (strategy_id,),

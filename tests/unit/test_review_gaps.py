@@ -151,12 +151,28 @@ def test_holdout_token_single_use_atomic(test_db):
     set_enforced(test_db, True)
     try:
         token = grant_token(test_db, session_id=session["session_id"], purpose="一次性")
-        # R23B-F1：消费必须点名实验（匿名消费路径已封）
+        # R23B-F1：消费必须点名实验（匿名消费路径已封）；
+        # R24B-F6：且实验必须真实存在（编 id 不能消费全局 token）
+        from research import topics as _topics
+
+        topic = _topics.create_topic(
+            test_db, session_id=session["session_id"], title="一次性探针", question="?"
+        )
+        with test_db.connect() as conn:
+            conn.execute(
+                """INSERT INTO research_experiments
+                   (id, title, owner_session, created_by, topic_id, subject_key,
+                    evaluation_module, spec_json, hypothesis, status, attempt_index,
+                    is_reproduction)
+                   VALUES ('E-USR','一次性',?,'human',?,'probe1',
+                           'portfolio_backtest@1','{}','h','evaluating',1,0)""",
+                (session["session_id"], topic["id"]),
+            )
         assert check_window(test_db, start="2025-01-01", end="2025-06-30",
-                            experiment_id="E-probe", token_id=token["id"]) is True
+                            experiment_id="E-USR", token_id=token["id"]) is True
         with pytest.raises(HoldoutError):
             check_window(test_db, start="2025-01-01", end="2025-06-30",
-                         experiment_id="E-probe", token_id=token["id"])
+                         experiment_id="E-USR", token_id=token["id"])
     finally:
         set_enforced(test_db, False)
 

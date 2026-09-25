@@ -70,7 +70,12 @@ def permutation_p_value(spread: float | None, random_spreads: list[float]) -> fl
 
     if spread is None or not np.isfinite(spread) or not random_spreads:
         return None
-    return float(np.mean(np.abs(np.asarray(random_spreads, dtype=float)) >= abs(spread)))
+    rand = np.asarray(random_spreads, dtype=float)
+    b = float(np.sum(np.abs(rand) >= abs(spread)))
+    # R24A-F2：加 (b+1)/(B+1) 下限——此前用 b/B，p=0.0 完全合法（B=200 时
+    # 分辨率 0.005 且"0 显著"会被 BH 当成最强证据）；教科书口径的下限保证
+    # p>0 且随 B 单调收紧（200 次置换的 p=0 → 1/201）。
+    return float((b + 1.0) / (len(rand) + 1.0))
 
 
 def _feature_matrix(panel, feature: str) -> np.ndarray:
@@ -190,7 +195,9 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
     if hasattr(module, "prepare"):
         module.prepare(panel)
     # regime 标签（§6.6.3 的 single_regime 注记输入；与 event_study 同口径）
-    labels = regime_labels(panel)
+    # R24A-F4：不可用/部分未知时**显式告警**（此前 bucket 侧完全不可见）
+    _regime_warnings: list[str] = []
+    labels = regime_labels(panel, warnings_out=_regime_warnings)
     # 生产指标类信号（trend_score_cross 等）：经受限句柄取面板外数据——
     # 评审 A-R2：不接线的死模块会产出 0 事件、伪装成合法 inconclusive 进台账
     if hasattr(module, "prepare_with_gateway"):
@@ -244,7 +251,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
     # 分桶：按特征分位数等频分 M 组
     evidence: dict[str, Any] = {"feature": feature, "buckets": n_buckets,
                                  "p_value": None}
-    warnings: list[str] = []
+    warnings: list[str] = list(_regime_warnings)
     suggested = "inconclusive"
     bucket_table: list[dict] = []
     spread = None
@@ -283,21 +290,37 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
                 "spread/单调性不可计算——判定按 inconclusive 属边界效应而非无结论"
             )
 
-        # 单调性：相邻组收益差方向与预期一致的占比
+        # 单调性：相邻组收益差方向与预期一致的占比。
+        # R24A-F2b：空桶产生的 NaN 差此前被 `np.sign(NaN)==expect_sign`（False）
+        # 静默计为"不一致"，而 spread 仍是有限数 → 可把结论写成 rejected（"倒挂"），
+        # 与告警文案"不可计算→inconclusive"相反。这里只统计**有限**相邻差，
+        # 并把可比差数如实报出；可比差不足 2 时单调性记 None（判定 inconclusive）。
         diffs = np.diff(means)
+        finite_diffs = diffs[np.isfinite(diffs)]
         expect_sign = 1.0 if expect == "positive" else -1.0
-        consistent = np.mean(np.sign(diffs) == expect_sign) if len(diffs) else 0.0
-        monotonicity = float(consistent)
+        comparable_diffs = int(finite_diffs.size)
+        if comparable_diffs >= 2:
+            monotonicity = float(np.mean(np.sign(finite_diffs) == expect_sign))
+        else:
+            monotonicity = None
+        evidence["n_comparable_diffs"] = comparable_diffs
 
-        spread = means[-1] - means[0]  # Q5−Q1（expect=positive 语境）
-        if expect == "negative":
-            spread = means[0] - means[-1]
+        # R24A-F2b：任一端桶为空（means 含 NaN）时 spread 不可比 → None（inconclusive），
+        # 不再报一个"由内部空桶拼出来的有限利差"
+        if np.isfinite(means[0]) and np.isfinite(means[-1]):
+            spread = means[-1] - means[0]  # Q5−Q1（expect=positive 语境）
+            if expect == "negative":
+                spread = means[0] - means[-1]
+        else:
+            spread = None
 
         # 随机对照：同批事件打乱分组重算利差（seeded）
         rng = np.random.default_rng(7)
         random_spreads = []
         ev_ret = np.array([matrix[t, col] for t, col, _f in events], dtype=float)
-        for _ in range(200):
+        # R24A-F2：B=200 的分辨率只有 0.005（p=0.03 vs 独立复算 0.0142 落在噪声内）、
+        # 95 分位带偏高 7.5%。提到 2000（代价：bucket 单次评估多 ~1 秒）。
+        for _ in range(2000):
             shuffled = rng.permutation(len(events))
             groups = np.array_split(shuffled, n_buckets)
             g_means = []
@@ -312,11 +335,21 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
             # 经验 p 值（评审 DS-P2-3）：NaN spread 必须记 None
             evidence["p_value"] = permutation_p_value(spread, random_spreads)
 
-        if spread is not None and np.isfinite(spread) and random_band is not None:
-            if monotonicity >= 0.8 and abs(spread) > random_band:
-                suggested = "confirmed"
-            elif monotonicity <= 0.2 and abs(spread) > random_band:
-                suggested = "rejected"  # 倒挂（方向反了本身也是结论）
+        if spread is not None and np.isfinite(spread) and random_band is not None                 and monotonicity is not None:
+            # R24A-F2/F3：判定门此前是"单调性 ≥0.8 且 |spread|>band95"——该联合
+            # 判据的零效应假阳率实测 **0.31%**（名义 5%，严 16 倍，confirmed
+            # 结构性难达），而进 BH 家族的 p 却是 5% 口径；同一份证据两个口径。
+            # 这里统一到 p（同一置换分布）：
+            #   confirmed ⇔ p < 0.05 且方向单调（≥0.8）
+            #   rejected  ⇔ p < 0.05 且方向倒挂（≤0.2）
+            p_val = evidence.get("p_value")
+            gate_alpha = 0.05
+            evidence["gate_alpha"] = gate_alpha
+            if p_val is not None and p_val < gate_alpha:
+                if monotonicity >= 0.8:
+                    suggested = "confirmed"
+                elif monotonicity <= 0.2:
+                    suggested = "rejected"  # 倒挂（方向反了本身也是结论）
 
     # §6.6.3 五类注记对**全部**评估模块生效：
     # 重叠率 / top1% 日集中度 / 单 regime 此前只有 event_study 侧算，

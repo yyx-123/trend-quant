@@ -558,15 +558,30 @@ def test_holdout_gate_enforced_requires_token(test_db, human_session):
         # R23B-F1：token 必须点名实验才能消费（匿名消费 = 任何调用方都能用猜到的
         # id 自授权样本外访问，实测 MCP 侧曾可做到）。全局（未绑定）token 在
         # 明确点名实验时可用——这是人走 CLI 的路径。
+        from research import topics as _topics
+
+        topic = _topics.create_topic(
+            test_db, session_id=human_session["session_id"], title="放行探针", question="?"
+        )
+        with test_db.connect() as conn:
+            conn.execute(
+                """INSERT INTO research_experiments
+                   (id, title, owner_session, created_by, topic_id, subject_key,
+                    evaluation_module, spec_json, hypothesis, status, attempt_index,
+                    is_reproduction)
+                   VALUES ('E-GATE','放行',?,'human',?,'probe2',
+                           'portfolio_backtest@1','{}','h','evaluating',1,0)""",
+                (human_session["session_id"], topic["id"]),
+            )
         assert holdout.check_window(
             test_db, start="2025-01-01", end="2025-06-01",
-            experiment_id="E-probe", token_id=token["id"],
+            experiment_id="E-GATE", token_id=token["id"],
         ) is True
         # 一次性：消费后失效
         with pytest.raises(HoldoutError):
             holdout.check_window(
                 test_db, start="2025-01-01", end="2025-06-01",
-                experiment_id="E-probe", token_id=token["id"],
+                experiment_id="E-GATE", token_id=token["id"],
             )
     finally:
         holdout.set_enforced(test_db, False)

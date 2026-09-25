@@ -33,8 +33,6 @@ confirmed 门里有两个不同的 ΔSharpe，勿混——
 
 from __future__ import annotations
 
-import math
-
 # 平台判定阈值（默认值；运行期可由 app_config 的 research.rules.* 覆盖，
 # 调整走架构稿修订流程）
 DEFAULT_RULES = {
@@ -92,11 +90,18 @@ def paired_gate_ok(
 
 
 def _t_critical_95(df: int) -> float:
-    """单尾 95% t 临界值（Cornish–Fisher 展开，ν≥10 精度 ~1e-3）。
+    """单尾 95% t 临界值（R24B-F1：改用无依赖的精确反演 `stats.tdist.t_ppf`，
+    与 scipy 对拍差 ≤2.6e-10；此前的 Cornish–Fisher 展开在小自由度上偏差 ~1e-3）。
 
     GLM53F-P2-1②：1.645 是 z 值，小样本（n<~60）真实 t 临界更高，
     用 z 反保守。
     """
+    from research.stats.tdist import t_ppf
+
+    return float(t_ppf(0.95, max(int(df), 1)))
+
+
+def _t_critical_95_legacy(df: int) -> float:
     z = 1.6448536269514722
     v = max(int(df), 2)
     g1 = (z ** 3 + z) / (4.0 * v)
@@ -139,10 +144,10 @@ def plateau_neighbors(param: str, value: float) -> list[float]:
     DS-P3-8：±2 分支不得把选定值本身算进邻居（污染邻域同向/1σ 统计）。
     """
     if param in _INT2_PARAMS:
-        return sorted({max(1, int(round(value - 2))), max(1, int(round(value + 2)))} - {int(value)})
+        return sorted({max(1, round(value - 2)), max(1, round(value + 2))} - {int(value)})
     if param in _DAY_PARAMS:
-        lo = max(1, int(round(value * 0.8)))
-        hi = max(2, int(round(value * 1.2)))
+        lo = max(1, round(value * 0.8))
+        hi = max(2, round(value * 1.2))
         return sorted({lo, hi} - {int(value)})
     # 默认 ±20%
     return sorted({value * 0.8, value * 1.2} - {value})
@@ -177,8 +182,11 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
         reason = "no neighbors" if not skipped else f"no usable neighbors (skipped {skipped})"
         return {"verdict": "unknown", "reason": reason, "skipped": int(skipped)}
     import numpy as np
-    from scipy import stats as _scipy_stats
 
+    from research.stats.tdist import t_ppf  # 无第三方依赖（R24B-F1：
+
+    # 判定主路径不得依赖未声明的 scipy——部署用 .venv 里没有它，
+    # 任何 import scipy 都会让实验直接 failed）
     arr = np.asarray(neighbor_deltas, dtype=float)
     mean = float(arr.mean())
     # 邻域点太少时 σ 没有意义，判据必须**停止**而不是给一个随机答案（R18B-P2-2）：
@@ -198,20 +206,27 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
             "skipped": int(skipped),
             "insufficient_neighbors": True,
         }
-    std = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
+    # σ̂ 用**去重后的邻域值**估计，与 t 临界值的自由度（k−1）同源（R24B-F3：
+    # 此前 σ̂ 用含重复值的 n 个点、df 用去重点数 k−1，邻域 [1.0,1.0,3.0] 的半宽
+    # 因此被放宽 3 倍）。
     k = int(distinct.size)
-    # 同向判定（R23A-F7）：零效应视为中性，不当作反向
+    std = float(distinct.std(ddof=1)) if k > 1 else 0.0
     sel = float(selected_delta)
+    # 同向只作**诊断量**：R24B-F3 实测"邻域均值符号"在近零效应下就是掷硬币
+    # （H0 误判 peak 52%），而偏离腿已按 95% 预测区间校准（1.5%~4.8%）——
+    # 方向相反的邻域必然被偏离腿抓住（差距相对自身离散度很大），故不再当门。
+    # 这里用带容差的符号，避免 1e-17 浮点尘翻转诊断值。
+    tol = 1e-12 * max(1.0, abs(sel))
     same_direction = bool(
-        sel == 0.0 or mean == 0.0
+        abs(sel) <= tol or abs(mean) <= tol
         or (np.sign(mean) == np.sign(sel))
     )
     low_confidence = distinct.size < 5
-    t_crit = float(_scipy_stats.t.ppf(0.975, max(k - 1, 1)))
+    t_crit = float(t_ppf(0.975, max(k - 1, 1)))
     se = std * float(np.sqrt(1.0 + 1.0 / k))
     deviation = abs(sel - mean)
     deviates = std > 0 and deviation > t_crit * se
-    verdict = "plateau" if (same_direction and not deviates) else "peak"
+    verdict = "peak" if deviates else "plateau"
     return {
         "verdict": verdict,
         "neighbor_mean": mean,
@@ -235,7 +250,18 @@ def suggest_backtest_verdict(evidence: dict, rules: dict | None = None) -> str:
     if delta_sharpe is None:
         return "inconclusive"
     if delta_sharpe <= rules["significant_deterioration_delta_sharpe"]:
-        return "rejected"
+        # R24B-F4：负向判定此前**只看序列级点估计**（ΔSharpe ≤ −0.2），不查配对
+        # 显著性——而 confirmed 侧要求 paired_gate_ok。实测 H0（两条腿同分布、
+        # 真实 ΔSharpe=0、n=2430、ρ≤0.7）下有 **20%~34%** 被判 "rejected"
+        # （"假设被证伪"，且 append-only 台账只能降不能升），其中 78%~87% 的配对
+        # t 根本不显著。这里与 confirmed 对称：恶化也要过配对负向门。
+        paired_neg = (evidence.get("stats") or {}).get("paired")
+        if paired_neg is not None and paired_gate_ok(
+            paired_neg, rules=rules, direction="negative"
+        ):
+            return "rejected"
+        # 无配对证据（样本 <30 / 无基准腿）→ 证据不足，不判"证伪"
+        return "inconclusive"
     plateau = evidence.get("plateau")
     regime = evidence.get("regime_split") or {}
     paired = (evidence.get("stats") or {}).get("paired")

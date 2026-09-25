@@ -301,9 +301,23 @@ def test_mcp_tools_do_not_accept_caller_tokens(market, registry, monkeypatch):
                             purpose="全局 token：不得匿名消费")
         with pytest.raises(HoldoutError, match="explicit experiment_id"):
             check_window(market, start="2025-01-01", end="2025-06-01", token_id=token["id"])
-        # 具名实验（人走 CLI 的路径）仍可用
+        # 具名**真实**实验（人走 CLI 的路径）仍可用；编造的 id 必须被拒
+        spec = {"base": env["versions"]["base-v1"],
+                "diff": [{"slot": "position_risk", "from": "hard_stop@1", "to": "hard_stop@1",
+                          "params": {"atr_mul": 2.0}}],
+                "window": ["2022-06-01", "2023-06-01"]}
+        named = experiments.propose_experiment(
+            market, session_id=env["session"]["session_id"], title="具名放行",
+            topic_id=env["topic"]["id"], evaluation_module="portfolio_backtest@1",
+            spec=spec, hypothesis="具名实验才可消费 token", registry=registry,
+        )
         assert check_window(market, start="2025-01-01", end="2025-06-01",
-                            experiment_id="E-named", token_id=token["id"]) is True
+                            experiment_id=named["id"], token_id=token["id"]) is True
+        with pytest.raises(HoldoutError, match="unknown experiment"):
+            check_window(market, start="2025-01-01", end="2025-06-01",
+                         experiment_id="E-invented", token_id=grant_token(
+                             market, session_id=env["session"]["session_id"],
+                             purpose="编造 id 不得消费")["id"])
     finally:
         set_enforced(market, False)
 

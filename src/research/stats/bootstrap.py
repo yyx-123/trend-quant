@@ -59,22 +59,45 @@ def sharpe_block_bootstrap(
     }
 
 
+def _acf1(p: np.ndarray) -> float:
+    """lag-1 自相关（无依赖实现）。"""
+    if p.size < 3:
+        return 0.0
+    x = p - p.mean()
+    denom = float(np.dot(x, x))
+    return float(np.dot(x[:-1], x[1:]) / denom) if denom > 0 else 0.0
+
+
 def trade_bootstrap_bands(
     pnls,
     *,
     initial_equity: float,
     n_boot: int = 1000,
     seed: int = 7,
+    block: int | None = None,
 ) -> dict:
     """MC 置信带：round-trip 净盈亏序列重抽 → 净值路径 → 终值/回撤分布。
 
+    R24A-F6（P2）：重抽样按**区块**（默认块长按 lag-1 自相关自动定，至少 2）——
+    逐笔 PnL 有强序列相关（真实 E0002 腿 lag1..5 = 0.23/0.35/0.19/0.27），
+    事件级 iid 重抽样把终值带宽低估 **1.77×**、回撤尾带低估 17%~27%
+    （AR(1) ρ=0.3 时名义 95% 的实际覆盖降到 84%）。块长与实测自相关一并落库。
+
     pnls: 逐笔净盈亏金额序列（round-trip pnl_net）。
-    返回 {final_equity: {point, low, high}, max_drawdown: {point, low, high}}。
+    返回 {final_equity: {point, low, high}, max_drawdown: {point, low, high},
+          method, block, acf1}。
     """
     p = np.asarray(pnls, dtype=float)
     p = p[np.isfinite(p)]
     if len(p) < 5:
         return {"final_equity": None, "max_drawdown": None}
+    acf1 = _acf1(p)
+    if block is None:
+        # 块长按经验规则 n^(1/3)（序列相关下的常用折中，n=445 → 8），并保证
+        # 覆盖 AR(1) 的积分相关时间（ρ>0 时至少 (1+ρ)/(1−ρ) 取整）。
+        rho = max(0.0, min(acf1, 0.95))
+        target = max(round(len(p) ** (1.0 / 3.0)), round((1.0 + rho) / max(1e-6, 1.0 - rho)))
+        block = int(max(5, min(target, 50)))
 
     def _path_stats(seq: np.ndarray) -> tuple[float, float]:
         equity = initial_equity + np.cumsum(seq)
@@ -88,8 +111,14 @@ def trade_bootstrap_bands(
     finals = np.empty(n_boot)
     dds = np.empty(n_boot)
     n = len(p)
+    n_blocks_need = int(np.ceil(n / block))
+    starts_pool = np.arange(n)
     for b in range(n_boot):
-        sample = p[rng.integers(0, n, n)]
+        # 循环区块重抽样（保持序列内的局部依赖结构）
+        idx = np.concatenate([
+            (s + np.arange(block)) % n for s in rng.choice(starts_pool, n_blocks_need)
+        ])[:n]
+        sample = p[idx]
         finals[b], dds[b] = _path_stats(sample)
     return {
         "final_equity": {
@@ -103,4 +132,8 @@ def trade_bootstrap_bands(
             "high": float(np.percentile(dds, 97.5)),
         },
         "n_boot": n_boot,
+        # R24A-F6/R24A-F7：口径与依赖结构如实落库（读者据此判断带宽是否可信）
+        "method": "circular_block",
+        "block": int(block),
+        "acf1": round(float(acf1), 4),
     }

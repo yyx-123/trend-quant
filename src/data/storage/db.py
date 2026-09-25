@@ -1119,7 +1119,15 @@ class Database:
     # schema migration
     # ------------------------------------------------------------------
     def _migrate_schema(self) -> None:
-        """Idempotent column additions for existing databases."""
+        """Idempotent column additions for existing databases.
+
+        R24B-F2：整段迁移包进一个 `BEGIN IMMEDIATE` 事务。此前 ADD COLUMN 是
+        "PRAGMA 读 → ALTER 写"的无锁 TOCTOU，两条进程同时初始化时会撞
+        `duplicate column name`（实测 10 进程 × 20 轮 16/200 起不来；既存库+新增列
+        2/100）；段内多条 DDL 也不原子——第二段失败会留下"30 张表 0 个触发器"
+        （append-only 守卫全缺）或 `portfolio_live_lists_old` 残留而新表缺失。
+        带事务后要么全生效要么整体回滚，后到进程排队等待。
+        """
         metadata_columns = {
             "enabled": "INTEGER NOT NULL DEFAULT 1",
             "stop_atr_mul": "REAL",
@@ -1184,6 +1192,7 @@ class Database:
             "research_experiments": research_experiment_columns,
         }
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")   # R24B-F2：整段迁移原子化 + 拿写锁
             # N1（2026-08-25）：删除与 PRIMARY KEY (symbol,time) 完全同列的
             # 冗余索引——rowid 表上 PK 已自动建同列索引，这三个白白放大
             # 百万行表的每次写入。
