@@ -2,7 +2,7 @@
 
 > **状态：CLOSED（2026-09-26 闭合）**
 > - 修复清单与验收记录：`round18-fixes.md`；
-> - 全量回归（修复后）：见 `round18-fixes.md`；
+> - 全量回归（修复后）：**1697 passed / 1 failed**（既有 Windows 临时文件 flake）；
 > - ruff：(file, rule) 集合与基线 78/78 一致（新增 0 条）。
 >
 > 日期：2026-09-26

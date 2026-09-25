@@ -24,7 +24,7 @@
 ## 回归结果
 
 - 相关面：研究栈 + 旧栈 + 引擎 + JS 语法（`node --check`）+ r11~r18 钉子文件全绿；
-- 全量套件：TERMINAL_PLACEHOLDER；
+- 全量套件：**1697 passed / 1 failed**（既有 Windows 临时文件 flake）；首跑另有 1 项 `test_critical_paths.py::test_plateau_probes_actually_run` 因 plateau 语义修正而失败（它断言 2 点邻域必须判 plateau/peak）→ 已按新语义改为 unknown + insufficient_neighbors，并保留“探针照常跑”的断言；
 - ruff：`(file, rule)` 与基线 78/78 一致（新增 0 条）；
 - 变异实证：本轮 **3 个**语义变异全部被抓住。
 
