@@ -16,7 +16,6 @@ Round 3 审的是**平台/纪律/通道层**（前两轮集中在数值与引擎
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
 from pathlib import Path
 
 import pytest
@@ -385,7 +384,6 @@ def test_mcp_get_experiment_error_shape(test_db, monkeypatch):
 
 
 def test_cli_recompute_surfaces_skipped():
-    import inspect
 
     sys_path = Path(__file__).resolve().parents[2] / "scripts" / "research_cli.py"
     src = sys_path.read_text(encoding="utf-8")
