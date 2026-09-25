@@ -84,6 +84,13 @@ def rebuild_symbol(symbol: str, trend_cfg: dict, db=None) -> dict:
 
 
 def rebuild_all(symbols: list[str] | None = None, trend_cfg: dict | None = None, db=None) -> dict:
+    # 运行期冻结（决策 A3）守卫**下沉到此处**：三个整段重写入口（HTTP 补齐后的
+    # rebuild_after_backfill / 启动补偿 rebuild_if_needed / 日更尾 pipeline）全部经过
+    # 本函数，在此拦一次即可（R15A-F2 实证：此前只有 rebuild_after_backfill 有闸，
+    # 启动补偿在冻结态仍写入 indicator_daily/trend_daily 各 120 行）。
+    from data.service import assert_writes_unfrozen
+
+    assert_writes_unfrozen("指标缓存整段重建")
     db = db or get_db()
     trend_cfg = trend_cfg or get_strategy_config()
     if symbols is None:
@@ -107,7 +114,15 @@ def rebuild_if_needed(db=None) -> dict:
     Both formula versions are checked independently (D5): the trend param-set
     registry guards TREND_FORMULA_VERSION, and indicator_daily's own version
     column guards INDICATOR_FORMULA_VERSION (kimi review §2.3).
+
+    运行期冻结中**跳过**（best-effort）：下次启动或日更尾 pipeline 会补上，
+    不能因为一次启动恰好撞上另一进程的批次就中断启动。
     """
+    from core import run_freeze
+
+    if run_freeze.is_frozen_anywhere():
+        logger.warning("indicator rebuild skipped: backtest run active (frozen)")
+        return {"total": 0, "rebuilt": 0, "failed": 0, "status": "skipped_frozen"}
     db = db or get_db()
     cfg = get_strategy_config()
     trend_stale = default_param_set_needs_rebuild(cfg, db=db)

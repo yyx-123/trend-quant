@@ -570,8 +570,9 @@ def reconcile_daily_list(db, *, list_date: str, strategy_version_id: str, user_i
         conn.execute(
             """UPDATE portfolio_live_lists
                SET reconcile_json = ?, reconciled_at = datetime('now','localtime')
-               WHERE list_date = ? AND strategy_version_id = ?""",
-            (json.dumps(result, ensure_ascii=False, sort_keys=True), list_date, strategy_version_id),
+               WHERE list_date = ? AND strategy_version_id = ? AND user_id = ?""",
+            (json.dumps(result, ensure_ascii=False, sort_keys=True),
+             list_date, strategy_version_id, int(user_id)),
         )
     return result
 

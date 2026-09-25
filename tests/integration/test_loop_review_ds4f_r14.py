@@ -108,6 +108,10 @@ def test_daily_update_defers_on_cross_process_sentinel(monkeypatch, tmp_path):
     for name in ("get_data_service", "_pool_symbols", "get_strategy_config"):
         if hasattr(jobs, name):
             monkeypatch.setattr(jobs, name, _tripwire)
+    # 顺延会挂"当日补跑哨兵"线程（等 60s×120 轮）——必须打桩，否则该线程会
+    # 泄漏到后续测试（实测污染 test_review_r3.py::test_freeze_defer_…）
+    spawned: list = []
+    monkeypatch.setattr(jobs, "_spawn_same_day_catchup", lambda *a, **kw: spawned.append(a))
     recorded: list = []
     monkeypatch.setattr(
         jobs, "record_job_run_safely", lambda *a, **kw: recorded.append((a, kw))
@@ -116,6 +120,7 @@ def test_daily_update_defers_on_cross_process_sentinel(monkeypatch, tmp_path):
     payload = jobs._daily_market_update_job_locked(None, None, force=True)
     assert payload.get("status") == "deferred_backtest_running", payload
     assert any("daily_update_defer" in str(a[0]) for a in recorded), recorded
+    assert spawned, "顺延必须挂当日补跑哨兵（此处打桩记录，避免线程泄漏）"
 
 
 def test_strategy_leg_ratio_gate_is_pinned():

@@ -47,10 +47,12 @@ _IPO_NO_LIMIT_DAYS = 5  # 注册制新股上市初期无涨跌幅限制的交易
 # 跌停价抬高 → 假涨停（买不进）/假跌停（卖不掉、盘中止损被阻塞）。
 _TICK_ETF = 0.001
 _TICK_STOCK = 0.01
+# 创业板注册制改革：该日（含）起涨跌停幅度 ±20%，此前 ±10%（R15B-P1-1）
+_CHINEXT_20PCT_SINCE = date(2020, 8, 24)
 
 
 def board_limit_pct(symbol: str, *, asset_type: str | None = None,
-                    name: str | None = None) -> float:
+                    name: str | None = None, as_of: date | None = None) -> float:
     """按代码板块归属返回涨跌停幅度（不含 ST 修正）。
 
     GLM53F-P1-1：ETF 的涨跌幅跟随其**标的板块**，不能一律按主板 ±10%——
@@ -60,19 +62,35 @@ def board_limit_pct(symbol: str, *, asset_type: str | None = None,
     名称含"创业"的 10 只 ETF 跟踪的都是创业板系指数，实测日内幅度上限 0.2005
     （159814.SZ 2024-09-30：前收 0.364 → 涨停 0.437），按 ±10% 会产出 4 天假信号。
     asset_type 缺省时按股票代码前缀规则（历史口径）。
+
+    **日期维度（R15B-P1-1）**：创业板的 ±20% 是 2020-08-24 注册制改革才有的——
+    此前创业板（30xxxx 股票与其跟踪 ETF）是 ±10%。旧实现把 30xxxx 无条件当
+    ±20%，导致 2015-01-01~2020-08-21 期间**真实涨停/跌停日被判为可成交**
+    （生产库实测 13 笔不可达成交：4 笔买在真涨停收盘、9 笔卖在真跌停收盘；
+    1444 个 symbol-day 受影响）。`as_of=None` 表示**当前口径**（=20%），
+    历史回放必须逐日传当日日期。科创板（688/588）自 2019-07-22 开板即 20%，
+    无此分界。
     """
     suffix = symbol_suffix(symbol)
     code = symbol_to_code(symbol)
+    # 创业板注册制改革日：该日（含）起 ±20%，之前 ±10%
+    chin_next_20 = as_of is None or as_of >= _CHINEXT_20PCT_SINCE
+
+    def _chin_next() -> float:
+        return _LIMIT_CHINEXT_STAR if chin_next_20 else _LIMIT_MAIN
+
     if asset_type == "etf":
         if suffix == "SS" and code.startswith("588"):
-            return _LIMIT_CHINEXT_STAR  # 科创板 ETF
-        if name and ("创业板" in name or "创业" in name or "科创" in name):
-            return _LIMIT_CHINEXT_STAR  # 跟踪创业板/科创板指数的 ETF
+            return _LIMIT_CHINEXT_STAR  # 科创板 ETF（开板即 20%）
+        if name and "科创" in name:
+            return _LIMIT_CHINEXT_STAR  # 科创板系 ETF
+        if name and ("创业板" in name or "创业" in name):
+            return _chin_next()  # 创业板系 ETF：随改革日切换
         return _LIMIT_MAIN
     if suffix == "SS" and code.startswith("68"):
         return _LIMIT_CHINEXT_STAR  # 科创板
     if suffix == "SZ" and code.startswith("30"):
-        return _LIMIT_CHINEXT_STAR  # 创业板
+        return _chin_next()  # 创业板：2020-08-24 起 20%
     return _LIMIT_MAIN
 
 
@@ -218,6 +236,15 @@ def compute_tradability(
         info = (asset_info or {}).get(symbol) or {}
         asset_type = str(info.get("asset_type") or "").strip() or None
         limit_pct = board_limit_pct(symbol, asset_type=asset_type, name=info.get("name"))
+        # 幅度分时代（R15B-P1-1）：创业板系在 2020-08-24 前是 ±10%。逐日选口径——
+        # 其它板块两值相同（与旧行为逐位一致）。
+        _limit_pct_early = board_limit_pct(
+            symbol, asset_type=asset_type, name=info.get("name"),
+            as_of=date(2020, 8, 23),
+        )
+        limit_pct_arr = np.full(len(dates), limit_pct, dtype=float)
+        if _limit_pct_early != limit_pct:
+            limit_pct_arr[day_ordinals < _CHINEXT_20PCT_SINCE.toordinal()] = _limit_pct_early
         listing = listing_dates.get(symbol)
         listing_day = pd.Timestamp(listing).date() if listing else None
         # 上市日来源问题**未在本轮改行为**——
@@ -335,8 +362,8 @@ def compute_tradability(
         with np.errstate(all="ignore"):
             base = prev / f_t
             valid = np.isfinite(base) & (base > 0) & ~no_limit
-            limit_up = np.where(valid, _round_tick_vec(base * (1.0 + limit_pct), tick), np.nan)
-            limit_down = np.where(valid, _round_tick_vec(base * (1.0 - limit_pct), tick), np.nan)
+            limit_up = np.where(valid, _round_tick_vec(base * (1.0 + limit_pct_arr), tick), np.nan)
+            limit_down = np.where(valid, _round_tick_vec(base * (1.0 - limit_pct_arr), tick), np.nan)
             close_rounded = _round_tick_vec(close_v, tick)
             # 价格必须为正才参与比较：close<=0 是坏数据，不得据此产出
             # is_limit_down=True（0 <= 跌停价恒真）这类"像真值的坏数字"。
