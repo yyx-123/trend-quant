@@ -223,7 +223,8 @@ def test_heat_cap_gate_log_reason_is_truthful():
 def test_catchup_sentinel_does_not_hot_spin(monkeypatch):
     """作业返回 deferred 而冻结已解除时，哨兵必须退避并最终退出（旧写法
     不 sleep、预算永不递减 → 实测 10 秒内 15532 次调用且线程不退）。"""
-    from core import jobs, settings as settings_mod
+    from core import jobs
+    from core import settings as settings_mod
 
     calls: list[int] = []
     sleeps: list[float] = []
@@ -290,7 +291,7 @@ def test_grant_token_rejects_empty_purpose_at_source(test_db):
 def test_daily_update_passes_after_update_and_runs_pipeline_once(test_db, monkeypatch):
     """`_run_daily_update` 必须把 after_update 传给作业，并在成功路径
     自己调 pipeline **恰好一次**。"""
-    import app.main as main
+    from app import main
 
     captured: dict = {}
     pipeline_calls: list = []
