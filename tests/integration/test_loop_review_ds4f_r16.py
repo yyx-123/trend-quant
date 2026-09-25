@@ -25,8 +25,26 @@ def test_partial_rebuild_does_not_clear_drift_flag(test_db, monkeypatch):
     assert ib.default_param_set_needs_rebuild(cfg, db=test_db) is True, \
         "部分重建不得冲掉全量重建标记"
 
-    # 全量重建：登记 → 标记清掉
-    ib.rebuild_all(trend_cfg=cfg, db=test_db)
+    # 全量重建但**没有任何标的**（空库）→ 同样不登记（R17A-B2：登记不看结果会把
+    # 未重建标的锁在旧参数缓存上）
+    out_empty = ib.rebuild_all(trend_cfg=cfg, db=test_db)
+    assert out_empty["rebuilt"] == 0
+    assert ib.default_param_set_needs_rebuild(cfg, db=test_db) is True
+
+    # 有数据 + 全量重建 → 登记、标记清掉
+    import numpy as np
+    import pandas as pd
+
+    n = 60
+    closes = np.linspace(10.0, 12.0, n)
+    dates = pd.bdate_range("2023-01-02", periods=n)
+    bars = pd.DataFrame({
+        "time": dates, "open": closes, "high": closes, "low": closes,
+        "close": closes, "volume": np.full(n, 1e6), "amount": closes * 1e6,
+    })
+    test_db.save_market_data("X.SS", bars, price_mode="qfq")
+    out_full = ib.rebuild_all(trend_cfg=cfg, db=test_db)
+    assert out_full["rebuilt"] > 0 and out_full["failed"] == 0, out_full
     assert ib.default_param_set_needs_rebuild(cfg, db=test_db) is False
 
 
@@ -77,7 +95,27 @@ def test_star_min_order_qty_is_enforced():
     r4 = _buy("600519.SS", intent_type="quantity", value=100, price=1680.0,
               asset_type="stock")
     assert r4.status == "filled" and r4.fill.quantity == 100, r4
-    # ⑤ 原语义保留：不足一手仍是 lot_rounding
+    # ⑤ 现金递减后落到最小申报之下（科创板现金只够 ~199 股 → 递减报 100 股）
+    #    → 同样不可下（不得记账一笔必被拒的委托）
+    r5a = match_buy(
+        order_id="O-6", symbol="688498.SS", day=day, card=TradabilityCard(),
+        bar_close=1886.0, intent_type="quantity", intent_value=500,
+        account=_account_stub(cash=250_000),
+        profile=CN_STOCK, asset_type="stock",
+        slippage_base=0.002, slippage_tail=0.001,
+    )
+    assert r5a.status == "unfilled" and r5a.unfilled.reason == "below_min_order", r5a
+    # 精确形态（R17A 建议）：意图 200 股、现金只够 199 股 → 递减后 <200 → 不可下
+    # 200 股 @10.0×(1+0.003) ≈ 2006 元；给 1008 元 → 只能买 100 股
+    r5b = match_buy(
+        order_id="O-7", symbol="688498.SS", day=day, card=TradabilityCard(),
+        bar_close=10.0, intent_type="quantity", intent_value=200,
+        account=_account_stub(cash=1008.0),
+        profile=CN_STOCK, asset_type="stock",
+        slippage_base=0.002, slippage_tail=0.001,
+    )
+    assert r5b.status == "unfilled" and r5b.unfilled.reason == "below_min_order", r5b
+    # ⑥ 原语义保留：不足一手仍是 lot_rounding
     r5 = _buy("600519.SS", intent_type="quantity", value=27, price=1680.0,
               asset_type="stock")
     assert r5.status == "unfilled" and r5.unfilled.reason == "lot_rounding", r5

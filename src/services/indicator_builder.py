@@ -109,7 +109,9 @@ def rebuild_all(symbols: list[str] | None = None, trend_cfg: dict | None = None,
     # 日更尾只重建当日标的）若也登记，会把"配置漂移 → 需全量重建"的标记冲掉，
     # 未被重建的标的因此永远停在旧参数缓存上（实测：漂移检测由 True 变 False、
     # 未被重建标的 trend_daily 行数 0）。
-    if symbols is None or not partial:
+    # 只有"整段重建且全部成功"才登记 default 参数集（R16B-B2 + R17A-B2：
+    # 重建 0 只 / 有失败时登记会把这些标的锁在旧参数缓存上）
+    if not partial and rebuilt > 0 and failed == 0:
         register_default_param_set(trend_cfg, db=db)
     return {"total": len(symbols), "rebuilt": rebuilt, "failed": failed}
 

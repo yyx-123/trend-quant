@@ -52,7 +52,12 @@ def min_buy_qty(symbol: str, *, asset_type: str | None = None, lot_size: int = 1
     """买入的最小申报数量（分品种）。科创板股票 = 200，其余 = lot_size（默认 100）。"""
     from core.symbols import symbol_suffix, symbol_to_code
 
-    if str(asset_type or "").lower() == "stock" and symbol_suffix(symbol) == "SS"             and symbol_to_code(symbol).startswith("68"):
+    code = symbol_to_code(symbol)
+    is_star_equity = symbol_suffix(symbol) == "SS" and code.startswith(("688", "689"))
+    # 按**代码**判定（688/689 为科创板股票；588 是科创板 ETF，申报单位另论）——
+    # 这样 `asset_type` 缺失（元数据未落库）时也不会退化成 100 股（R17A-B1 的
+    # 口径不对称：回测侧缺元数据兜底 stock，清单侧原兜底 100＝危险方向）。
+    if is_star_equity and str(asset_type or "stock").lower() != "etf":
         return STAR_MIN_ORDER_QTY
     return max(int(lot_size), 1)
 

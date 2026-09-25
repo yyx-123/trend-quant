@@ -107,11 +107,16 @@ def run_macd_parity(
                                "price": result.fill.fill_price})
         elif position is None and golden:
             from engine.fees import max_affordable_quantity
+            from engine.profiles import min_buy_qty
 
             exec_est = close * (1.0 + slippage_base + slippage_tail)
             qty = max_affordable_quantity(
                 cash=engine.account.cash, exec_price_est=exec_est, profile=engine.profile
             )
+            # 分品种最小申报数量（科创板 200 股）：低于该数的委托两个引擎都不下，
+            # 否则新引擎拒单、旧引擎照成交 → 会被误读成引擎差异（R16-D-1 的连带面）
+            if 0 < qty < min_buy_qty(symbol, asset_type=asset_type):
+                qty = 0
             if qty > 0:
                 result = engine.buy(
                     intent=OrderIntent(

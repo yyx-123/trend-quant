@@ -101,6 +101,10 @@ def match_buy(
         qty = min(qty, affordable)
         if qty <= 0:
             return _unfilled(order_id, symbol, day, "insufficient_cash", snapshot)
+        # 现金递减后可能又落到最小申报数量之下（如科创板现金只够 199 股 →
+        # 递减到 100 股）：同样不可下，不得记账成交（R17A 预警的漏点，本轮自查修掉）
+        if qty < min_qty:
+            return _unfilled(order_id, symbol, day, "below_min_order", snapshot)
     elif intent_type == "target_value":
         # target_weight 由 L3 sizing 槽换算为金额后再下达（引擎不估组合净值）。
         budget = float(intent_value)

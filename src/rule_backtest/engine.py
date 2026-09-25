@@ -7,6 +7,7 @@ import pandas as pd
 
 from audit.app_logger import get_logger
 from rule_backtest.condition_engine import ConditionEngine
+from engine.profiles import min_buy_qty
 from rule_backtest.metrics import (
     compute_annual_returns,
     compute_drawdown,
@@ -28,6 +29,7 @@ logger = get_logger(__name__)
 
 # 买入跳过原因：现金不足（买不起一手）。
 SKIP_INSUFFICIENT_CASH = "insufficient_cash"
+SKIP_BELOW_MIN_ORDER = "below_min_order"  # 科创板单笔申报 ≥200 股（R17A-F2）
 
 # 止损类出场原因（跳空成交修正与 round-trip 统计共用）。
 STOP_EXIT_REASONS = frozenset({"hard_stop", "chandelier_stop", "chandelier_stop_ratchet"})
@@ -175,6 +177,8 @@ class SingleSymbolAllInBacktestEngine:
                     reference_price=reference_price,
                     day_str=day_str,
                     execution=execution,
+                    symbol=request.symbol,
+                    asset_type=execution.instrument_type,
                 )
                 if qty <= 0:
                     if skip_info is not None:
@@ -332,14 +336,36 @@ class SingleSymbolAllInBacktestEngine:
         reference_price: float,
         day_str: str,
         execution: BacktestExecutionConfig,
+        symbol: str | None = None,
+        asset_type: str | None = None,
     ) -> tuple[int, dict | None]:
         """Decide the buy quantity: affordability (legacy all-in logic).
 
         Returns (qty, skip_record). qty=0 with a skip_record means the entry
         signal produced no trade.
+
+        分品种最小申报数量（R17A-F2）：旧栈原按 `lot_size`（默认 100）对齐且
+        **看不到标的代码** → 科创板（688/689）会产出 100 股委托，而现实中单笔
+        申报须 ≥200 股（生产库 `batch_backtest_cells` 实测 336 笔此类"成交"）。
+        这里按 symbol 判定并把不可下的委托记为 `below_min_order`。
         """
-        affordable_qty = self._max_buy_qty(cash=cash, reference_price=reference_price, execution=execution)
+        min_qty = min_buy_qty(symbol or "", asset_type=asset_type,
+                              lot_size=int(execution.lot_size))
+        affordable_qty = self._max_buy_qty(
+            cash=cash, reference_price=reference_price, execution=execution,
+            min_qty=min_qty,
+        )
         if affordable_qty <= 0:
+            affordable_lot = self._max_buy_qty(
+                cash=cash, reference_price=reference_price, execution=execution
+            )
+            if 0 < affordable_lot < min_qty:
+                return 0, {
+                    "date": day_str,
+                    "reason": SKIP_BELOW_MIN_ORDER,
+                    "note": f"现金只够 {affordable_lot} 股 < 最小申报 {min_qty} 股",
+                    "close": float(reference_price),
+                }
             return 0, {
                 "date": day_str,
                 "reason": SKIP_INSUFFICIENT_CASH,
@@ -349,7 +375,8 @@ class SingleSymbolAllInBacktestEngine:
         return affordable_qty, None
 
     @staticmethod
-    def _max_buy_qty(cash: float, reference_price: float, execution: BacktestExecutionConfig) -> int:
+    def _max_buy_qty(cash: float, reference_price: float, execution: BacktestExecutionConfig,
+                     *, min_qty: int = 0) -> int:
         if cash <= 0 or reference_price <= 0:
             return 0
         exec_price = reference_price * (1.0 + execution.slippage)
@@ -362,7 +389,8 @@ class SingleSymbolAllInBacktestEngine:
             gross = qty * exec_price
             commission = max(gross * execution.fee_rate, execution.fee_min)
             if gross + commission <= cash:
-                return qty
+                # 低于最小申报数量的可负担量 = 不可下（不返回到调用方）
+                return qty if qty >= int(min_qty) else 0
             qty -= lot_size
         return 0
 
