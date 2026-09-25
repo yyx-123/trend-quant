@@ -72,9 +72,12 @@ def parse_window_bound(value, *, what: str = "window") -> str | None:
 def window_touches_holdout(db, start, end) -> bool:
     """窗口 [start, end] 是否与 holdout 段 [holdout_start, now) 相交。
 
-    端点先经 :func:`parse_window_bound` 规范化（含格式校验），再按日期比较；
-    非日期输入抛 HoldoutError（fail-closed）。``end`` 缺失时保守视为未指定
-    （由调用方的 spec 校验保证窗口完整）。
+    判定只依赖 ``end``（holdout 段是**未来**区间 ``[holdout_start, now)``，
+    窗口是否与之相交由右端点决定；``start`` 的合法性由入口
+    ``experiments.validate_window_spec`` 负责）。``end`` 经
+    :func:`parse_window_bound` 解析后按**日期**比较，非日期输入抛
+    HoldoutError（fail-closed）；``end`` 缺失/空白返回 False（未指定窗口，
+    由调用方的 spec 校验与 runner 侧解析共同兜底）。
     """
     if start is None or end is None:
         return False
@@ -90,8 +93,14 @@ def window_touches_holdout(db, start, end) -> bool:
 def grant_token(
     db, *, session_id: str, purpose: str, experiment_id: str | None = None
 ) -> dict:
-    """发放 holdout 放行 token（仅 human session；+ 计数留痕）。"""
+    """发放 holdout 放行 token（仅 human session；+ 计数留痕）。
+
+    purpose 必须非空（R2A-P3-6 复核）：发放是治理动作，purpose 是它唯一的
+    留痕内容——校验下沉到源头，覆盖 Web 路由 / service 面 / 未来任何通道。
+    """
     session = require_human_session(db, session_id)
+    if not str(purpose or "").strip():
+        raise HoldoutError("holdout token purpose must be non-empty")
     with db.connect() as conn:
         tid = alloc_id(conn, "holdout_tokens", "H", width=4)
         conn.execute(

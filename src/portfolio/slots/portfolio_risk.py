@@ -94,8 +94,15 @@ class HeatCapGate:
             stop = est_stops.get(intent.symbol)
             price = ctx.panel.value(intent.symbol, "close")
             if stop is None or price is None:
+                # 原因必须如实（R2A-P3-3 复核：旧写法把 price 缺失也写成
+                # no_stop_estimate，审计留痕说谎）
+                reason = (
+                    "no_stop_estimate" if stop is None and price is not None
+                    else "no_price_estimate" if price is None and stop is not None
+                    else "no_stop_estimate+no_price"
+                )
                 _log(ctx, "heat_cap", intent.symbol,
-                     "no_stop_estimate — cap NOT enforced for this candidate")
+                     f"{reason} — cap NOT enforced for this candidate")
                 out.append(intent)
                 continue
             qty = _intent_qty_estimate(ctx, intent)

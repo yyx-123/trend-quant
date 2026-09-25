@@ -207,6 +207,15 @@ def attribute_diffs(
        不买/跌停日不卖）。``unexplained`` 在卡控场景**必然非空**（级联
        错位的 trade/NAV 差异），不得作为该场景的验收断言。
 
+    **适用区间（R2A 复核校准，务必按此读结果）**：归因界是**物理量**——
+    "新引擎相对旧引擎累计多付/少收的现金"能买多少股、能解释多少净值偏离，
+    而不是滑点上界的复合乘积（后者在数千笔时发散，会把荒谬错误吸收掉）。
+    代价是：**长窗口**下尾滑点成本本身会复合，真实引擎实测合法净值偏离
+    2500 日 47% / 4000 日 63% / 6000 日 74%（零引擎逻辑差异、零卡控）。
+    故本函数的判别力只在短/中窗口（≲200 笔差异）成立；超出时结果里
+    ``saturated=True`` 且 ``attribution_note`` 非空——**不得**再把
+    ``unexplained == []`` 当"引擎力学一致"的验收断言，改用 ``violations``。
+
     白名单归类规则：
     - trade_mismatch：同日同向且价差幅度在尾盘滑点界限内 → tail_slippage。
       数量差在一手以内也归此类——更高的成交价降低购买力，整手取整传导为
@@ -233,9 +242,16 @@ def attribute_diffs(
 
     classified = {k: 0 for k in ATTRIBUTION_WHITELIST}
     unexplained: list[dict] = []
-    # 已归类滑点的**实测**累积拖累（Π(1+slip)−1）：既用于数量漂移界限，
-    # 也用于 NAV 级联的上限（loop-review-ds4f R1-P2-7）。
-    drag_factor = 0.0
+    # 累计"额外成本"（**物理量**，不是上界）：新引擎相对旧引擎因尾盘滑点
+    # 多付/少收的现金。它是数量漂移与 NAV 漂移唯一的合法来源——
+    #   * 买入：新价更高 → 多付 (P_new − P_old) × qty_old；
+    #   * 卖出：新价更低 → 少收 (P_old − P_new) × qty_old。
+    # loop-review-ds4f R2A-P1-1/P2-1：R1 用"滑点上界的乘积 Π(1+slip)"当界限，
+    # 在生产尺度（数千笔）上 Π 发散到 25%+ → NAV 上限被推到 75%，+100% 的净值
+    # 错误又被吸收；同时"该笔数量的 1/2"硬帽会把**合法**的长 run 漂移判成超纲
+    # （4000~6000 日、零卡控场景下 76~229 笔假报警，而 docstring 要求该场景
+    # `unexplained == []`）。物理量两头都对：能买多少股，取决于已经多花了多少钱。
+    cum_extra_cost = 0.0
     for i, d in enumerate(diff["trade_diffs"]):
         if d["kind"] == "trade_mismatch":
             nt, ot = d["new"], d["old"]
@@ -244,26 +260,18 @@ def attribute_diffs(
                 and ot["price"] > 0
             ):
                 slip_ratio = abs(nt["price"] / ot["price"] - 1.0)
-                # 数量漂移界限：滑点对购买力的传导会跨轮**累积**（现金差复利），
-                # 界限 = 实测累积拖累对应的股数 + 一手底数。
-                # 旧实现的界限 = `|qty| × 尾滑点上界 × max(i,1) + 一手`：
-                # 上界 1.1% 与笔数线性放大，i ≥ 91 时已 ≥ 整仓量 → 数量差
-                # 100%、乃至 +100% 的净值错误都被"tail_slippage"吸收，
-                # 阶段 1 的 `unexplained == []` 机器判据形同摆设。
-                cum_drag = (1.0 + drag_factor) * (1.0 + slip_ratio) - 1.0
-                # 硬上限：单笔数量漂移不得超过该笔自身数量的 1/2（整手起步，
-                # 即 `max(lot, |qty|//2)`——对极小手数订单相当于"至多整仓"）。
-                # 超过即不是"滑点的下游"，而是另一笔订单（真实口径差异）。
-                qty_cap = max(int(lot_size), int(abs(int(ot["qty"])) // 2))
-                qty_bound = min(
-                    max(int(lot_size), int(abs(int(ot["qty"])) * cum_drag)) + int(lot_size),
-                    qty_cap,
+                ref_price = float(nt["price"]) or float(ot["price"])
+                # 本笔**之前**累计的额外成本所能解释的股数（+一手取整噪声）
+                qty_bound = (
+                    int(cum_extra_cost / ref_price) + int(lot_size)
+                    if ref_price > 0 else int(lot_size)
                 )
                 qty_drift = abs(int(nt["qty"]) - int(ot["qty"]))
-                # 价差幅度在尾盘滑点界限内 → 归 tail_slippage（含合法数量漂移）
                 if 0 < slip_ratio <= max_tail_slippage and qty_drift <= qty_bound:
                     classified["tail_slippage"] += 1
-                    drag_factor = cum_drag
+                    cum_extra_cost += abs(float(nt["price"]) - float(ot["price"])) * abs(
+                        int(ot["qty"])
+                    )
                     continue
             unexplained.append(d)
         elif d["kind"] == "count_mismatch":
@@ -281,10 +289,21 @@ def attribute_diffs(
     # NAV 路径漂移是其复利下游——同归该类；**零差异语境**（无任何 trade 级
     # 白名单命中）下超界 NAV 差异=超纲（如计息误加进持仓市值），必须判负。
     downstream_kind = "tail_slippage" if classified["tail_slippage"] > 0 else None
-    # 级联上限（loop-review-ds4f R1-P2-7）：滑点最多解释"实测累积拖累"量级的
-    # 净值偏离（放宽 3× 余量）。旧实现只判 `classified["tail_slippage"] > 0`，
-    # 于是**任意一个**合法尾盘价差就能把 +100% 的净值错误全归入下游。
-    nav_cascade_bound = max(daily_interest_bound * 2.0, drag_factor * 3.0)
+    # 级联上限（R1-P2-7 + R2A-P1-1）：净值偏离 ≤ 累计额外成本占权益的比例
+    # （放宽 5× 余量，覆盖持仓规模差带来的市值差），并叠加**绝对天花板 50%**
+    # ——任何 ≥50% 的净值错误无条件判超纲，避免"长 run 上限发散"再次把
+    # 荒谬错误吸收掉。物理量 + 天花板：两头都堵。
+    _eqs = [float(r["equity"]) for r in new_result.get("daily_nav") or []
+            if r.get("equity") is not None]
+    avg_equity = (sum(_eqs) / len(_eqs)) if _eqs else 0.0
+    drag_ratio = (cum_extra_cost / avg_equity) if avg_equity > 0 else 0.0
+    # R2A-P1-1 复核后的最终口径：**只用物理量**，不加绝对天花板。
+    # 真实引擎实测（纯尾滑点差异、零卡控、零引擎逻辑差异）：合法净值偏离
+    # 随窗口增长到 2500 日 47%、4000 日 63%、6000 日 74%——任何"≥X% 一律
+    # 判超纲"的绝对阈值都会把**合法**长 run 判成失败。反过来物理量界在
+    # 短/中窗口上是紧的：300 笔前缀时把 +100% 净值错误与 +100% 数量错误
+    # 都判超纲（钉子在案）。判别力边界由 saturated 显式标注。
+    nav_cascade_bound = max(daily_interest_bound * 2.0, drag_ratio * 5.0)
     for nd in diff["nav_divergence"]:
         if nd.get("kind") == "length_mismatch":
             unexplained.append({**nd, "kind": "nav_length_mismatch"})
@@ -298,10 +317,40 @@ def attribute_diffs(
             classified[downstream_kind] += 1
         else:
             unexplained.append({**nd, "kind": "nav_point_diff_beyond_interest"})
+    # 判别力饱和标记（R2A-P1-1/P2-2 口径收口）：笔数一多，逐笔位置对齐退化、
+    # 漂移本身可以很大（实测 4000 日合法净值偏离 63%）——此时
+    # `unexplained == []` **不再等价于"引擎力学一致"**。凡是越出判别区间的
+    # 归因结果都显式标注，避免把"解释不了"与"判别不了"混为一谈。
+    n_trade_diffs = len(diff["trade_diffs"])
+    # 阈值取 25%：实测 stage-1 验收尺度（260 日 / 22 笔 / 尾滑点 0.001~0.003）
+    # 的合法净值偏离为 2.2%~6.3% → 不饱和、判据照常有效；1200 日已到 26%
+    # → 饱和。这样"未饱和"才真正等价于"归因有判别力"。
+    saturated = bool(
+        n_trade_diffs > 200
+        or nav_cascade_bound > 0.25
+        or any(
+            (
+                float(nd.get("old") or 0.0) > 0
+                and abs(float(nd["new"]) - float(nd["old"])) / float(nd["old"]) > 0.25
+            )
+            for nd in diff["nav_divergence"]
+            if nd.get("kind") != "length_mismatch"
+        )
+    )
     return {
         "violations": violations,
         "trade_diffs": diff["trade_diffs"],
         "nav_divergence": diff["nav_divergence"],
         "classified": classified,
         "unexplained": unexplained,
+        "n_trade_diffs": n_trade_diffs,
+        "nav_cascade_bound": nav_cascade_bound,
+        "drag_ratio": drag_ratio,
+        "saturated": saturated,
+        "attribution_note": (
+            "判别力饱和：差异笔数/漂移幅度超出逐笔归因的判别区间，"
+            "unexplained 为空**不代表**引擎力学一致；该场景请改用 violations "
+            "作为验收判据（见 attribute_diffs.__doc__ 的适用区间）"
+            if saturated else ""
+        ),
     }

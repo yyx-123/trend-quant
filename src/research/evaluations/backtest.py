@@ -223,17 +223,27 @@ def _wf_stitch(exp_navs: list[list[dict]]) -> list[dict]:
 
 
 def _run_walk_forward_exp_leg(
-    db, *, config, registry, run_params, strategy_ref, folds: list[tuple[str, str]]
+    db, *, config, registry, run_params, strategy_ref, folds: list[tuple[str, str]],
+    window_kind: str | None = None,
 ) -> dict:
-    """按给定折跑实验腿并拼接 OOS 序列（高原探针的 walk_forward 形态）。"""
+    """按给定折跑实验腿并拼接 OOS 序列（高原探针的 walk_forward 形态）。
+
+    window_kind 用于覆盖 run_params 里的窗口类型（探针必须记
+    `plateau_probe`，与 static 分支一致——R2A-P3-2 复核实证：此前 wf 探针在
+    engine_runs 里被记成 `sample`，与 research_runs 的 `plateau_probe` 两本账
+    互相矛盾）。
+    """
     from portfolio import service as portfolio_service
 
     navs: list[list[dict]] = []
     runs: list[dict] = []
     for f_start, f_end in folds:
+        f_params = {**run_params, "window": [f_start, f_end]}
+        if window_kind:
+            f_params["window_kind"] = window_kind
         res = portfolio_service.run_backtest(
             db, config=config, registry=registry,
-            run_params={**run_params, "window": [f_start, f_end]},
+            run_params=f_params,
             strategy_ref=strategy_ref,
         )
         navs.append(res["daily_nav"])
@@ -632,6 +642,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
                     probe_wf = _run_walk_forward_exp_leg(
                         db, config=probe_cfg, registry=registry, run_params=run_params,
                         strategy_ref=probe_ref, folds=wf_folds_for_probe,
+                        window_kind="plateau_probe",
                     )
                     probe_nav = probe_wf["daily_nav"]
                     for r in probe_wf["runs"]:
@@ -672,8 +683,10 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
         }
         # PBO（审计 B 项，阶段 5）：变体矩阵 = 主选 + 邻域探针的日收益，
         # CSCV 过拟合概率（变体数 ≥ 2 才有意义）。
-        # 用探针**自身携带的 NAV**（两种 window_mode 都可用；wf 模式下
-        # run_id 为 None，旧实现 load_nav(None) 会静默丢掉整块 PBO 证据）。
+        # 用探针**自身携带的 NAV**：static 下与 load_nav(run_id) 数值等价
+        # （A/B 已证），wf 下探针没有单 run（run_id=None）只能走内存 NAV。
+        # （R2A-P3-7 更正：父提交在 wf 下算的是**全窗口单 run**的 PBO，
+        # 不是 None——真实改进是"变体矩阵从错基准改为同基准"，不是"救回丢失"。）
         try:
             from research.stats.fdr_pbo import pbo_cscv
 
@@ -827,8 +840,11 @@ def _plateau_items(diff: list[dict]) -> list[dict]:
         frm = item.get("from")
         params = dict(item.get("params") or {})
         if isinstance(to, dict):
-            # 字典形态：模块取 to.module，参数 to.params 优先、item 级兜底
-            params = {**(params), **dict(to.get("params") or {})}
+            # 字典形态：模块取 to.module；参数取**整体或**（`to.params or
+            # item.params`）——必须与 apply_diff（portfolio/strategy.py）逐字
+            # 一致（R2A-P3-1 复核实证：此处此前用逐键合并，两参数都非空且不
+            # 相交时枚举出的 selected 值是运行**从未使用过**的值）。
+            params = dict(to.get("params") or params)
             to = to.get("module")
         if isinstance(to, list) or to in (None, "", "none"):
             continue

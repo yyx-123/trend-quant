@@ -163,6 +163,10 @@ def _spawn_same_day_catchup(
                     return
                 if market_now().date() != today:
                     return  # 跨日了，交给当日 cron/启动补偿
+                # 预算按**轮次**扣减（R2A-P3-4 复核：此前只在 sleep 时扣减，
+                # 若作业返回 deferred 而冻结已解除，会变成不 sleep 的忙循环，
+                # 预算永不递减、线程不退出——实测 10 秒内 15532 次调用）。
+                remaining -= 60
                 logger.info("same-day catchup: unfrozen, running daily update now")
                 try:
                     payload = daily_market_update_job(settings, data_service, force=force)
@@ -171,8 +175,11 @@ def _spawn_same_day_catchup(
                     return
                 status = str(payload.get("status") or "")
                 if status == "deferred_backtest_running":
-                    # 又被冻结：回到等待（预算继续消耗），不跑 pipeline
+                    # 又被冻结：回到等待（预算继续消耗），不跑 pipeline；
+                    # 若此时并未冻结（状态语义异常/竞态），退避一轮避免热转
                     logger.info("same-day catchup: re-deferred, waiting again")
+                    if not run_freeze.is_frozen():
+                        _time.sleep(60)
                     continue
                 if status in ("skipped_already_running", "skipped_non_trading_day"):
                     # 另一触发源正在/已经完成日更：pipeline 由那一侧负责，
