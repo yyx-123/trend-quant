@@ -46,7 +46,7 @@ def _spec_errors(spec: dict, ctx: dict) -> list[str]:
             if version_row is None:
                 errors.append(f"spec.base version not in library: {base}")
             else:
-                # R3C-P2-3（Round 3 复核）：退役策略线的版本不得作新实验的 base
+                # 退役策略线的版本不得作新实验的 base
                 # ——此前该守卫只在 runner 的 resolve 阶段（失败要烧一次 attempt
                 # 并落 failed 记录），入口就该拒。
                 from portfolio.library import get_strategy
@@ -192,7 +192,7 @@ def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict
     trades 为回测器内存成交清单（{price, qty}）；None 时 turnover 记 None
     （walk-forward 拼接路径无逐段成交，显式标注不可用）。
 
-    **退化腿（R5-P2-2，Round 5 复核）**：全现金/零成交 run 的日收益只有空仓计息的
+    **退化腿**：全现金/零成交 run 的日收益只有空仓计息的
     浮点残差（std ≈ 1e-16），`compute_summary` 的 `std_ret > 0` 守卫太弱 → 产出
     Sharpe ≈ 6e12 的噪声值，而该值会进 `deltas_vs_base` 并**决定判定**
     （实测：好实验 × 全现金基准 → ΔSharpe 巨负 → rejected）。这里把退化腿的
@@ -204,7 +204,7 @@ def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict
     summary = compute_summary(nav_rows, trades=[], turnover_total=turnover_total or 0.0)
     if turnover_total is None:
         summary["turnover"] = None
-    # 退化判定（R5-P2-2 + R7-F1/F2）：统一走 _common.is_degenerate_leg
+    # 退化判定：统一走 _common.is_degenerate_leg
     from research.evaluations._common import null_degenerate_metrics
     from rule_backtest.metrics import is_degenerate_summary
 
@@ -218,7 +218,7 @@ def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict
 def _delta_or_none(a, b) -> float | None:
     """两腿指标作差；任一为 None（退化腿/不可用）即记 None。
 
-    R6-P1-1（Round 6 复核）：退化腿修复把 sharpe 记成 None，但 wf 折 Δ 与高原探针
+    退化腿修复把 sharpe 记成 None，但 wf 折 Δ 与高原探针
     Δ 仍直接 float() 相减 → 恰好把"全现金/零成交腿"这条被修的场景打成
     `status=failed`（TypeError）。这里统一 None 语义。
     """
@@ -232,7 +232,7 @@ def _delta_or_none(a, b) -> float | None:
 def _deltas_from_summaries(exp_summary: dict, base_summary: dict | None) -> dict:
     """Δ 指标（任一腿退化 → 该指标记 None 并落警告，绝不用噪声值作差）。
 
-    R5-P2-2（Round 5 复核）：全现金/零成交腿的 Sharpe 是浮点噪声（实测 ≈6e12），
+    全现金/零成交腿的 Sharpe 是浮点噪声（实测 ≈6e12），
     用它作差会把好实验判成 rejected。退化腿由 `_nav_summary` 打 `degenerate_leg`。
     """
     deltas: dict[str, float | None] = {}
@@ -264,7 +264,7 @@ def _wf_fold_windows(start, end, n_folds: int) -> list[tuple[str, str]]:
     """walk-forward 的折窗口切分（n_folds 段，段内 ≥20 个交易日）。
 
     单点实现：主路径与高原探针共用同一套折边界，否则探针与 select 不同基准
-    （loop-review-ds4f R1-P2-5 的根因）。
+    （根因）。
     """
     fold_days = pd.bdate_range(start, end)
     if len(fold_days) < n_folds * 20:
@@ -298,7 +298,7 @@ def _run_walk_forward_exp_leg(
     """按给定折跑实验腿并拼接 OOS 序列（高原探针的 walk_forward 形态）。
 
     window_kind 用于覆盖 run_params 里的窗口类型（探针必须记
-    `plateau_probe`，与 static 分支一致——R2A-P3-2 复核实证：此前 wf 探针在
+    `plateau_probe`，与 static 分支一致——实证：此前 wf 探针在
     engine_runs 里被记成 `sample`，与 research_runs 的 `plateau_probe` 两本账
     互相矛盾）。
     """
@@ -338,7 +338,7 @@ def _regime_segment_metrics(nav_rows: list[dict], days: set) -> dict:
     arr = np.asarray(sel)
     std = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
     mean_r = float(arr.mean())
-    # R7-F3：段内只有浮点残差（该腿整段零成交/全现金）→ Sharpe 是噪声（实测
+    # 段内只有浮点残差（该腿整段零成交/全现金）→ Sharpe 是噪声（实测
     # 1.7e13），记 None 并由 sufficient_sample=False 阻止其行使塌陷否决
     from rule_backtest.metrics import is_degenerate_nav
 
@@ -390,7 +390,7 @@ def _regime_split(exp_nav: list[dict], base_nav: list[dict], bench_nav: list[dic
                          or m_base["sharpe"] is None)
                 else m_exp["sharpe"] - m_base["sharpe"]
             ),
-            # R1-P3-15：ΔSharpe 在极短分段上噪声极大（实测 9 个交易日可给出
+            # ΔSharpe 在极短分段上噪声极大（实测 9 个交易日可给出
             # −2.19），却足以经 collapse 门否决 confirmed。样本不足的段显式
             # 标记，由 verdict_rules 只对够长的段施加塌陷否决。
             "sufficient_sample": bool(
@@ -419,7 +419,7 @@ def run_portfolio_backtest(db, experiment: dict, ctx: dict) -> dict:
     config, resolved_yaml = portfolio_service.resolve_experiment_config(
         db, base_version_id=base_ref, diff=diff, registry=registry,
         new_name=f"exp-{experiment['id']}",
-        # ND-4（V7 复核）：复现/复核**既有**实验不是"新引用"——退役线只禁
+        # 复现/复核**既有**实验不是"新引用"——退役线只禁
         # 新实验，历史实验的重跑（rerun/复核/高原探针）必须照常可跑，
         # 否则退役一个策略线会把已在它上面完成的实验全部变成 failed。
         allow_retired=True,
@@ -508,7 +508,7 @@ def run_portfolio_backtest(db, experiment: dict, ctx: dict) -> dict:
         # trades/unfilled 一律 None（不是空列表/空 dict）：walk-forward 拼接
         # 路径没有**单条**成交与未成交记录，空值会被下游当成"真的零"——
         # 同一类假证据已修过 turnover（DS-P1-3）与 Δ换手（DS-R2），
-        # loop-review-ds4f R1-P2-2 把 fee_total / unfilled_by_reason /
+        # 把 fee_total / unfilled_by_reason /
         # no_trades 告警三个幸存点一起收口。
         exp_result = {"run_id": None, "daily_nav": stitched_nav,
                       "trades": None, "unfilled": None}
@@ -625,7 +625,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     # 分层铁律：L4 不跨级 import L2——经 L3 服务面转发（评审 A-P1-2）
     exp_summary = _nav_summary(exp_result["daily_nav"], exp_result.get("trades"))
     # fee_total：无 run（walk-forward 拼接）/ 无成交明细时记 None（不可用），
-    # 不能记 0——0 会被当成"费用为零"的实测证据（R1-P2-2；实测 wf 实验的
+    # 不能记 0——0 会被当成"费用为零"的实测证据（实测 wf 实验的
     # 6 个 fold 合计 265 笔成交、≈9823 元费用，证据里却写着 0）。
     fee_total = None
     exp_fills: list[dict] = []
@@ -697,7 +697,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
         "sharpe_bootstrap": sharpe_block_bootstrap(exp_rets, seed=7),
         "attempt_index": attempt_index,
     }
-    # R7-F2（Round 7 复核）：退化腿的噪声不止在 summary —— `stats.*`（PSR/DSR/
+    # 退化腿的噪声不止在 summary —— `stats.*`（PSR/DSR/
     # MinTRL/Sharpe 自举点估计）同样是 6e12 级浮点噪声，会经课题级 BH-FDR
     # （conclusion.py 用 `1 - stats.psr` 当 p 值）把"零成交"实验算成**显著**
     # （实测 still_significant=2）。退化时统一记 None，并落机器可读标记。
@@ -729,7 +729,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     if plateau_items and not is_creation:
         neighbor_deltas: list[float] = []
         probes: list[dict] = []
-        # 探针必须与 selected 同基准（loop-review-ds4f R1-P2-5）：
+        # 探针必须与 selected 同基准：
         # walk_forward 下 selected 来自 OOS **拼接**序列，而旧实现的探针跑的是
         # **全窗口**单 run → 两者相减等于常数偏移（实证 +0.7033 恒定，两个方向
         # 的邻域值同时被平移，`neighbor_mean` 与 `selected` 差出 0.84 → 误判
@@ -797,7 +797,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
         # CSCV 过拟合概率（变体数 ≥ 2 才有意义）。
         # 用探针**自身携带的 NAV**：static 下与 load_nav(run_id) 数值等价
         # （A/B 已证），wf 下探针没有单 run（run_id=None）只能走内存 NAV。
-        # （R2A-P3-7 更正：父提交在 wf 下算的是**全窗口单 run**的 PBO，
+        # （更正：父提交在 wf 下算的是**全窗口单 run**的 PBO，
         # 不是 None——真实改进是"变体矩阵从错基准改为同基准"，不是"救回丢失"。）
         try:
             from research.stats.fdr_pbo import pbo_cscv
@@ -814,7 +814,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
 
     warnings: list[str] = list(extra_warnings)
     warnings.extend(exp_result.get("warnings") or [])  # 运行级告警（heat_cap 退化等）
-    # R6-P3-3：退化腿必须落进持久化记录的 warnings（否则记录里只有 null 无解释）
+    # 退化腿必须落进持久化记录的 warnings（否则记录里只有 null 无解释）
     _degen_labels = [("实验腿" if n == "experiment" else "基准腿") for n in _degenerate_legs]
     if _degen_labels:
         warnings.append(
@@ -830,7 +830,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     warnings.append("survivorship_bias(universe 为当前池穿越历史)")
     if exp_result.get("trades") is None:
         # 无逐笔成交明细（walk-forward 拼接路径）≠ 零成交：不能发
-        # "零成交"告警（R1-P2-2——旧实现 `not None` 为真，告警与实际相反）
+        # "零成交"告警（旧实现 `not None` 为真，告警与实际相反）
         warnings.append(
             "trade_details_unavailable(walk-forward 拼接路径无逐笔成交明细，"
             "成交笔数/费用/未成交原因均不可用，非零成交)"
@@ -861,7 +861,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
             None if exp_result.get("unfilled") is None
             else _count_by_reason(exp_result["unfilled"])
         ),
-        "degenerate_legs": _degenerate_legs,  # R7-F2：机器可读（课题 FDR 据此跳过）
+        "degenerate_legs": _degenerate_legs,  # 机器可读（课题 FDR 据此跳过）
         "is_compound": bool(spec.get("is_compound")),
         "plateau": plateau,
         "pbo": pbo_info,
@@ -921,7 +921,7 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
 
 
 def plateau_warnings(plateau: dict | None, *, is_creation: bool) -> list[str]:
-    """高原/孤峰证据面的告警（R1-P2-6；抽成纯函数以便直接断言行为）。
+    """高原/孤峰证据面的告警（抽成纯函数以便直接断言行为）。
 
     - `plateau is None`（无数值参数可探）+ 非创建型 → 证据缺席（不阻断
       confirmed，但必须可见）；
@@ -933,7 +933,7 @@ def plateau_warnings(plateau: dict | None, *, is_creation: bool) -> list[str]:
     if is_creation:
         return []
     if plateau is None:
-        # GLM53F-P2-1③ + R1-P2-6：告警原因必须与真实原因一致
+        # GLM53F-P2-1③ + 告警原因必须与真实原因一致
         return [
             "plateau_evidence_absent(该 diff 无数值参数可供邻域探查——"
             + "换模块/零值参数等；孤峰检查缺席，勿当作已通过)"
@@ -953,7 +953,7 @@ def _plateau_items(diff: list[dict]) -> list[dict]:
     """diff 中"同模块、数值参数变化"的项（高原补跑对象）。
 
     `to` 的两种合法形态（apply_diff 都支持，此处必须同口径——loop-review-ds4f
-    R1-P2-6）：字符串 `"hard_stop@1"` 或字典 `{module, params}`。
+    ）：字符串 `"hard_stop@1"` 或字典 `{module, params}`。
     """
     out: list[dict] = []
     for item in diff:
@@ -963,7 +963,7 @@ def _plateau_items(diff: list[dict]) -> list[dict]:
         if isinstance(to, dict):
             # 字典形态：模块取 to.module；参数取**整体或**（`to.params or
             # item.params`）——必须与 apply_diff（portfolio/strategy.py）逐字
-            # 一致（R2A-P3-1 复核实证：此处此前用逐键合并，两参数都非空且不
+            # 一致（实证：此处此前用逐键合并，两参数都非空且不
             # 相交时枚举出的 selected 值是运行**从未使用过**的值）。
             params = dict(to.get("params") or params)
             to = to.get("module")
@@ -981,7 +981,7 @@ def _with_param(diff: list[dict], slot: str, param: str, value) -> list[dict]:
     """diff 深拷贝并把 (slot, param) 替换为邻域值——**单参数扰动**。
 
     必须复刻 `apply_diff` 的取值优先级（`to.params or item.params`）：
-    V3 复核实证，此前"两边都写"的写法在"字典形态 to 无 params + 多个 item
+    实证，此前"两边都写"的写法在"字典形态 to 无 params + 多个 item
     级参数"时会把 `to.params` 变成非空，从而**整体接管**并丢掉其余 item 参数
     ——邻域点实际改了 2 个参数（`atr_period` 被重置为默认），高原/孤峰判定
     因此对着错误的基准算。现在只在**生效位置**写入：

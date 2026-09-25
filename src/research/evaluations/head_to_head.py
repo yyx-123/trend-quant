@@ -128,7 +128,7 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
     from rule_backtest.metrics import compute_summary
     from research.evaluations._common import long_window_annotations
 
-    # R1-P2-5：换手不得报假 0（DS-P1-3 同类残留）——两条腿都落了 engine_runs，
+    # 换手不得报假 0（DS-P1-3 同类残留）——两条腿都落了 engine_runs，
     # 按 fills 实算成交总额。
     def _real_turnover(result: dict) -> float:
         fills = (
@@ -140,11 +140,11 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
     summary_a = compute_summary(result_a["daily_nav"], trades=[], turnover_total=_real_turnover(result_a))
     summary_b = compute_summary(result_b["daily_nav"], trades=[], turnover_total=_real_turnover(result_b))
 
-    # R6-P2-2（Round 6 复核）：与 backtest 路径同口径——**任一腿退化**（零成交/全现金，
+    # 与 backtest 路径同口径——**任一腿退化**（零成交/全现金，
     # 日收益只有计息浮点残差）时 Sharpe 是噪声（实测 ≈6e12），作差会把正常腿判成
     # rejected。这里同样判定退化并显式标注，绝不让噪声决定判定。
     _degenerate_legs = []
-    # R9-2a（第 6 次复发）：必须走"NAV + Sharpe"两条腿——只传 NAV 时，**合法可配置**
+    # （第 6 次复发）：必须走"NAV + Sharpe"两条腿——只传 NAV 时，**合法可配置**
     # 的极小仓位腿（weights/risk_budget_pct 下限可达 1e-4 量级 → |sharpe| 85~287）
     # 会被判"未退化"，其噪声直接翻转判定（实测 confirmed/rejected 双向翻转）
     from rule_backtest.metrics import is_degenerate_summary
@@ -155,7 +155,7 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
             _degenerate_legs.append(_name)
     _degenerate = bool(_degenerate_legs)
     if _degenerate:
-        # R7-F1（Round 7 复核）：退化腿的噪声必须**在组装 evidence/report 之前**
+        # 退化腿的噪声必须**在组装 evidence/report 之前**
         # 清掉——此前只把局部 `d_band` 置 None，而 evidence["paired"] 里已经拷进去
         # 的那份噪声置信带与 summary_a/summary_b 的 6.1e12 Sharpe 仍会被持久化。
         d_band = None
@@ -191,7 +191,7 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
     }
     warnings = [
         "survivorship_bias(universe 为当前池穿越历史)",
-        # R1-P2-5：长窗口三注记（§6.6.4 对全部评估模块生效，此前漏接）
+        # 长窗口三注记（§6.6.4 对全部评估模块生效，此前漏接）
         *long_window_annotations(start),
     ]
     if touched:
@@ -199,7 +199,7 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
 
     suggested = "inconclusive"
     if _degenerate:
-        # R6-P2-2：退化腿（零成交/全现金）时 ΔSharpe/置信带/PSR 全是噪声 →
+        # 退化腿（零成交/全现金）时 ΔSharpe/置信带/PSR 全是噪声 →
         # **不判定**，并如实告警（此前会把正常腿判成 rejected）
         warnings.append(
             "degenerate_leg(" + "/".join(_degenerate_legs)

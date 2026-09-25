@@ -62,7 +62,7 @@ def transition(
 ) -> dict:
     """执行一次状态转移；非法转移抛 LifecycleError。
 
-    原子认领（loop-review R1-P1-2）：UPDATE 带 ``AND status = ?`` 守卫——
+    原子认领：UPDATE 带 ``AND status = ?`` 守卫——
     transition 先读的 from_status 只作转移表校验，真正的占用判定在
     UPDATE 的 WHERE 里。两个通道（app worker 与 CLI --run）同时认领同一
     queued 实验时，只有一个 UPDATE 的 rowcount 为 1，另一个抛
@@ -144,7 +144,7 @@ def list_stale_evaluating(db, days: int = 7) -> list[dict]:
     """烂尾巡检（详设 §6.4）：evaluating 超过 N 天未确认的实验。
 
     平台不自动关闭（结论不能伪造），但烂尾清单对 owner 提醒、台账可见。
-    基准时间（loop-review R1-P3-11）：优先取取证引擎 run 的收口时间
+    基准时间：优先取取证引擎 run 的收口时间
     （= 真正进入"等确认"的时刻），无 run 记录时回退 started_at——否则
     长回测（如 6 天）+ 短等待即被误报烂尾。
     """

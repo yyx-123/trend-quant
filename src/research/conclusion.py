@@ -90,7 +90,7 @@ def build_conclusion_summary(db, topic_id: str) -> dict:
             # （spec.expect）同向的占比——不是"与多数方向一致"（那个构造上
             # 恒 ≥0.5，配 0.7 门槛近乎恒真）
             expect = str(loads(exp["spec_json"], {}).get("expect", "positive"))
-            # R1-P3-15：effect == 0 无方向——不计入一致率的分子或分母
+            # effect == 0 无方向——不计入一致率的分子或分母
             # （旧行为 (0>0)==False 在 expect=negative 时把零效应计成命中）
             expect_positive = expect != "negative"
             if effect != 0:
@@ -102,7 +102,7 @@ def build_conclusion_summary(db, topic_id: str) -> dict:
         evidence_all = loads(v.get("evidence_json"), {})
         stats = evidence_all.get("stats") or {}
         p_val = None
-        # R7-F2（Round 7 复核）：退化腿（零成交/全现金）的 p 值是浮点噪声，
+        # 退化腿（零成交/全现金）的 p 值是浮点噪声，
         # **不进课题 FDR 家族**（否则"零成交"实验会被算成显著）
         if evidence_all.get("degenerate_legs"):
             p_val = None

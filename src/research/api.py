@@ -259,7 +259,7 @@ class ResearchService:
         config, _yaml = portfolio_service.resolve_experiment_config(
             self.db, base_version_id=base_ref, diff=spec.get("diff") or [],
             registry=self.registry, new_name=strategy_id,
-            allow_retired=True,  # 晋升既有实验不是"新引用"（ND-4）
+            allow_retired=True,  # 晋升既有实验不是"新引用"
         )
         library.ensure_strategy(
             self.db, strategy_id, name=name or strategy_id,
@@ -296,7 +296,7 @@ class ResearchService:
         return _campaign(
             self.db, old_module_ref=old_module_ref, new_module_ref=new_module_ref,
             registry=self.registry, session_id=session_id, limit=limit,
-            # ND-1(b)（V8 复核）：物化根必须与服务面一致——否则复核产物落到
+            # 物化根必须与服务面一致——否则复核产物落到
             # 仓库默认目录（`research/topics`）而不是服务配置的 topics_dir
             topics_dir=self.topics_dir,
         )

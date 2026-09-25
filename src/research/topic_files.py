@@ -60,7 +60,7 @@ def materialize_topic(db, topic_id: str, *, root: str | Path) -> Path:
               "|---|---|---|---|---|"]
 
     for exp in experiments:
-        # ND-2（V7 复核）：物化信封必须带上**解码后的 spec**——原始实验行只有
+        # 物化信封必须带上**解码后的 spec**——原始实验行只有
         # `spec_json`，直接塞进信封会让 `spec` 变成 null，与 HTTP 下载不一致。
         if isinstance(exp.get("spec_json"), str) and "spec" not in exp:
             try:
@@ -77,7 +77,7 @@ def materialize_topic(db, topic_id: str, *, root: str | Path) -> Path:
         exp_dir = exp_dir_root / exp["id"]
         exp_dir.mkdir(parents=True, exist_ok=True)
         if latest:
-            # R3C-P3-4：物化产物必须是**完整报告信封**（与 HTTP 下载端点同构）
+            # 物化产物必须是**完整报告信封**（与 HTTP 下载端点同构）
             (exp_dir / "report.json").write_text(
                 json.dumps(
                     verdict_mod.verdict_envelope(exp, latest),

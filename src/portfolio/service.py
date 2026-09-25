@@ -69,7 +69,7 @@ def resolve_experiment_config(
     base_row = library.get_version(db, base_version_id)
     if base_row is None:
         raise ServiceError(f"base version not found: {base_version_id}")
-    # R3C-P2-3（Round 3 复核）：退役（下架）策略线的**新引用**必须被拒——
+    # 退役（下架）策略线的**新引用**必须被拒——
     # 模块槽退役是"只禁新引用"（`modules.retire_module` 同步摘注册表），
     # 策略线此前只有"禁新版本"一处守卫，实验路径照旧引用，且默认列表还隐藏了
     # 退役线（台账看不到、实验却在它上面生长）。口径对齐：拒绝新引用，
@@ -99,7 +99,7 @@ _WINDOW_KINDS = ("sample", "holdout", "plateau_probe")
 
 
 def _require_window_kind(value) -> str:
-    """window_kind 枚举守卫（R3B-P3-9；原写法是就地 lambda，ruff PLC3002）。"""
+    """window_kind 枚举守卫（原写法是就地 lambda，ruff PLC3002）。"""
     text = str(value)
     if text not in _WINDOW_KINDS:
         raise ValueError(f"invalid window_kind: {value!r} (allowed: {_WINDOW_KINDS})")
@@ -130,7 +130,7 @@ def run_backtest(
         market_profile=str(params.get("market_profile", "cn_stock")),
         strategy_ref=strategy_ref,
         run_params=params,
-        # R3B-P3-9：L3 侧同样卡枚举——直调 L3 不再把任意字符串写进
+        # L3 侧同样卡枚举——直调 L3 不再把任意字符串写进
         # engine_runs 血缘（枚举真源与 research_runs CHECK 一致）
         window_kind=_require_window_kind(params.get("window_kind", "sample")),
     )

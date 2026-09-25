@@ -28,7 +28,7 @@ _SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
 
 
 def _reject_cross_site_form(request: Request) -> None:
-    """CSRF 补充防线（loop-review R2-P2-1 + ds4f R1-P2-8）。
+    """CSRF 补充防线。
 
     台账的 3 个变更 POST 是全站仅有的不经过 AuthWall X-Requested-With 检查
     （那只覆盖 /api/ 路径）的变更端点，且是 **HTML 表单**（表单无法自带自定义
@@ -159,7 +159,7 @@ def experiment_report_download(experiment_id: str):
     latest = canonical_verdict(detail.get("verdicts") or [])
     if latest is None:
         raise HTTPException(status_code=404, detail="no verdict yet")
-    # 内容与课题物化的 report.json 共用同一组装函数（R3C-P3-4：此前两处不同）
+    # 内容与课题物化的 report.json 共用同一组装函数（此前两处不同）
     return JSONResponse(
         content=verdict_envelope({"id": experiment_id, **detail}, latest)
     )
@@ -214,7 +214,7 @@ def grant_holdout(
     _reject_cross_site_form(request)
     service = _service_or_testbed()
     session = service.default_human_session()
-    # loop-review-ds4f R1-P3-13：holdout 发放是治理动作，purpose 是它唯一的
+    # holdout 发放是治理动作，purpose 是它唯一的
     # 留痕内容；表单的 HTML `required` 不是防线（直接 POST 可绕过），空串会
     # 落成一条无意义的授权记录。
     if not str(purpose or "").strip():

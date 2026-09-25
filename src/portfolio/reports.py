@@ -46,14 +46,14 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
         return {}
     p, b = joined["p"].to_numpy(), joined["b"].to_numpy()
     var_b = float(np.var(b, ddof=1))
-    # R9-2b：判定必须走"NAV + 年化 Sharpe"两条腿（此前只做相对方差判定，
+    # 判定必须走"NAV + 年化 Sharpe"两条腿（此前只做相对方差判定，
     # 近失配带的基准（|sharpe| 数百）仍会给出 beta=-195…-67470 / capture=46.9）
     _bench_sharpe = (
         float(np.mean(b) / np.std(b, ddof=1) * np.sqrt(252.0))
         if len(b) > 1 and np.std(b, ddof=1) > 0 else None
     )
     _bench_degenerate = is_degenerate_summary(bench_nav_rows, _bench_sharpe)
-    # R7-F2 连带：基准腿若是"平坦"序列（零成交/全现金，方差只有浮点残差），
+    # 连带：基准腿若是"平坦"序列（零成交/全现金，方差只有浮点残差），
     # beta 会爆成 1e12 级噪声 —— 以相对方差为门槛，退化即记 None（不可用），
     # 而不是除以一个噪声方差。
     _b_scale = max(abs(float(np.mean(b))), 1e-12)
@@ -66,7 +66,7 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
     excess = p - b
     te = float(excess.std(ddof=1) * np.sqrt(252)) if len(excess) > 1 else 0.0
     ir = float(excess.mean() / excess.std(ddof=1) * np.sqrt(252)) if excess.std(ddof=1) > 0 else 0.0
-    # R10-F2：跟踪误差/信息比同样必须过闸——两条近失配腿的 excess 序列可以
+    # 跟踪误差/信息比同样必须过闸——两条近失配腿的 excess 序列可以
     # 只有浮点残差（实测 IR = 1.4e13）。退化腿或幅值超闸一律记 None。
     if _bench_degenerate or (ir is not None and abs(ir) > _SHARPE_GATE):
         ir = None
@@ -97,7 +97,7 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
 
 
 def _rolling_sharpe_gated(nav_rows: list[dict], window: int) -> list[dict]:
-    """滚动 Sharpe（**逐窗口**剔除退化值，R9-1）。
+    """滚动 Sharpe（**逐窗口**剔除退化值）。
 
     整序列标记抓不住"无成交前缀"：前 N 日只有计息时，落在那段里的滚动窗口仍是
     1e12 级浮点噪声，而整序列 Sharpe 正常（实测 392 条噪声窗口）。
@@ -132,7 +132,7 @@ def rolling_sharpe(nav_rows: list[dict], window: int = 126) -> list[dict]:
 def drawdown_durations(nav_rows: list[dict]) -> dict:
     """水下曲线的时长维度：最长水下天数 + 最大回撤的修复天数。
 
-    单位统一为**交易日**（loop-review R1-P3-6：NAV 序列的行本来就是交易日，
+    单位统一为**交易日**（NAV 序列的行本来就是交易日，
     修复天数此前按日历日 .days 计，与 max_underwater_days 单位不一致）。"""
     r = daily_returns(nav_rows)
     if r.empty:
@@ -184,7 +184,7 @@ def cost_drag(fills: list[dict]) -> dict:
     gross_pnl = sum(r["pnl_gross"] for r in rounds)
     return {
         "total_fees": total_fee,
-        # R4-P3-1：pnl_gross 本身就是费前毛利（pair_round_trips 的毛价差），
+        # pnl_gross 本身就是费前毛利（pair_round_trips 的毛价差），
         # 此前再加一遍 total_fee 使"费前毛利"系统性虚高
         "gross_pnl_before_fees": gross_pnl,
         "cost_to_gross": (total_fee / gross_pnl) if gross_pnl > 0 else None,
@@ -192,7 +192,7 @@ def cost_drag(fills: list[dict]) -> dict:
 
 
 def _fill_price(fill: dict) -> float:
-    """成交价：DB 路径键名 fill_price，回测器内存路径键名 price（R1-P3-1）。"""
+    """成交价：DB 路径键名 fill_price，回测器内存路径键名 price。"""
     value = fill.get("fill_price")
     return float(value if value is not None else fill.get("price") or 0.0)
 
@@ -208,7 +208,7 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
     fills 需带 ``side``（DB 路径由 EngineStore.load_fills 联 engine_orders
     补出；内存路径由回测器直接携带）。价格/数量键名两套形态都接受：
     DB 侧是 ``fill_price``/``quantity``，回测器内存侧是 ``price``/``qty``
-    （R1-P3-1：此前 docstring 声称内存路径可用，实际按 DB 键名取值 →
+    （此前 docstring 声称内存路径可用，实际按 DB 键名取值 →
     KeyError）。
     """
     rounds: list[dict] = []
@@ -295,7 +295,7 @@ def build_report(
         # turnover_total = **货币成交额**（与 evaluations/backtest.py、
         # head_to_head.py 同一口径：compute_summary 内部再除以平均权益得到
         # 换手率）；turnover_ratio 是已算好的比率，供阅读方直接用。
-        # loop-review-ds4f R1-P1-4：旧实现把已除过平均权益的**比率**当成交额
+        # 旧实现把已除过平均权益的**比率**当成交额
         # 传回 compute_summary，被再除一次 → summary.turnover 恒为真值的
         # 1/avg_equity（≈1e-6），即"假 0 换手"的第三次复发。
         "turnover_total": traded_total,
@@ -317,7 +317,7 @@ def _traded_amount(fills: list[dict]) -> float:
     """成交总额（|价×量| 求和）——compute_summary 的 turnover_total 入参口径。
 
     比率由 compute_summary 自己算（÷平均权益）；本函数**只**返回货币总额，
-    绝不预除权益（R1-P1-4 的教训）。
+    绝不预除权益（教训）。
     """
     return sum(abs(float(f["fill_price"]) * int(f["quantity"])) for f in fills)
 
@@ -327,7 +327,7 @@ def _slot_utilization(
 ) -> list[dict]:
     """逐日槽位占用（§5.4.3）。
 
-    日期轴以 nav_rows 为准、无持仓快照的日子记 0（R1-P3-2：此前直接由持仓
+    日期轴以 nav_rows 为准、无持仓快照的日子记 0（此前直接由持仓
     快照派生，空仓日整天缺行 → 报告里的利用率序列有缺齿，读图会以为"没有
     数据"而不是"空仓"）。
     """

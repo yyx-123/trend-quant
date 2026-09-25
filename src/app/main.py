@@ -81,7 +81,7 @@ def _ensure_builtin_admin(db) -> None:
                 _BUILTIN_ADMIN_USERNAME,
             )
     elif db_module.verify_password(user.get("password") or "", _BUILTIN_ADMIN_DEFAULT_PASSWORD):
-        # R5-P1-1（Round 5 复核）：存量部署的引导密码若从未更换，账号等于公开
+        # 存量部署的引导密码若从未更换，账号等于公开
         # ——启动即告警（不改行为：改密是运维动作，见最终报告待决策）
         logger.warning(
             "SECURITY: built-in admin '%s' still uses the built-in default password. "
@@ -220,7 +220,7 @@ async def lifespan(app: FastAPI):
     def _finish_daily_update(payload: dict) -> None:
         """日更成功后的 post-update 编排（除权检测 + 指标重建 + 看板预热）。
 
-        独立成函数（loop-review-ds4f R1-P2-13）：冻结顺延时的当日补跑哨兵
+        独立成函数：冻结顺延时的当日补跑哨兵
         同样需要走这一段——此前哨兵只调日更本体，顺延日的指标缓存整日缺失。
         """
         from core.calendar import market_now
@@ -258,7 +258,7 @@ async def lifespan(app: FastAPI):
         ):
             # 冻结顺延（决策 A3）：当日更被回测冻结推迟时，post-update pipeline
             # （除权检测 + 指标重建 = 写任务）同样不得抢跑。
-            # skipped_already_running（R1-P1-4）：另一触发源正在执行日更，
+            # skipped_already_running：另一触发源正在执行日更，
             # post-update 由那次执行完成，本触发不得叠加。
             # deferred 分支：补跑由当日哨兵承担，成功后调 after_update。
             return
@@ -327,7 +327,7 @@ async def lifespan(app: FastAPI):
 
     # 投研基建：research worker（有界并发池）随 app 启动；测试环境
     # （TREND_QUANT_DISABLE_SCHEDULER=1）不起后台线程。
-    # 降级保护（loop-review R1-P1-3）：worker 启动链上任一失败（坏草稿/
+    # 降级保护：worker 启动链上任一失败（坏草稿/
     # 库忙/磁盘满）只降级研究栈，不得穿出 lifespan 拖垮整个 app——存量
     # 业务（看板/回测/MCP）与本次新增代码共享启动路径。
     if not _background_tasks_disabled():
@@ -645,7 +645,7 @@ async def root_redirect() -> RedirectResponse:
 # 机对机通道：登录墙豁免（AuthWall 提前放行），由 McpBearerMiddleware 做
 # Bearer token 鉴权（TREND_MCP_TOKENS，token→用户映射）；写工具的用户身份
 # 完全来自 token 映射，不再以工具参数传密码。
-# ImportError 收窄（loop-review R1-P3-20）：只有可选依赖 `mcp` 缺席才静默
+# ImportError 收窄：只有可选依赖 `mcp` 缺席才静默
 # 跳过挂载；trend_mcp.server 内部链上的任何 ImportError（如 research_tools
 # 的坏导入）属于代码错误——移出 try，fail-fast 暴露，而不是被误报为
 # "MCP package not installed" 后 /mcp 整个静默消失。

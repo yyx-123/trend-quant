@@ -39,7 +39,7 @@ def insert_platform_verdict(
     if suggested_verdict not in ("confirmed", "rejected", "inconclusive"):
         raise LifecycleError(f"invalid suggested_verdict: {suggested_verdict}")
     exp = require_experiment(db, experiment_id)
-    # R3C-P3-8（Round 3 复核）：verdict 只能挂在**取证完成**的实验上。此前只有
+    # verdict 只能挂在**取证完成**的实验上。此前只有
     # 存在性检查，"status 不变式"靠两个调用方各自保证（第三个调用方即失守）。
     if str(exp.get("status") or "") not in ("evaluating", "verdicted"):
         raise LifecycleError(
@@ -81,7 +81,7 @@ def get_verdict(db, verdict_id: str) -> dict | None:
 
 
 def verdict_envelope(experiment: dict | None, verdict_row: dict | None) -> dict:
-    """"完整实验报告"的**单一组装真源**（R3C-P3-4）。
+    """"完整实验报告"的**单一组装真源**。
 
     路由下载与课题物化必须产出同一份内容：此前物化的 `report.json` 只写
     `latest["report"]`（只有 experiment_summary），而同名 HTTP 端点带
@@ -176,7 +176,7 @@ def confirm_verdict(
     reasoning = str(reasoning or "").strip()
     if not reasoning:
         raise LifecycleError("reasoning must be non-empty")
-    # R4A-P3-7：reasoning 是人工留痕，加长度上限（表单/接口层此前无任何限制）
+    # reasoning 是人工留痕，加长度上限（表单/接口层此前无任何限制）
     if len(reasoning) > 4000:
         raise LifecycleError("reasoning too long (max 4000 chars)")
 
@@ -188,7 +188,7 @@ def confirm_verdict(
         )
 
     with db.connect() as conn:
-        # R3C-P3-9（Round 3 复核）：落定必须是**行级原子认领**——入口的
+        # 落定必须是**行级原子认领**——入口的
         # `final_verdict is not None` 检查与实际写入之间有窗口，并发/双击 confirm
         # 时第二条会把 `reasoning`/`confirmed_by` 覆写成第二位的文字（库层触发器
         # 只拦"已定论值被改成不同值"，同值覆写不拦）。`AND final_verdict IS NULL`

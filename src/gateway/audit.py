@@ -58,7 +58,7 @@ class AuditBuffer:
     def flush(self) -> int:
         """把缓冲行写入 gateway_audit；**审计失败绝不影响取数**。
 
-        loop-review-ds4f R1-P3-22：此前 flush 失败会（a）把已取走的 rows 整批
+        此前 flush 失败会（a）把已取走的 rows 整批
         丢弃（缓冲被清空、无重试）、（b）异常沿 `record()` 的容量触发路径抛进
         取数热路径（一次 GET 面板因此失败）、（c）run 收尾的 flush_audit()
         把已完成的 run 弄炸——与本模块"异步不阻塞取数热路径"的声明相反。

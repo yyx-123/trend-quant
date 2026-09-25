@@ -80,7 +80,7 @@ def ensure_channel_session(
 ) -> dict:
     """按**指定 id** 保证一个通道会话存在（幂等）。
 
-    R4A-P3-5（Round 4 复核）：MCP 通道此前为了"按 token 派生的稳定会话 id"
+    MCP 通道此前为了"按 token 派生的稳定会话 id"
     **自己写库**（`INSERT OR IGNORE INTO research_sessions`），把上层策略
     （会话命名/归属）落在通道里、绕过服务面的 kind 白名单校验，与"薄通道厚服务"
     的分层声明矛盾。改为通道只调本函数。

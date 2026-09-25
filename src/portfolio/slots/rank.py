@@ -17,7 +17,7 @@ from portfolio.slots.signal import SignalEvent
 def _event_day(ctx, event: SignalEvent) -> int:
     """事件发生日到今天的天数（自然日；meta.event_date 或 event.date）。
 
-    口径（loop-review-ds4f R1-P3-7）：这里算的是**自然日**差，不是交易日差——
+    口径：这里算的是**自然日**差，不是交易日差——
     对固定 ctx.date 而言自然日距离与交易日距离同序（等自然日差 ⇒ 同日），
     且 §5.2.3 只要"事件发生后天数升序"，排序结果与设计一致；注释此前写成
     "交易日距离"，与实现不符，按实现如实声明。

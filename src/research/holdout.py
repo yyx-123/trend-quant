@@ -47,7 +47,7 @@ def set_enforced(db, enabled: bool) -> None:
 def parse_window_bound(value, *, what: str = "window") -> str | None:
     """把窗口端点规范化为 ``YYYY-MM-DD`` 字符串（失败即 HoldoutError）。
 
-    loop-review-ds4f R1-P1-2：窗口判定此前按**原始字符串**比字典序，而取数侧
+    窗口判定此前按**原始字符串**比字典序，而取数侧
     用 ``pd.Timestamp`` 解析同一字符串——`"01/01/2026"`（`'0' < '2'`）、
     `" 2026-01-01"`（`' ' < '2'`）都会被判成"未触碰 holdout"，同时 panel 却
     真取到了 holdout 段的数据，留痕也一并说谎。必须解析后比较，且**解析失败
@@ -95,14 +95,14 @@ def grant_token(
 ) -> dict:
     """发放 holdout 放行 token（仅 human session；+ 计数留痕）。
 
-    purpose 必须非空（R2A-P3-6 复核）：发放是治理动作，purpose 是它唯一的
+    purpose 必须非空：发放是治理动作，purpose 是它唯一的
     留痕内容——校验下沉到源头，覆盖 Web 路由 / service 面 / 未来任何通道。
     """
     session = require_human_session(db, session_id)
     purpose = str(purpose or "").strip()
     if not purpose:
         raise HoldoutError("holdout token purpose must be non-empty")
-    # R4A-P3-7（Round 4 复核）：表单字段此前无长度上限、experiment_id 也不校验
+    # 表单字段此前无长度上限、experiment_id 也不校验
     # 存在性——70k 字理由 / 200k 字 purpose / 指向不存在实验的 token 都能落库
     # （治理留痕指向空气 = 静默无效）。
     if len(purpose) > 200:

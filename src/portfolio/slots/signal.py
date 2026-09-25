@@ -44,12 +44,12 @@ def _field_df(panel, name: str) -> pd.DataFrame:
 def _filled_df(panel, name: str) -> pd.DataFrame:
     """列内前向填充的面板切片（停牌日沿用最近可得价）。
 
-    loop-review-ds4f R1-P2-1：停牌日面板为 NaN，而
+    停牌日面板为 NaN，而
     ``rolling(n, min_periods=n)`` 只计非 NaN 观测——NaN 行**及其后 n-1 行**
     都取不到指标值，窗口恢复的那一根 bar 会被 ``~prev_above & above``
     判成"新交叉" → 停牌后凭空多出一笔买入（实证：同价序列抽掉一根 bar，
     干净序列 0 笔、缺口序列多出一笔 20 个交易日后的买单）。与
-    ``backtester._precompute_atr`` 的 R1-P3-5 裁决同口径：先列内 ffill
+    ``backtester._precompute_atr`` 的 裁决同口径：先列内 ffill
     再算指标。MACD（ewm）不在此列——NaN 不会产生幻影交叉，且 ffill 会
     改变 EMA 递归权重。
     """

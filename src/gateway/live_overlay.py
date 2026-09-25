@@ -28,7 +28,7 @@ def default_live_overlay(db):
                 continue
             # 只为取上一根 bar 的 volume——此前 load_market_data 拉全量历史
             # （874 标的 × 10 年日K），每日 14:00 白耗 IO；改为窄窗口查询。
-            # 口径（R1-P3-4 + R1-P3-20 + ds4f-R1 复核）：
+            # 口径（ ds4f-R1 复核）：
             #   - 窗口放宽到 20 自然日：10 日不够跨长假（2023-10-09 前是 11 日
             #     缺口 → 取不到前 bar → 合成 bar volume=0）；
             #   - 上界取 as_of **前一日**：窗口上界是闭区间（"<= 23:59:59"），

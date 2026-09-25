@@ -6,7 +6,7 @@
 - 涨跌停价：**除权基准修正后**的前收盘价 × 板块幅度——
   基准价 = raw close(t-1)；若 t 是**除权除息日**（= ex_factors 存储日 E
   之后的**第一根该标的 bar**），基准价 = raw close(t-1) / f_t。
-  口径依据（loop-review-ds4f R1-P1-1 实证修正）：本项目因子语义为
+  口径依据（实证修正）：本项目因子语义为
   qfq(t) = raw(t) / Π_{ex_date≥t} f（core/adjustment.py），该语义要求
   「存储日 E 的前收 ÷ f = E+1 的价格」才是无断裂的复权序列——即 E 是
   权益登记日（除权前最后一根 bar），价格实际在 E+1 跳水。真实库
@@ -116,7 +116,7 @@ def compute_tradability(
     live_bars: {symbol: as_of 当日盘中价}——**仅**在 ``live_bar_day``（须落在
     请求的 dates 内）上并入，用于 live 模式：当日 EOD bar 尚未落库
     （16:30 才写），不并入会让当日 ``suspended=True``（loop-review-ds4f
-    R1-P2-10：14:00 实盘清单的所有标的都被标成"停牌"、涨跌停标记永不置位）。
+    14:00 实盘清单的所有标的都被标成"停牌"、涨跌停标记永不置位）。
     该参数只对 ``live_bar_day`` 生效，无法用于注入历史/未来任意日行情。
     """
     symbols = [str(s or "").strip().upper() for s in symbols if str(s or "").strip()]
@@ -144,7 +144,7 @@ def compute_tradability(
                     continue
                 key = str(_sym or "").strip().upper()
                 ser = raw_closes.get(key)
-                # **只在库里确实没有该日 bar 时**才并入（V1 复核实证：旧写法
+                # **只在库里确实没有该日 bar 时**才并入（实证：旧写法
                 # 会覆盖真实 bar——注入 10.01 即可把真实的 is_limit_up=True
                 # 翻成 False）。live 的用途本就是"EOD bar 尚未落库"，一旦
                 # 落库就该以库为准。
@@ -208,7 +208,7 @@ def compute_tradability(
         limit_pct = board_limit_pct(symbol, asset_type=asset_type, name=info.get("name"))
         listing = listing_dates.get(symbol)
         listing_day = pd.Timestamp(listing).date() if listing else None
-        # R4A-P2-2（Round 4 复核，P2）：上市日来源问题**未在本轮改行为**——
+        # 上市日来源问题**未在本轮改行为**——
         # `instrument_metadata.start_date` 是用户/导入写入的字段，其语义
         # （上市日 vs 回填起点）无法从代码判定，且生产库 874/874 行为 NULL
         # （= 新股无涨跌幅限制这条口径在生产库上当前**完全不生效**，属数据缺口
@@ -246,7 +246,7 @@ def compute_tradability(
         has_bar = np.isfinite(close_v)
         suspended = is_trading_arr & ~has_bar
 
-        # 除权基准修正（loop-review-ds4f R1-P1-1）：因子存储日 E 是**除权前**
+        # 除权基准修正：因子存储日 E 是**除权前**
         # 的最后一根 bar（权益登记日口径，与 core/adjustment.py 的
         # qfq(t)=raw(t)/Π_{ex_date≥t}f 语义自洽）——raw 价格实际在 E 之后的
         # **第一根该标的 bar**（除权除息日）跳水。交易所参考前收只在那一根
@@ -272,7 +272,7 @@ def compute_tradability(
                     if not np.isfinite(f) or f <= 0:
                         continue
                     # 第一根「日期严格晚于 E 且有 bar」的轴日 = 除权除息日。
-                    # **累乘**而非覆盖（V1 复核残留）：停牌跨越两个除权日时
+                    # **累乘**而非覆盖（残留）：停牌跨越两个除权日时
                     # 两个因子会落到同一根 bar 上，只取后者会让该日基准价
                     # 偏高、产出假跌停（002129.SZ 真实库有 1 例，差异 0.24%）。
                     k = int(np.searchsorted(bar_ord, ex_ord, side="right"))
@@ -311,7 +311,7 @@ def compute_tradability(
                     "limit_down_price": float(limit_down[i]) if np.isfinite(limit_down[i]) else None,
                     "is_limit_up": bool(is_limit_up[i]),
                     "is_limit_down": bool(is_limit_down[i]),
-                    # R4A-P2-2：上市日未知时"新股无涨跌幅限制"这条不生效——如实标注
+                    # 上市日未知时"新股无涨跌幅限制"这条不生效——如实标注
                     "listing_known": bool(listing_known),
                     "st_status": "unknown",  # 阶段 7 前无 ST 状态历史
                     "no_limit": bool(no_limit[i]),
@@ -338,7 +338,7 @@ def _empty_frame() -> pd.DataFrame:
         columns=[
             "date", "symbol", "suspended", "limit_up_price", "limit_down_price",
             "is_limit_up", "is_limit_down", "st_status", "no_limit",
-            # V10-ND-5：空帧的列集必须与非空帧一致（否则消费方按列取用会 KeyError）
+            # 空帧的列集必须与非空帧一致（否则消费方按列取用会 KeyError）
             "listing_known",
         ]
     )

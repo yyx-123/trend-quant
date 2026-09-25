@@ -105,7 +105,7 @@ def _validate_binding(
     if spec is None:
         errors.append(f"{slot}: module not registered: {module_ref}")
         return SlotBinding(module=None, params={})
-    # R3B-P2-1：meta 模块不再豁免跨槽检查——七槽均已注册各自的 any_of/all_of，
+    # meta 模块不再豁免跨槽检查——七槽均已注册各自的 any_of/all_of，
     # 引用错槽的 meta 在载入期正确拒绝（此前被 registry.get 兜底 spec 骗过）
     if spec.slot != slot:
         errors.append(f"{slot}: module {module_ref} belongs to slot {spec.slot}")
@@ -131,7 +131,7 @@ def _validate_binding(
             if sub_name in META_MODULES:
                 errors.append(f"{slot}: meta module {name} cannot nest {sub_name}")
                 continue
-            # R1-P3-7：成员参数同样在载入期过 schema——"非法配置载入即拒绝"
+            # 成员参数同样在载入期过 schema——"非法配置载入即拒绝"
             # （§5.3）此前对 members 弱化了一步（坏 atr_mul 到 run 启动实例化
             # 时才炸）。与 _MetaBase 工厂内的校验同构，只是前移到 parse。
             sub_spec = registry.get(sub_ref, slot=slot)

@@ -134,11 +134,11 @@ def _spawn_same_day_catchup(
     顺延到"下一次定时触发"意味着当日 EOD/除权检测/指标重建全停一天——
     改为挂一个 daemon 线程：解冻后立刻补跑一次（最长再等 2 小时，仍冻结
     则放弃，由次日 cron/启动补偿兜底）。幂等：单例判断在锁内完成
-    （loop-review R1-P1-4：check-then-act 竞态会让两个超时顺延源各起一个
+    （check-then-act 竞态会让两个超时顺延源各起一个
     哨兵）；补跑本体经 daily_market_update_job 的模块级单飞锁，与定时/
     启动补偿互斥（同评审：哨兵此前绕过 main.py 闭包内的 _update_job_lock）。
     """
-    # threading 用**模块级引用**（R3C-P3-2：函数体内 import 会让测试的
+    # threading 用**模块级引用**（函数体内 import 会让测试的
     # monkeypatch(jobs.threading) 永不生效 → 钉子实际起真线程并与断言竞态）
     global _catchup_sentinel
     with _catchup_spawn_lock:
@@ -148,7 +148,7 @@ def _spawn_same_day_catchup(
         def _watch() -> None:
             import time as _time
 
-            # 预算内的"等解冻 → 补跑"循环。必须循环而非一次性（V2 复核实证）：
+            # 预算内的"等解冻 → 补跑"循环。必须循环而非一次性（实证）：
             # 哨兵在解冻与日更的"检查再检查"之间可能被别的 run 重新冻结，此时
             # 日更会再次顺延——旧写法直接调 after_update，会在**数据还没落地**
             # 的情况下跑一次 pipeline（symbols=[] 的全池扫描），而当日 rebuild
@@ -163,7 +163,7 @@ def _spawn_same_day_catchup(
                     return
                 if market_now().date() != today:
                     return  # 跨日了，交给当日 cron/启动补偿
-                # 预算按**轮次**扣减（R2A-P3-4 复核：此前只在 sleep 时扣减，
+                # 预算按**轮次**扣减（此前只在 sleep 时扣减，
                 # 若作业返回 deferred 而冻结已解除，会变成不 sleep 的忙循环，
                 # 预算永不递减、线程不退出——实测 10 秒内 15532 次调用）。
                 remaining -= 60
@@ -183,11 +183,11 @@ def _spawn_same_day_catchup(
                     continue
                 if status in ("skipped_already_running", "skipped_non_trading_day"):
                     # 另一触发源正在/已经完成日更：pipeline 由那一侧负责，
-                    # 本哨兵不得叠加（V2 复核实证：旧写法会跑第二遍）
+                    # 本哨兵不得叠加（实证：旧写法会跑第二遍）
                     logger.info("same-day catchup: %s — pipeline owned by the other trigger", status)
                     return
                 # 补跑 = 数据 + post-update pipeline（除权检测 + 指标重建）。
-                # loop-review-ds4f R1-P2-13：pipeline 的编排在 app/main.py
+                # pipeline 的编排在 app/main.py
                 # （core 不得 import services），此前哨兵只调日更本体 → 顺延日
                 # 的 indicator_daily/trend_daily 整日缺失。回调由调用方注入。
                 if after_update is not None:
@@ -205,7 +205,7 @@ def _spawn_same_day_catchup(
 
 
 _catchup_sentinel = None
-# 日更单飞锁（loop-review R1-P1-4）：从 main.py 闭包下沉到模块级——
+# 日更单飞锁：从 main.py 闭包下沉到模块级——
 # 定时触发 / 启动补偿 / 冻结补跑哨兵三条路径共用，任何时刻至多一个
 # daily_market_update_job 在执行；占用者立即返回，不排队。
 _DAILY_UPDATE_LOCK = threading.Lock()
@@ -228,9 +228,9 @@ def daily_market_update_job(
 
     决策 A3（运行期数据冻结）：回测 run 执行期间冻结写任务——run 优先、
     日更等待（最长 30 分钟轮询解冻；超时则顺延到下一次定时触发）。
-    单飞（loop-review R1-P1-4）：模块级锁自守，与调用方（定时/补偿/哨兵）
+    单飞：模块级锁自守，与调用方（定时/补偿/哨兵）
     解耦——哨兵不再绕过 main.py 闭包内的私有锁。非交易日判断前移
-    （R1-P2-8）：节假日不必为永远轮不到的解冻白等 30 分钟。
+    节假日不必为永远轮不到的解冻白等 30 分钟。
     """
     if not _DAILY_UPDATE_LOCK.acquire(blocking=False):
         logger.info("Daily market data update already running; skipping duplicate trigger")
@@ -377,7 +377,7 @@ def live_daily_list_job(settings: Settings) -> dict:
     if not strategy_version_id:
         return {"status": "skipped_no_deployed_strategy"}
     try:
-        # R1-P3-23：配置解析此前在 try 之外——配置畸形（如非数字的
+        # 配置解析此前在 try 之外——配置畸形（如非数字的
         # live_initial_capital）会直接抛穿，job_runs 无任何留痕。
         user_id = int(db.get_config("portfolio.live_user_id", 1))
         initial_capital = float(db.get_config("portfolio.live_initial_capital", 1_000_000))

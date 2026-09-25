@@ -60,7 +60,7 @@ _ALLOWED_NODES = (
     ast.Name, ast.Load, ast.Constant,
     ast.And, ast.Or, ast.Not, ast.USub, ast.UAdd,
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod,
-    ast.BitAnd, ast.BitOr, ast.Invert,
+    ast.BitAnd, ast.BitOr,
     ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
 )
 

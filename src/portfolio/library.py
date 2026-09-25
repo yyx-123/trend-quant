@@ -95,7 +95,7 @@ def add_version(
     if strategy is None:
         raise LibraryError(f"strategy not registered: {strategy_id}")
     if strategy.get("retired_at"):
-        # R3B-P3-6：退役策略线显式拒绝新写入（软删除语义=不再生长；
+        # 退役策略线显式拒绝新写入（软删除语义=不再生长；
         # 已有版本不受影响，仍可被实验引用与回测）
         raise LibraryError(
             f"strategy line {strategy_id} is retired; new versions are rejected"
@@ -113,12 +113,12 @@ def add_version(
                 f"config hash collides with another strategy line: "
                 f"{existing['id']} vs new {strategy_id}"
             )
-        # R3C-P2-1（Round 3 复核）：同 config_hash 复用既有版本行时，若那份行
+        # 同 config_hash 复用既有版本行时，若那份行
         # 已带有**另一个**实验的血缘，静默复用会丢掉本次实验的血缘（调用方仍
         # 收 ok:True）——"入库是唯一的门、必须完整实验血缘"（决策 8）被绕过。
         existing_exp = existing.get("experiment_id")
         if experiment_id and existing_exp != experiment_id:
-            # ND-5（V7 复核）：既有行**没有**血缘（如种子版本）时静默复用同样
+            # 既有行**没有**血缘（如种子版本）时静默复用同样
             # 会让本次晋升的实验血缘消失——同样 fail-loud。
             origin = (
                 f"experiment {existing_exp}" if existing_exp

@@ -80,7 +80,7 @@ def propose_module(
                     reject_reason = json.dumps(report["checks"], ensure_ascii=False)[:500]
             except Exception as exc:
                 status = "rejected"
-                # R1-P3-19：对外只给业务原因（异常细节只进日志）——装载/门的
+                # 对外只给业务原因（异常细节只进日志）——装载/门的
                 # 内部异常可能含本机路径与栈内细节，与 _error_payload 的口径
                 # 保持一致（detail 由 reject_reason 暴露给 MCP 客户端）。
                 import logging
@@ -153,7 +153,7 @@ _DENIED_ATTR_NAMES = frozenset({
     "to_csv", "to_pickle", "to_sql", "read_csv", "read_pickle", "read_sql",
     # 注：刻意**不**收录 remove/write/load/loads/dump/dumps/code/cmd/platform
     # 这类泛用名——它们会误杀合法模块（`out.remove(x)`、`f.write`、
-    # `np.load` 之外的同名方法），V2 复核指出黑名单不宜过宽。
+    # `np.load` 之外的同名方法），指出黑名单不宜过宽。
 })
 
 
@@ -196,7 +196,7 @@ def _prescreen_python_source(source: str) -> list[str]:
                     "(dangerous module attribute chain)"
                 )
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            # R2-P3-5：真逃逸向量是 "{0.__class__}".format(x)——dunder 藏在
+            # 真逃逸向量是 "{0.__class__}".format(x)——dunder 藏在
             # 字符串常量里（f-string 内表达式反而会被上面的 Attribute 扫描
             # 抓住）。对字符串常量做 ".__" 记号预筛：正常研究表达式不需要
             # 在字符串字面量里引用属性逃逸形。
@@ -273,7 +273,7 @@ def list_drafts(db, status: str | None = None) -> list[dict]:
 def retire_module(db, *, draft_id: str, session_id: str) -> dict:
     """下架（仅 human；只禁止新引用，不影响已完成实验的记录）。
 
-    R1-P3-13：除库行改态外，**同步从进程内注册表摘除**——否则被下架的模块
+    除库行改态外，**同步从进程内注册表摘除**——否则被下架的模块
     在重启前仍能被新实验引用（引用合法性判定读的是注册表、不是库行），
     "下架只禁止新引用"名不副实。
     """
@@ -334,7 +334,7 @@ def load_reviewed_modules(db, registry) -> int:
             )
             continue
         try:
-            # replace=True（R3B-P3-11）：与内置/已装载模块撞 name@version 时
+            # replace=True：与内置/已装载模块撞 name@version 时
             # 幂等覆盖（同草稿重装载），而不是 ModuleRegistrationError 打穿
             # 装载循环；replace=True 保留——reviewed 草稿的注册即最新评审态
             registry.register(ModuleSpec(

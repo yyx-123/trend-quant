@@ -118,7 +118,7 @@ class ModuleRegistry:
     def unregister(self, ref: str, *, slot: str | None = None) -> bool:
         """按 ref 摘除注册项（模块下架用；返回是否真的摘掉）。
 
-        R1-P3-13：`retire_module` 此前只改库行，进程内注册表纹丝不动——被下架
+        `retire_module` 此前只改库行，进程内注册表纹丝不动——被下架
         的模块在**重启前**仍可被新实验引用，与"下架只禁止新引用"的宣称不符。
         """
         name, version = parse_module_ref(ref)
@@ -177,7 +177,7 @@ def validate_params(schema: dict[str, dict], params: dict | None) -> tuple[dict,
         ptype = rule.get("type", "number")
         try:
             if ptype in ("number", "integer"):
-                # R3B-P3-3：布尔是 int 子类——True 会被静默当 1.0（如
+                # 布尔是 int 子类——True 会被静默当 1.0（如
                 # risk_budget_pct: true → 100% 风险预算），必须显式拒绝
                 if isinstance(value, bool):
                     raise TypeError("boolean not allowed for numeric param")
@@ -186,13 +186,13 @@ def validate_params(schema: dict[str, dict], params: dict | None) -> tuple[dict,
                 else:
                     f = float(value)
                     if not f.is_integer():
-                        # R3B-P3-3：integer 参数不接受非整值 float（12.7 静默
+                        # integer 参数不接受非整值 float（12.7 静默
                         # 截断成 12 是语义改变）
                         raise ValueError(f"non-integral value for integer param: {value!r}")
                     value = int(f)
             elif ptype == "boolean":
                 if isinstance(value, str):
-                    # R3B-P2-2：字符串只接受两个真值集合——"bogus"/"" 此前
+                    # 字符串只接受两个真值集合——"bogus"/"" 此前
                     # 静默归 False，笔误会无声改变策略语义（如 use_exit）
                     v = value.strip().lower()
                     if v in ("1", "true", "yes", "on"):

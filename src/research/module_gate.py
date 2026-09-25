@@ -148,7 +148,7 @@ def _probe(slot: str, instance, ctx):
         # estimate_stop 也在协议里，且**直接进 sizing**（backtester.py:497
         # 把它喂给 sizing_mod.size 换算风险预算→股数）——不探针它，一个
         # "init_stop/evaluate 因果、estimate_stop 偷看未来"的模块能自动过门
-        # 变 reviewed（loop-review-ds4f R1-P2-3 实证）。与前缀稳定性探针一起
+        # 变 reviewed（实证）。与前缀稳定性探针一起
         # 取值，任何对未来数据的依赖都会让截断前缀的输出发生变化。
         est = instance.estimate_stop(ctx, ctx.panel.symbols[0])
         return (
@@ -212,7 +212,7 @@ def _instantiate(factory, params: dict, panel):
 def _safe_error(exc: Exception) -> str:
     """归因失败的对外文案：只给异常类型 + 一句业务说明。
 
-    loop-review-ds4f R1-P3-19（V1 复核收口）：门的 `checks[*]["error"]` 会被
+    门的 `checks[*]["error"]` 会被
     `modules.submit_module_draft` 原样写进 `reject_reason` 并回给 MCP 客户端，
     而 `str(exc)` 可能含本机路径/栈内细节。细节只进日志。
     """
@@ -255,7 +255,7 @@ def run_module_gate(factory, *, slot: str, params: dict | None = None) -> dict:
         return {"passed": False, "checks": checks}
 
     # 3. 前缀稳定性：截断到 cut 与全量分别 prepare，≤cut 的探测输出一致。
-    #    口径如实声明（R1-P3-14）：单切点（cut=70/140）探针 + 1e-9 量化容差
+    #    口径如实声明：单切点（cut=70/140）探针 + 1e-9 量化容差
     #    ——不是数学意义的"位级一致"；小于 1e-9 的泄漏与多切点泄漏需靠
     #    golden 值测试 + 人抽检兜底（详设 §6.2.2 的分层防线）
     try:

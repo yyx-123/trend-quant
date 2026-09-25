@@ -51,7 +51,7 @@ def rebuild_account_from_manual_trades(
     持仓止损状态按模块公式用面板数据重建（highest_since_buy 取买入以来
     最高、ATR 取买入日含当根——与回测口径一致的可重建部分全部重建）。
 
-    同标的多次 open（存量 manual_trades 允许，loop-review R1-P2-1）：
+    同标的多次 open（存量 manual_trades 允许）：
     按 symbol 聚合——qty 求和、加权成本、entry_date 取最早——不得静默
     覆盖（旧实现现金扣了 N 笔成本、持仓只剩最后一笔，权益/heat/止损
     全部失真且被覆盖仓位失管）。
@@ -66,7 +66,7 @@ def rebuild_account_from_manual_trades(
         cash += float(t["sell_price"] or 0.0) * float(t["shares"])  # 卖出总额
         cash -= float(t["buy_price"]) * float(t["shares"])           # 对应买入成本
 
-    # 同标的聚合（R1-P2-1）
+    # 同标的聚合
     agg: dict[str, dict] = {}
     for t in open_trades:
         symbol = str(t["symbol"]).upper()
@@ -140,7 +140,7 @@ def _rebuild_stop_state(module, panel, symbol: str, buy_date: date, entry_price:
     period = int(getattr(module, "atr_period", 20) or 20)
 
     def _atr_through(row_end: int) -> float:
-        # close 列内前向填充（loop-review R1-P3-5 同口径）：复牌日 TR 含
+        # close 列内前向填充（同口径）：复牌日 TR 含
         # 跨停牌跳空——与回测侧 _precompute_atr 一致；连续序列结果不变。
         closes = panel.data["close"][: row_end + 1, col]
         closes_ffill = pd.Series(closes).ffill().to_numpy(dtype=float)
@@ -188,7 +188,7 @@ def _rebuild_stop_state(module, panel, symbol: str, buy_date: date, entry_price:
         return StopState(stop_price=ma, highest_since_buy=highest, atr_at_entry=atr_entry,
                          fill_mode="tail", heat_approximate=True)
     if key.startswith("any_of"):
-        # 组合止损重建（loop-review R1-P2-2）：any_of = 任一子模块触发即生效
+        # 组合止损重建：any_of = 任一子模块触发即生效
         # （§5.2.8 默认语义），等价于取各成员止损价的 max。成员实例在
         # _MetaBase._subs；子模块自身无法拿到 symbol 级上下文，这里按成员
         # 类型逐个重建其 stop_price（不认识/重建不出的成员忽略并在
@@ -335,7 +335,7 @@ def generate_daily_list(
     # 当日可交易性：as_of 当日的 EOD bar 要等 16:30 才落库，故把面板里的
     # 盘中合成 bar（provisional 行）并入推导——否则当日每个标的都因
     # has_bar=False 被判 suspended=True，涨跌停标记永不置位
-    # （loop-review-ds4f R1-P2-10：14:00 清单的 tradability 列全是"停牌"）。
+    # （14:00 清单的 tradability 列全是"停牌"）。
     _live_day = panel.dates[t_idx]
     _live_bars: dict[str, float] = {}
     if panel.provisional is not None:
@@ -349,7 +349,7 @@ def generate_daily_list(
                                 as_of=as_of, caller_layer="live",
                                 live_bars=_live_bars or None)
     )
-    # 整手单位（loop-review R1-P1-5）：quantity 意图（equal_risk 产任意浮点
+    # 整手单位：quantity 意图（equal_risk 产任意浮点
     # 股数）同样必须整手对齐——回测引擎在 matcher 内做，清单路径此前只
     # int() 截断，产出 16259 这类不可执行数量。
     from engine.profiles import get_profile as _get_profile
@@ -364,7 +364,7 @@ def generate_daily_list(
         sell_list.append({
             "symbol": intent.symbol,
             "qty": int(pos.quantity) if pos else None,
-            # T+1（R1-P3-19）：当日买入 sellable=0，触发的止损卖出当日不可执行
+            # T+1：当日买入 sellable=0，触发的止损卖出当日不可执行
             # （引擎侧会记 t1_block）——清单显式标注，人工执行不再猜。
             "sellable_qty": sellable,
             "executable": bool(sellable > 0),
@@ -406,7 +406,7 @@ def generate_daily_list(
         "caveats": [
             *freshness_caveats,
             *_live_caveats(config),
-            # R1-P2-2：组合止损重建不全（如 any_of 含 time_stop/breakeven 等
+            # 组合止损重建不全（如 any_of 含 time_stop/breakeven 等
             # 无止损价成员）时，heat/heat_cap 语义受限必须显式可见
             *_unrebuildable_stop_caveats(account),
         ],
@@ -553,7 +553,7 @@ def _live_caveats(config) -> list[str]:
 
 
 def _unrebuildable_stop_caveats(account: Account) -> list[str]:
-    """持仓止损状态重建不全（R1-P2-2）：any_of 中含无法重建出止损价的成员、
+    """持仓止损状态重建不全：any_of 中含无法重建出止损价的成员、
     或模块本身按设计无止损价——组合热与 heat_cap 的可用性受限，须标注。"""
     caveats: list[str] = []
     for symbol, pos in account.positions.items():

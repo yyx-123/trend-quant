@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS engine_runs (
     error TEXT
 );
 
--- engine_runs 白名单守卫（loop-review R3B-P3-10）：resolved_config_yaml 是
+-- engine_runs 白名单守卫：resolved_config_yaml 是
 -- §5.6 可复现性的落库锚点，与 research 栈证据表同制——内容字段禁改，
 -- 可改仅 status/finished_at/error（finish_run/lifecycle 收口所需）。
 -- DROP+CREATE 使定义修订传播到存量库（同 is_reproduction 整改注记）。
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS engine_daily_nav (
 
 
 -- ===== L3 组合策略层（详设 §5.3/§5.5） =====
--- engine 子证据表守卫（R3C-P3-6，Round 3 复核）：判定所依赖的逐笔成交/净值/
+-- engine 子证据表守卫：判定所依赖的逐笔成交/净值/
 -- 持仓此前**完全不受 append-only 保护**（`UPDATE engine_daily_nav SET equity=...`
 -- 与 `DELETE FROM engine_fills` 都被允许），与 engine_runs 同制补上：
 -- 内容字段禁改（UPDATE 一律拒），行一律禁删。启用需要重写子表列的场景由
@@ -431,7 +431,7 @@ CREATE TABLE IF NOT EXISTS module_drafts (
 -- ===== append-only 触发器（列白名单制；设计：详设 §6.7） =====
 -- experiments：内容字段禁改；可改 = status/reject_reason/archived/holdout_touched/
 --              started_at/finished_at/error/topic_id（append_experiment_to_topic）
--- 注意（R1-P2-7）：守卫触发器定义若有修订，必须 DROP IF EXISTS + CREATE——
+-- 注意：守卫触发器定义若有修订，必须 DROP IF EXISTS + CREATE——
 -- SQLite 的 CREATE TRIGGER IF NOT EXISTS 不会把新定义传播到已存在同名触发器
 -- 的存量库。is_reproduction（仅 INSERT 写入的复现标记，直改它会增减研究线
 -- 尝试计数 = 篡改 DSR 输入）由此并入白名单守卫。
@@ -1171,7 +1171,7 @@ class Database:
                 "idx_market_data_raw_symbol_time",
                 "idx_market_data_qfq_symbol_time",
                 "idx_ex_factors_symbol_time",
-                # R3C-P3-7（Round 3 复核）：engine 子表上两个与 UNIQUE 约束
+                # engine 子表上两个与 UNIQUE 约束
                 # 完全同列的冗余索引——持仓快照是引擎最大子表（满仓 800 标的
                 # ×1250 日 ≈ 百万行），白放大每次写入。
                 "idx_engine_positions_run",

@@ -47,7 +47,7 @@ def require_open_topic(db, topic_id: str) -> dict:
     if topic is None:
         raise TopicError(f"topic not found: {topic_id}")
     if topic["status"] != "open":
-        # R3C-P2-4：错误文案必须可行动——已关课题既不能再挂新实验，也不能
+        # 错误文案必须可行动——已关课题既不能再挂新实验，也不能
         # rerun（rerun 会走本检查）。平台当前**没有**"关题后重跑同 spec"的
         # 合法通路（新题重提会被重复检测硬拒、append 只对 queued）；需要复现时
         # 建新课题并在 hypothesis 里显式声明为复现（该能力缺口见 R1-D/R3-D 待决策）。
@@ -141,7 +141,7 @@ def conclude_topic(
 
     import json
 
-    # R2-P3-1：结论落定带状态守卫（rowcount）——检查与落定之间的窗口里
+    # 结论落定带状态守卫（rowcount）——检查与落定之间的窗口里
     # 并发挂入在途实验/并发双 conclude 时，第二个写者 rowcount==0 被拒，
     # 不会出现"已 conclude 课题带 queued 实验"或结论被覆盖。
     with db.connect() as conn:

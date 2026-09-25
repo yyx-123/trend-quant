@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 def _readonly(arr: np.ndarray) -> np.ndarray:
     """把面板切片标为只读（不拷贝，零开销）。
 
-    口径如实（R1-P3-9 + V1 复核）：`writeable=False` 的视图拒绝**直接**赋值，
+    口径如实：`writeable=False` 的视图拒绝**直接**赋值，
     挡住"顺手改一行"这类事故；但它不是安全边界——`arr.base` 仍是可写的父数组，
     刻意绕过依然可以。真正的边界是"内置件不写面板"的代码纪律 + 面板不被视为
     可变对象。"""
@@ -69,7 +69,7 @@ class PanelView:
     def series(self, symbol: str, field_name: str) -> np.ndarray:
         """某标的截至当日的字段序列（含当日，因果无未来）。
 
-        R1-P3-9：返回**只读**视图（不拷贝，零开销）——面板是全体模块共享的
+        返回**只读**视图（不拷贝，零开销）——面板是全体模块共享的
         数据面，此前返回可写切片意味着任一模块可以静默改写后续所有日子看到的
         行情（无告警、无留痕）。
         """
@@ -93,7 +93,7 @@ class PanelView:
         return float(v) if np.isfinite(v) else None
 
     def lookback(self, symbol: str, field_name: str, n: int) -> np.ndarray:
-        """最近 n 根（含当日）。n<=0 返回空数组（R1-P3-9：`[-0:]` 是整条序列）。"""
+        """最近 n 根（含当日）。n<=0 返回空数组（`[-0:]` 是整条序列）。"""
         if n <= 0:
             return np.empty(0)
         return self.series(symbol, field_name)[-n:]
@@ -108,7 +108,7 @@ class PanelView:
     def date_at(self, idx: int):
         """按全面板行下标取日期（事件日回查的合法公开入口）。
 
-        钳制到 upto（loop-review R1-P3-22）：越界下标不得探测未来日期——
+        钳制到 upto：越界下标不得探测未来日期——
         返回值 clamp 到当前日（越界 = 当日），不给模块任何日历前视。"""
         if idx > self._upto:
             idx = self._upto
@@ -128,7 +128,7 @@ class AccountView:
 
     @property
     def positions(self):
-        # R4B-2：只读视图契约——返回 Mapping 代理，模块 .clear()/乱插
+        # 只读视图契约——返回 Mapping 代理，模块 .clear()/乱插
         # Position 直改引擎账户的路径被 TypeError 掐断（读用法不受影响）
         from types import MappingProxyType
 
@@ -144,7 +144,7 @@ class AccountView:
         return self._account.positions_value(self.close_prices)
 
     def unstopped_symbols(self) -> list[str]:
-        """无止损价的持仓清单（heat None 时的归因入口；R1-P3-1）。"""
+        """无止损价的持仓清单（heat None 时的归因入口）。"""
         return self._account.unstopped_symbols()
 
 

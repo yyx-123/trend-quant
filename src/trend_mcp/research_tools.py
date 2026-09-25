@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - 测试环境无 mcp 包
     Context = None
 
 # 业务错误类（可把 str(exc) 透给 AI 客户端——错误文案面向使用者写成）；
-# 其余异常属内部错误，只记日志、回笼统文案（R2-P3-3：不把 sqlite/路径等
+# 其余异常属内部错误，只记日志、回笼统文案（不把 sqlite/路径等
 # 内部细节泄给客户端，也不把"沙箱违规"与"服务器 bug"混为一谈）。
 from research.errors import IntakeRejected, ResearchError
 
@@ -37,7 +37,7 @@ def _error_payload(exc: Exception) -> dict:
                 "experiment_id": getattr(exc, "experiment_id", None)}
     if isinstance(exc, ResearchError):
         return {"ok": False, "error": str(exc)}
-    # ND-6（V7 复核）：库/服务层的业务异常（LibraryError / ServiceError 等
+    # 库/服务层的业务异常（LibraryError / ServiceError 等
     # ValueError 家族）此前落进"internal error"分支——业务原因被吞，模型看不
     # 到可读解释。这里把它们与 ResearchError 同口径暴露。
     try:
@@ -78,7 +78,7 @@ def _service():
 
 
 def _ai_session(db, ctx=None):
-    """AI 会话归属（R2-P3-4）：多 token（TREND_MCP_TOKENS 的 tokenA=用户A）
+    """AI 会话归属：多 token（TREND_MCP_TOKENS 的 tokenA=用户A）
     部署下按 mcp_user 派生独立会话（ai-mcp-<user>），台账可区分是哪个
     token 用户的研究操作；单 token / 无请求上下文时回退共享默认会话。"""
     from research.sessions import ensure_channel_session, get_or_create_ai_session
@@ -93,7 +93,7 @@ def _ai_session(db, ctx=None):
             username = None
     if not username:
         return get_or_create_ai_session(db, channel="mcp")
-    # R4A-P3-5：通道不写库——会话命名/归属策略在服务面（"薄通道厚服务"）
+    # 通道不写库——会话命名/归属策略在服务面（"薄通道厚服务"）
     return ensure_channel_session(
         db,
         session_id=f"ai-mcp-{str(username)}",
@@ -185,7 +185,7 @@ def register_research_tools(mcp) -> None:
         except Exception as exc:
             return _error_payload(exc)
         if detail is None:
-            # R3C-P3-10：与同族工具统一错误口径（此前缺 error 字段，客户端/
+            # 与同族工具统一错误口径（此前缺 error 字段，客户端/
             # 模型无法区分"不存在"与内部错误）
             return {"ok": False, "error": f"experiment not found: {experiment_id}",
                     "experiment": None}

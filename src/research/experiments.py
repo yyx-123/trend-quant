@@ -77,12 +77,12 @@ def _coerce_scalar(v):
     return v
 
 
-# runner 侧以 `x or default` 取值的字段：falsy 值等价于省略（V8 复核残留）
+# runner 侧以 `x or default` 取值的字段：falsy 值等价于省略（残留）
 _FALSY_AS_DEFAULT = frozenset({"n_folds", "window_mode", "buckets"})
 
 
 def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
-    """把"省略 = 平台缺省值"的字段展开成显式值（loop-review R1-P2-3）。
+    """把"省略 = 平台缺省值"的字段展开成显式值。
 
     重复检测的逃逸通道：跑过 `window=[2015-01-01, 2024-12-31]` 的实验，
     重提一个**不带 window 键**的同 diff 实验——键集不同被判"另一个实验"
@@ -102,7 +102,7 @@ def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
         expanded["window"] = [DEFAULT_SAMPLE_START, DEFAULT_SAMPLE_END]
     if "universe" in known and expanded.get("universe") in (None, "liquidity_default"):
         expanded["universe"] = "liquidity_default"
-    # R3C-P2-2（Round 3 复核）：只展开 window/universe 不够——**显式写出**其余
+    # 只展开 window/universe 不够——**显式写出**其余
     # 平台缺省值（`initial_capital: 1000000`、`window_mode: "static_holdout"`、
     # `n_folds: 4`、`expect: "positive"`…）解析出的 run 与省略它们**逐值相同**，
     # 却因键集不同被判"另一个实验"（exact 不命中、similar 直接 return False）
@@ -112,17 +112,17 @@ def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
     for key, default in _MODULE_SPEC_DEFAULTS.get(module_key, {}).items():
         if key not in known:
             continue
-        # **缺键或 None 都取平台缺省**——这正是"省略 ≡ 显式缺省"的归一（R3C-P2-2）。
-        # V8 复核残留：runner 侧用 `spec.get(k, d) or d` 的字段（falsy 也落缺省）
+        # **缺键或 None 都取平台缺省**——这正是"省略 ≡ 显式缺省"的归一。
+        # 残留：runner 侧用 `spec.get(k, d) or d` 的字段（falsy 也落缺省）
         # ——`n_folds: 0` / `window_mode: ""` / `buckets: 0` 与省略等价，同样归一。
         current = expanded.get(key)
         if current is None or (key in _FALSY_AS_DEFAULT and not current):
             expanded[key] = default() if callable(default) else default
-    # runner 侧 `primary_horizon` 的缺省不是常量而是 `horizons[0]`（ND-3：
+    # runner 侧 `primary_horizon` 的缺省不是常量而是 `horizons[0]`
     # 显式写出该值必须与省略等价）
     # 只对**声明并真正消费** primary_horizon 的模块现算（V8 反证：给
     # bucket_analysis 注入未声明字段会让其键集与省略形态不同 → 同 subject_key
-    # 的第二个分桶实验被判 similar_to，整类实验被误杀；V9 复核 R4：backtest
+    # 的第二个分桶实验被判 similar_to，整类实验被误杀；R4：backtest
     # 虽登记了该字段但 runner 不消费，同样不现算）。
     if module_key == "event_study" and expanded.get("primary_horizon") is None:
         horizons = expanded.get("horizons")
@@ -148,7 +148,7 @@ def _module_spec_defaults() -> dict[str, dict]:
             "window_mode": "static_holdout",
             "n_folds": 4,
             "initial_capital": 1_000_000,
-            # ND-3（V7 复核补全）：以下均为**声明字段**，显式写出"不改变行为的
+            # 以下均为**声明字段**，显式写出"不改变行为的
             # 值"此前会让键集不同而绕过重复检测（静默杠杆）
             "expect": "positive",
             "mc_bands": True,
@@ -275,7 +275,7 @@ def find_duplicates(
     """
     from research.ledger import loads
 
-    # R1-P2-3：两侧先展开平台缺省（window/universe）——"省略键 = 用同一
+    # 两侧先展开平台缺省（window/universe）——"省略键 = 用同一
     # 缺省"必须与显式写缺省判定一致，否则缺省即逃逸通道
     spec = _expand_platform_defaults(spec or {}, evaluation_module)
     target_sig = _canonical_spec(spec)
@@ -307,7 +307,7 @@ _ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def validate_window_spec(window) -> list[str]:
-    """window 字段的入口校验（loop-review-ds4f R1-P1-2）。
+    """window 字段的入口校验。
 
     `window` 是**平台级**骨架字段（各评估模块共用），必须在入口统一卡形状，
     不能指望各模块的 `_spec_errors`——面板型三模块（event_study /
@@ -394,7 +394,7 @@ def propose_experiment(
         except Exception as exc:  # 模块 schema 自身的错误也视为不合法 spec
             reasons.append(f"spec validation failed: {exc}")
 
-    # 骨架 3.5：window 形状与格式（loop-review-ds4f R1-P1-2）——平台级字段
+    # 骨架 3.5：window 形状与格式——平台级字段
     # 统一卡口，见 validate_window_spec 的说明。
     if isinstance(spec, dict) and "window" in spec:
         reasons.extend(validate_window_spec(spec.get("window")))
@@ -493,7 +493,7 @@ def rerun_experiment(db, *, experiment_id: str, session_id: str) -> dict:
         raise LifecycleError(
             f"only terminal experiments can be rerun (status={original['status']})"
         )
-    # R2-P3-2：复现挂原课题——课题必须仍 open（"关题不带在途实验"不变式
+    # 复现挂原课题——课题必须仍 open（"关题不带在途实验"不变式
     # §6.4.1）。propose/append 都被 require_open_topic 挡住，rerun 是唯一
     # 缺口；已关课题的复现请先新建课题（append_experiment_to_topic 迁移）。
     from research.topics import require_open_topic

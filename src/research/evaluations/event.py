@@ -93,7 +93,7 @@ def _spec_errors(spec: dict, ctx: dict) -> list[str]:
         errors.append("spec.horizons must be a non-empty list")
     elif any(int(h) <= 0 for h in horizons):
         errors.append("spec.horizons must be positive ints")
-    # primary_horizon ∈ horizons（R1-P3-8）：写错时 runner 静默取空 dict
+    # primary_horizon ∈ horizons：写错时 runner 静默取空 dict
     # → 判定永远 inconclusive 的"假 inconclusive"必须在入口拦住
     primary = spec.get("primary_horizon")
     if primary is not None and horizons and int(primary) not in [int(h) for h in horizons]:
@@ -136,7 +136,7 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
     transition_matrix = bool(spec.get("transition_matrix", False))
 
     windows = holdout.get_windows(db)
-    # `or` 形（R1-P3-8）：spec.window 显式为 null 时 .get(key, default) 仍取
+    # `or` 形：spec.window 显式为 null 时 .get(key, default) 仍取
     # None → None[0] TypeError 转 failed；统一为与 backtest/bucket 同写法
     window = spec.get("window") or [windows["sample_start"], windows["sample_end"]]
     start, end = str(window[0]), str(window[1])
@@ -331,7 +331,7 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
             vals = np.array([matrix_full[t, c] for k, (t, c) in enumerate(events) if k in sel])
             vals = vals[np.isfinite(vals)]
             base = baseline.get(primary_h, {})
-            # regime 匹配基线（R1-P3-14）：对照必须取**同 regime 日**的无条件
+            # regime 匹配基线：对照必须取**同 regime 日**的无条件
             # 均值，否则该 regime 自身的漂移会被记成事件效应（实证：全局基线
             # 0.00344 vs regime 匹配 0.00449 → delta_mean 差 30%，regime 平均
             # 收益与全局反向时符号都会翻）。全局口径同时保留供阅读对照。
@@ -358,7 +358,7 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
 
     # 警告
     regimes_in_events = {labels[t] for t, _c in events} if events else set()
-    # 重叠率/日集中度与 bucket_analysis 共用同一实现（R1-P2-12 收口）
+    # 重叠率/日集中度与 bucket_analysis 共用同一实现（收口）
     overlap_ratio, top_share = overlap_and_cluster_stats(
         events, max_h=max_h, event_days=event_days
     )

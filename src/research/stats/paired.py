@@ -38,7 +38,7 @@ def paired_sharpe_comparison(
     """
     ra = np.asarray(rets_exp, dtype=float)
     rb = np.asarray(rets_base, dtype=float)
-    # R1-P3-12：长度不等时按尾部位置对齐是静默错配（日期错开时差序列
+    # 长度不等时按尾部位置对齐是静默错配（日期错开时差序列
     # 全错）。调用方必须先按日期交集 join（backtest.py 的既有做法）——
     # 在此显式拒绝错位输入，而不是吞掉。
     if len(ra) != len(rb):

@@ -89,7 +89,7 @@ def annualized_sharpe(nav_rows) -> float | None:
 # 注意：**不含 calmar**——`annual_return/|maxDD|` 在低回撤/短窗口上可以合法地
 # 超过闸门（实测一个正常序列 calmar=52.8），把它纳入会误杀诚实策略。
 # sortino 必须纳入：它的分母是负收益子集 std，与 Sharpe 的分母不同源，噪声
-# 形态可以只出现在它上面（R10-F1 实证 1.4e14 落库）。
+# 形态可以只出现在它上面（实证 1.4e14 落库）。
 _RATIO_METRIC_KEYS = ("sharpe", "sortino")
 
 

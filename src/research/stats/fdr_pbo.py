@@ -13,6 +13,9 @@ from math import comb
 
 import numpy as np
 
+# 退化闸门的单一真源（本模块的逐块日频 Sharpe 先年化再比该阈值）
+from rule_backtest.metrics import DEGENERATE_SHARPE_ABS_LIMIT
+
 
 def bh_fdr(pvalues, q: float = 0.05) -> list[dict]:
     """Benjamini-Hochberg。返回 [{"p", "rank", "threshold", "significant"}]。
@@ -28,7 +31,7 @@ def bh_fdr(pvalues, q: float = 0.05) -> list[dict]:
     adjusted = np.empty(m)
     running = 1.0
     for i in range(m - 1, -1, -1):
-        running = min(running, min(1.0, sorted_p[i] * m / (i + 1)))  # R1-P3-16：显式封顶 1.0
+        running = min(running, min(1.0, sorted_p[i] * m / (i + 1)))  # 显式封顶 1.0
         adjusted[i] = running
     out = [None] * m
     for rank, idx in enumerate(order, start=1):
@@ -46,7 +49,7 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
     """CSCV PBO。returns_matrix: (T, N)——T 期收益 × N 个策略变体。
 
     返回 {pbo, n_combinations, lambda_median}。T 或 N 不足返回 None 字段。
-    R1-P3-13：删除从未使用的 seed 参数（此前误导"随机性受控"的可复现性
+    删除从未使用的 seed 参数（此前误导"随机性受控"的可复现性
     表述——CSCV 是全组合枚举，无随机性）；n_blocks 必须为偶数（奇数时
     IS/OOS 块数不等，CSCV 对称性被破坏）。
     """
@@ -78,7 +81,7 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
         _is_masked = np.where(_usable, is_sharpe, -np.inf)
         best_is = int(np.argmax(_is_masked))
         # OOS 相对秩（0..1；λ<0.5 = IS 最优在 OOS 中位数以下 = 过拟合）。
-        # R7 复核（R7B #1）：**同名次按半步计**——变体互不相上下（乃至所有变体
+        # **同名次按半步计**——变体互不相上下（乃至所有变体
         # 是同一条 run）时，`oos < best` 会把并列全判为"更差"→ 秩 0 → λ=0 →
         # pbo=1.0（"必然过拟合"），与同一批证据里的 `plateau=plateau` 自相矛盾。
         _best_oos = oos_sharpe[best_is]
@@ -99,20 +102,21 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
         "pbo": pbo,
         "n_combinations": comb(n_blocks, half),
         "lambda_median": float(np.median(lambdas)),
-        # R7B #1：全并列（含"所有变体同一条 run"）时 λ 恒 0.5、PBO 无判别力——
+        # 全并列（含"所有变体同一条 run"）时 λ 恒 0.5、PBO 无判别力——
         # 显式标注，避免把 0.0 读成"绝不过拟合"
         "degenerate_variants": bool(np.all(lambdas == 0.5)),
     }
 
 
-_SHARPE_ABS_LIMIT = 50.0  # 与 rule_backtest.metrics.DEGENERATE_SHARPE_ABS_LIMIT 同口径
+_SHARPE_ABS_LIMIT = DEGENERATE_SHARPE_ABS_LIMIT
 
 
 def _sharpe_vec(x: np.ndarray) -> np.ndarray:
-    """逐列 Sharpe；**退化列记 NaN**（不可参与比较，R8 复核）。
+    """逐列 Sharpe；**退化列记 NaN**（不可参与比较）。
 
-    退化 = 方差不可分辨（std <= |mean|·1e-6）或幅值超过闸门（|sharpe| > 50）——
-    零成交/全现金列的 1e12 级噪声会赢下每个 CSCV 组合的 argmax，把 PBO 伪造成 0。
+    退化 = 方差不可分辨（std <= |mean|·1e-6）或幅值超过闸门（|sharpe| > 共享阈值，
+    见 ``rule_backtest.metrics``）——零成交/全现金列的 1e12 级噪声会赢下每个 CSCV
+    组合的 argmax，把 PBO 伪造成 0。
     """
     mean = np.nanmean(x, axis=0)
     std = np.nanstd(x, axis=0, ddof=1)

@@ -20,7 +20,7 @@ PSR（单序列）保留为展示件，不再作 confirmed 的门槛——改进
 高相关配对，单序列 PSR 用基准已实现 Sharpe 当已知阈值是口径错误
 （配对场景下它要么几乎不可达、要么过度宽松，见 DS-P1-6 的蒙特卡洛表）。
 
-诚实检出下限（DS-P1-6/DS-复审-R2 口径澄清，R1-P3-21 对齐实现重写）：
+诚实检出下限（DS-P1-6/DS-复审-R2 口径澄清，对齐实现重写）：
 confirmed 门里有两个不同的 ΔSharpe，勿混——
 - ``min_delta_sharpe``（主指标改善 > 0）作用在 evidence.deltas_vs_base.delta_sharpe，
   即**序列级**年化 Sharpe 差（sharpe_exp − sharpe_base，backtest.py:_delta_metrics）；
@@ -108,7 +108,7 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
     1σ 以上 → 疑似过拟合）。
 
     ``skipped``：因退化腿（Sharpe 不可用）被剔除的邻域点数——必须显式可见，
-    否则"邻域点变少"会静默降低判定的可信度（R6-P1-1 的连带修）。
+    否则"邻域点变少"会静默降低判定的可信度（连带修）。
     """
     rules = rules or DEFAULT_RULES
     if not neighbor_deltas:
@@ -148,7 +148,7 @@ def suggest_backtest_verdict(evidence: dict, rules: dict | None = None) -> str:
     regime = evidence.get("regime_split") or {}
     paired = (evidence.get("stats") or {}).get("paired")
 
-    # R1-P3-15：只有**样本足够**的 regime 分段才有资格行使塌陷否决——
+    # 只有**样本足够**的 regime 分段才有资格行使塌陷否决——
     # 极短分段（如 9 个交易日）的 ΔSharpe 是噪声，却足以一票否决 confirmed。
     # 样本不足的段视为不可用（不足以否决），其存在本身由报告的 n_days 可见。
     collapse = any(

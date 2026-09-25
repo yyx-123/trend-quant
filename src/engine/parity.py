@@ -32,7 +32,7 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     df = pd.DataFrame(bars).copy()
     if "date" not in df.columns:
         if "time" not in df.columns:
-            # R2-P3-9：与旧引擎 _prepare_bars 同口径的明确报错（此前裸 KeyError）
+            # 与旧引擎 _prepare_bars 同口径的明确报错（此前裸 KeyError）
             raise ValueError("bars must have a 'date' or 'time' column")
         df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
     else:
@@ -144,7 +144,7 @@ def diff_against_legacy(new_result: dict, legacy_result: dict) -> dict:
     第四类显式差异，parity 报告里单列）。
     """
     new_trades = new_result["trades"]
-    # 形状异常（None/NaN/非数值日期）不得让归因器抛异常穿出（V5 复核实证：
+    # 形状异常（None/NaN/非数值日期）不得让归因器抛异常穿出（实证：
     # 旧侧此前 int(qty)/Timestamp(date) 无保护，而"新侧 trade_shape_invalid"
     # 的守卫对旧侧不可达）——统一转成 sentinel，由返回的差异清单判负。
     old_trades = []
@@ -210,7 +210,7 @@ def attribute_diffs(
     """新旧引擎差异的白名单归因（详设 §8：差异只允许来自涨跌停卡控/T+1/
     尾盘滑点/空仓计息——超纲即测试失败）。
 
-    判据（loop-review R2-P1-1 修正后如实声明，两条腿）：
+    判据（修正后如实声明，两条腿）：
 
     1. **零卡控场景**：trade/NAV 位级一致——``trade_diffs==[]`` 且
        ``unexplained==[]``，任何真实差异都必须被归入白名单类；
@@ -228,7 +228,7 @@ def attribute_diffs(
        （后者在数千笔时发散，会把荒谬错误吸收掉）。
     2. **精确恒等式**（不依赖任何启发式界，长窗口同样有效）：
        - 每侧的 ``equity == cash + 持仓市值``——两个引擎都是这么算的，合法
-         run 残差是浮点级（实测 0.0）；**内部不一致的伪造净值**（+5% / +100%
+         run 残差是浮点级（实测 0.0）；**内部不一致的伪造净值**（5% / +100%
          / 任意窗口长度）都会立刻破坏它（kind: nav_identity_broken；NaN/inf
          另判 nav_identity_nonfinite）。
        - 新侧 ``positions_value == Σ(成交清单推出来的持仓量) × 当日收盘价``
@@ -242,7 +242,7 @@ def attribute_diffs(
        的**空白**不能再当作"引擎力学一致"的验收断言，须以恒等式与
        ``violations`` 为准。
 
-    前置条件（务必如实，V4/V5 复核后的准确边界）：本函数假定两侧**除尾盘
+    前置条件（务必如实，后的准确边界）：本函数假定两侧**除尾盘
     滑点外配置相同**（同一 profile/费率/计息），且成交清单与 nav 呈**逐笔
     对齐**形态（极端滑点下新侧权益衰减到买不起一手时会结构性错位——此时
     差异如实计入 `unexplained` 并标 `saturated=True`）。两类差异**不在**判别
@@ -258,7 +258,7 @@ def attribute_diffs(
     - count_mismatch：落点日带涨跌停卡 → limit_card；
     - NAV 逐点差异：相对差 ≤ 日计息界限（年化/252，2 倍容差）→
       cash_interest；超界 → unexplained（此前 NAV 逐点差异不参与判负，
-      "超纲即失败"在 NAV 轴未接线——R2-P1-1 修复）；
+      "超纲即失败"在 NAV 轴未接线——修复）；
     - length_mismatch → unexplained。
     - ``t_plus`` 为结构性零差异键（单标的买卖不同日流程下 T+1 不产生
       任何差异，详见详设 §8 阶段 1 预期差异表），保留占位不计。
@@ -329,7 +329,7 @@ def attribute_diffs(
         else:
             unexplained.append(d)
 
-    # ---- 精确恒等式校验（V3/V4 复核后的收口；不依赖任何启发式界）----
+    # ---- 精确恒等式校验（后的收口；不依赖任何启发式界）----
     # (a) 内部一致：每侧的 equity 必须等于 cash + 持仓市值。两个引擎都是这么算
     #     的，故合法 run 的残差是浮点级（~1e-16）；任何**伪造的净值**（无论
     #     窗口多长、偏离多大）都会立刻破坏它——这是"长窗口下无法判别"论断的
@@ -357,7 +357,7 @@ def attribute_diffs(
                 continue
             identity_checked_days += 1
             # NaN/inf 不可比较（`nan > tol` 恒为 False → 静默通过）：显式判负，
-            # 否则"往 cash 里塞 NaN"可以绕过恒等式（V5 复核实证）
+            # 否则"往 cash 里塞 NaN"可以绕过恒等式（实证）
             if not (math.isfinite(eq_v) and math.isfinite(cash_v) and math.isfinite(mv_v)):
                 unexplained.append({
                     "kind": "nav_identity_nonfinite", "side": side,
@@ -446,7 +446,7 @@ def attribute_diffs(
             absorbed_max_rel = max(absorbed_max_rel, rel)
         else:
             unexplained.append({**nd, "kind": "nav_point_diff_beyond_interest"})
-    # 判别力饱和标记（R2A-P1-1/P2-2 口径收口）：笔数一多，逐笔位置对齐退化、
+    # 判别力饱和标记（口径收口）：笔数一多，逐笔位置对齐退化、
     # 漂移本身可以很大（实测 4000 日合法净值偏离 63%）——此时
     # `unexplained == []` **不再等价于"引擎力学一致"**。凡是越出判别区间的
     # 归因结果都显式标注，避免把"解释不了"与"判别不了"混为一谈。
@@ -455,7 +455,7 @@ def attribute_diffs(
     # "差异笔数已超出 stage-1 验收尺度"，就判饱和——而不是等笔数上千。
     # 实测锚点：260 日 / 尾滑点 0.001（stage-1 验收尺度）合法净值偏离 2.0%、
     # 差异 19~28 笔（随种子波动）→ 不饱和，`unexplained == []` 可作验收断言。
-    # 笔数阈值取 40（而非 20）以给 stage-1 尺度留出随种子波动的余量（V5 复核：
+    # 笔数阈值取 40（而非 20）以给 stage-1 尺度留出随种子波动的余量（
     # 20 的阈值在 24 个种子里有 4 个因 21~28 笔而误判饱和）。判定"不饱和"
     # 必须同时满足三条：笔数少、上界紧、且从未吸收过 >5% 的偏离。
     saturated = bool(

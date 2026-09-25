@@ -135,7 +135,7 @@ def register_sizing_modules(registry=REGISTRY) -> None:
             "weights": {"type": "dict"},
             # mode 的缺省是**条件式**（weights 空 → equal，否则 explicit），
             # 由工厂实现；schema 只声明取值域，**不得给 default**。
-            # R4A-P1-1（Round 4 复核，P1）：此前的 `default: "equal"` 会被
+            # 此前的 `default: "equal"` 会被
             # `validate_params` **物化**进参数（docstring 明说"normalized =
             # 默认值填充"）→ 只要写了 weights 而没写 mode，实现里 `params.get
             # ("mode")` 就拿到 "equal"，权重表被整体忽略：`bench-60-40` 从

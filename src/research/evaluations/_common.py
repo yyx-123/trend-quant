@@ -29,7 +29,7 @@ class EmptyAccount:
     ``positions`` 做"持仓跌出 top 集就退出"）。评估侧扫描上下文必须给足这个
     形状，否则该类模块在 bucket_analysis 下直接 AttributeError 崩掉整个实验
     ——而按平台的计数口径，工程失败**计入 attempt_index**，每次崩溃都在虚增
-    DSR 的试验次数 N（loop-review-ds4f R1-P1-3）。
+    DSR 的试验次数 N。
     """
 
     @property
@@ -83,7 +83,7 @@ def load_eval_panel(
     """
     gateway = Gateway(db)
     as_of = datetime.combine(pd.Timestamp(end).date(), time(15, 0))
-    # 垫片 320 自然日（R3A-F4：A 股节假日密集段 300 自然日仅 194~205 交易日，
+    # 垫片 320 自然日（A 股节假日密集段 300 自然日仅 194~205 交易日，
     # 8/12 抽样窗口起点不足 SMA200 预热——320 保证全部抽样起点 ≥ 200 交易日；
     # DS-复审-R2 §4-2 的预热诉求不变）
     pad_start = (pd.Timestamp(start) - pd.Timedelta(days=320)).date()
@@ -193,7 +193,7 @@ def overlap_and_cluster_stats(events, *, max_h: int, event_days) -> tuple[float 
     """(前瞻窗口重叠率, top1% 交易日事件集中度)——§6.6.3 两条注记的输入。
 
     event_study 与 bucket_analysis 共用同一实现。loop-review-ds4f
-    R1-P2-12：此前只有 event 侧算这两个量，bucket 调用
+    此前只有 event 侧算这两个量，bucket 调用
     ``collect_warnings(event_count=...)`` 时既不传 overlap_ratio 也不传
     top_day_share/regimes，导致 §6.6.3 要求"对全部评估模块生效"的五类注记
     里，bucket **结构性**拿不到三类。

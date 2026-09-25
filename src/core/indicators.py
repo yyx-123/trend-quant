@@ -119,7 +119,7 @@ def macd(
     ``warmup=False`` suppresses each EMA until its span is complete (chart
     behavior).
 
-    口径注记（R5-P3-7，Round 5 复核）：两种模式**不止**掩码不同——`warmup=False`
+    口径注记：两种模式**不止**掩码不同——`warmup=False`
     会把 DEA 的递推种子改在"第一根有效 DIF"上，故两者在预热窗**之后**仍有差异
     （实测 ~140 根波动序列上 max|Δdea| ≈ 0.032，随后按 ≈0.8^k 衰减）。
     各模式已被各自的参考实现钉住（tests/unit/test_core_indicators.py），属

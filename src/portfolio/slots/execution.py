@@ -37,7 +37,7 @@ def _is_first_day_of_period(ctx, freq: str) -> bool:
     dates = ctx.panel.dates
     if idx == 0:
         # 窗口首日无前一根 bar：无从判断"是否跨周期边界"，按动作日放行。
-        # 这是**刻意**的逃生口（R1-P3-5：面板无预热数据时若卡住，月度门在
+        # 这是**刻意**的逃生口（面板无预热数据时若卡住，月度门在
         # 窗口起点非月初的场景会一直等到下一月初）；副作用是动作日集合
         # 依赖窗口起点——需要严格"每月首个交易日"的基准应保证面板含预热期。
         return True
@@ -100,7 +100,7 @@ class BufferedRotationExecution(TailSessionExecution):
     def rotation_policy(self, ctx, candidates, holdings) -> list[ExitOrderIntent]:
         if not candidates or not holdings:
             return []
-        # max_swaps：单行动日至多换 N 只（loop-review R1-P3-2：参数此前
+        # max_swaps：单行动日至多换 N 只（参数此前
         # 声明未用，恒至多换 1 只——现按声明的参数域真实生效）
         ranked_holdings = sorted(holdings, key=lambda s: self._momentum(ctx, s))
         ranked_candidates = sorted(candidates, key=lambda e: self._momentum(ctx, e.symbol), reverse=True)
@@ -130,7 +130,7 @@ class RebalanceBandExecution(TailSessionExecution):
     权重高于目标超 band）的持仓发 exit。params: band=0.05,
     action_gate={freq}, weights={symbol: w}（缺省 = 成员均分 1/N）。
 
-    口径（loop-review R1-P1-1）：underweight **不动作**——MVP 无加仓/
+    口径：underweight **不动作**——MVP 无加仓/
     部分卖出（§5.4.2），且"同标的同日边卖边买"被禁止（当日卖出的标的
     当日不能回补），跌了卖出只会把"跌了买回"的再平衡变成割底空仓。
     underweight 的修复语义（同日卖超配买低配 / 部分卖出）是设计级变更，
@@ -198,7 +198,7 @@ class _MetaBase:
                     f"meta member {name} params invalid: {'; '.join(p_errors)}"
                 )
             sub_instance = spec.factory(normalized)
-            # loop-review R1-P2-2（V2 验收修正）：成员实例必须带注册键——
+            # （修正）：成员实例必须带注册键——
             # 顶层实例由 instantiate_modules 打 _registered_key，元模块成员
             # 此前没人打，live 止损重建按键分派时全落兜底分支（组合止损恒
             # None）。与顶层同口径在此补上。
@@ -403,7 +403,7 @@ def register_execution_modules(registry=REGISTRY) -> None:
 def register_meta_modules(registry=REGISTRY) -> None:
     """any_of / all_of（成员清单是参数的一部分——增删成员 = 单槽 diff）。
 
-    §5.2.8"全插槽通用"（loop-review R3B-P2-1 落实）：此前只注册了
+    §5.2.8"全插槽通用"（落实）：此前只注册了
     signal/position_risk 两槽，跨槽引用（如 universe: any_of@1）在载入期被
     meta 豁免放行、实例化拿到错误槽的工厂——日循环首日才 AttributeError。
     现七槽全部注册（无成员语义的槽用显式拒绝工厂兜底），strategy 层取消

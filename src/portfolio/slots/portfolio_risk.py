@@ -43,7 +43,7 @@ class SlotLimitGate:
         out: list[OrderIntent] = []
         for intent in intents:
             if intent.symbol in ctx.account.positions:
-                # R1-P3-19：对已持仓标的的 entry 静默丢弃也要留痕（回测器
+                # 对已持仓标的的 entry 静默丢弃也要留痕（回测器
                 # 上游虽已过滤，gate 作为最后防线不该有"无声分支"）
                 _log(ctx, "slot_limit", intent.symbol, "already_held (entry ignored)")
                 continue
@@ -70,7 +70,7 @@ class HeatCapGate:
             # heat_cap 无从精确卡控——**告警放行，不冻结**（DS-R2 P2：静默拒绝全部
             # 新开仓会让"止损选型"课题得到一批原因隐蔽的零成交实验）。
             # 明确的"不卡控"状态写在 gate_log 与 run warnings 里，供 verdict 聚合。
-            # R1-P3-1：unstopped 持仓清单落 gate_log（旧实现该变量赋值后未用，
+            # unstopped 持仓清单落 gate_log（旧实现该变量赋值后未用，
             # 日志里只有占位 "*"——无法定位是哪些持仓导致 heat 不可知）。
             unstopped_syms = ctx.account.unstopped_symbols() \
                 if hasattr(ctx.account, "unstopped_symbols") else []
@@ -85,7 +85,7 @@ class HeatCapGate:
         # 候选自身没有止损估计（持仓风控模块按设计不给，如 time_stop/
         # breakeven/none）：与"组合热不可知"同一裁决口径——**告警放行**，
         # cap 对这类候选不生效，并在 gate_log 与 run warnings 里明说。
-        # loop-review-ds4f R1-P2-4：旧实现此处 `continue`（拒绝全部候选），
+        # 旧实现此处 `continue`（拒绝全部候选），
         # 与 backtester 同步发出的"heat_cap 本 run 不卡控（告警放行）"完全
         # 相反 → 该策略族静默零成交（实证 breakeven/time_stop/none 全 0 笔，
         # hard_stop 对照组 9 笔）。"止损选型"恰是首个课题。
@@ -94,7 +94,7 @@ class HeatCapGate:
             stop = est_stops.get(intent.symbol)
             price = ctx.panel.value(intent.symbol, "close")
             if stop is None or price is None:
-                # 原因必须如实（R2A-P3-3 复核：旧写法把 price 缺失也写成
+                # 原因必须如实（旧写法把 price 缺失也写成
                 # no_stop_estimate，审计留痕说谎）
                 reason = (
                     "no_stop_estimate" if stop is None and price is not None

@@ -98,7 +98,7 @@ class ResearchWorker:
         if self._dispatcher is not None:
             # P3-4（R4A 复核）：join 超时后引用被保留——若旧线程仍活着，绝不能
             # 再起第二个调度线程（会共享 _queue/_queued_ids/_active_by_session）。
-            # V10-ND-3：旧线程**已经退出**时必须清引用并允许重启（否则本进程内
+            # 旧线程**已经退出**时必须清引用并允许重启（否则本进程内
             # 再也起不来）。
             if getattr(self._dispatcher, "is_alive", lambda: False)():
                 _logger.warning("research worker dispatcher still alive; start() ignored")
@@ -122,7 +122,7 @@ class ResearchWorker:
         self._dispatcher.start()
 
     def stop(self) -> None:
-        """停止调度与线程池（R4A-P3-3/4 复核修正）。
+        """停止调度与线程池（修正）。
 
         - **P3-3**：`cancel_futures=True` 会取消"已派发未开跑"的 future，而这些
           id 在派发时已从 `_queued_ids` 摘除、减计数只在 `_run_one` 里——直接
@@ -144,11 +144,11 @@ class ResearchWorker:
                 )
             else:
                 self._dispatcher = None
-        # R4A-P3-3：把原始队列里尚未消费的 id 并回 `_queued_ids`（dispatcher 退出
+        # 把原始队列里尚未消费的 id 并回 `_queued_ids`（dispatcher 退出
         # 时可能有 id 只在 `_queue` 里而不在集合里 → 之后 `status()`/重派都会漏它）
         with self._lock:
             # 先把队列里剩余的 id 全部取出（**再**统一放回：边取边放会自旋），
-            # 保证"集合里有它"与"队列里有它"始终一致（V10-ND-1）
+            # 保证"集合里有它"与"队列里有它"始终一致
             pending_ids: list[str] = []
             while True:
                 try:
@@ -172,7 +172,7 @@ class ResearchWorker:
                     # 返回 False（判不出状态时保守同样回灌，绝不静默丢）
                     fut.cancel()
                     self._queued_ids.add(exp_id)
-                    self._queue.put(exp_id)  # V10-ND-1：回灌必须落回队列
+                    self._queue.put(exp_id)  # 回灌必须落回队列
                     self._active_by_session[owner] = max(
                         0, self._active_by_session.get(owner, 1) - 1
                     )
@@ -219,12 +219,12 @@ class ResearchWorker:
                 self._stop.wait(0.5)
                 continue
             if self._pool is None:
-                # R1-P3-18：stop() 已置空池（join 超时路径）——dispatcher 优雅退出，
-                # 不再裸 assert 崩线程。R4A-P3-3：退出前必须把已消费的 id 还回去
+                # stop() 已置空池（join 超时路径）——dispatcher 优雅退出，
+                # 不再裸 assert 崩线程。退出前必须把已消费的 id 还回去
                 # 并回退会话计数（否则该实验既不在队列也不在跑，计数永久泄漏）。
                 with self._lock:
                     self._queued_ids.add(experiment_id)
-                    self._queue.put(experiment_id)  # V10-ND-1：回灌必须落回队列
+                    self._queue.put(experiment_id)  # 回灌必须落回队列
                     self._active_by_session[owner] = max(
                         0, self._active_by_session.get(owner, 1) - 1
                     )

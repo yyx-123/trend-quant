@@ -40,7 +40,7 @@ def _rewrite_module_ref(obj, old_ref: str, new_ref: str):
 
 
 def _collect_module_refs(obj, refs: set) -> None:
-    """递归收集 spec 中的模块引用串（精确判定，loop-review R1-P2-4）。
+    """递归收集 spec 中的模块引用串（精确判定）。
 
     两种合法形态：完整引用 "name@version"（dict 的 module/to/from 值）与
     带 `(` 的内联参数形（如 "heat_cap@1(0.06)"）——按 name@ 前缀匹配。"""
@@ -67,7 +67,7 @@ def find_experiments_using(db, module_ref: str) -> list[dict]:
     """spec 中**精确引用**某模块版本的全部实验（verdicted 才复核——半成品
     不复核）。
 
-    R1-P2-4：SQL LIKE 只作初筛；命中与否由解析后的引用集**精确相等**判定。
+    SQL LIKE 只作初筛；命中与否由解析后的引用集**精确相等**判定。
     此前 `module_ref in text` 的子串判断会让 `stop@1` 的 campaign 误伤所有
     引用 `hard_stop@1`/`ma_stop@1` 的实验——被误伤实验按原 spec 重跑并写入
     带错误 recompute_with 标签的复核 verdict，污染台账。
@@ -92,7 +92,7 @@ def find_experiments_using(db, module_ref: str) -> list[dict]:
 def holdout_blocks_campaign(db, spec: dict) -> bool:
     """该 spec 的窗口是否触碰 holdout（campaign 无 token 通路 → 必然失败的剔除判据）。
 
-    R1-P3-18：显式记账为 skipped，而不是让 HoldoutError 混进 failed 的原因字符串
+    显式记账为 skipped，而不是让 HoldoutError 混进 failed 的原因字符串
     ——批量复核"静默丢目标"必须可见。判定失败（异常）不阻断复核（交给 runner 自行拒绝）。
     """
     try:
@@ -137,7 +137,7 @@ def recompute_campaign(
             skipped.append({"id": exp_id, "reason": "evaluation module not runnable"})
             continue
         new_spec = _rewrite_module_ref(item["spec"], old_ref=old_module_ref, new_ref=new_module_ref)
-        # R1-P3-18：campaign 没有 holdout token 的传递通路（CLI/MCP 都没有
+        # campaign 没有 holdout token 的传递通路（CLI/MCP 都没有
         # 参数），触碰过 holdout 的目标实验必然以 HoldoutError 报 failed——
         # 批量复核会"静默丢目标"。这里先判定，命中即按 skipped 显式记账，
         # 让"有哪些目标没复核"在结果里可见（而不是混进 failed 的原因字符串）。
@@ -182,7 +182,7 @@ def recompute_campaign(
                    WHERE id = ?""",
                 (v["id"],),
             )
-        # R1-P3-10：复核 run 同样落 research_runs（experiment→runs→engine_runs
+        # 复核 run 同样落 research_runs（experiment→runs→engine_runs
         # 血缘链在复核路径不得断——否则复核 verdict 查不到取证运行）
         from research import runs as _runs
 
@@ -204,7 +204,7 @@ def recompute_campaign(
                 )
         recomputed.append({"id": exp_id, "verdict_id": v["id"],
                            "topic_id": exp.get("topic_id")})
-    # R3C-P3-5（Round 3 复核）：复核给实验追加了带 supersedes 的 verdict 之后
+    # 复核给实验追加了带 supersedes 的 verdict 之后
     # 必须**重新物化受影响课题**——物化是 DB→文件的单向生成，此前只有
     # confirm/conclude 会触发，复核产物长期不进审计文件夹（DB 与文件夹不一致）。
     # 失败只告警，与 service._materialize 同口径。

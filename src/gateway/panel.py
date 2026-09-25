@@ -192,7 +192,7 @@ def build_panel(
             if start_day is not None and day < start_day:
                 continue
             if end_day is not None and day > end_day:
-                # R1-P3-21：只校验 start 会让 overlay 行越过请求的 end 边界
+                # 只校验 start 会让 overlay 行越过请求的 end 边界
                 # （end=03-13、as_of=03-15 时仍插入 03-15 行）
                 continue
             provisional_rows[symbol] = {

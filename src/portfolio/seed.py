@@ -35,8 +35,8 @@ def seed_default_library(db, registry: ModuleRegistry, *, created_by: str = "sys
     ensure_builtins()
     out: dict[str, str] = {}
     for strategy_id, filename, is_benchmark, is_blank_base, desc in SEEDS:
-        # V9 复核 R1：**退役的种子线不得被种子流程复活**。`add_version` 对退役
-        # 线的写入是显式拒绝（R3B-P3-6），而 seed 在每次 run 前都会跑（幂等）——
+        # R1：**退役的种子线不得被种子流程复活**。`add_version` 对退役
+        # 线的写入是显式拒绝，而 seed 在每次 run 前都会跑（幂等）——
         # 此前一旦退役任一种子线（如 bench-60-40），**所有** portfolio_backtest
         # 都会在 seed 处抛错、run 全部落 failed（含既有实验的复现）。退役即
         # "不再生长"，seed 跳过它、并保留已有版本行（历史可读、可复现）。

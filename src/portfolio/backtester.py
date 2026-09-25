@@ -9,7 +9,7 @@ for t in trading_days(start, end):
     5. 日结：NAV、heat、exposure 落 engine_daily_nav
 ```
 
-§5.4.2 写死语义（跨标的 vs 同标的，R1-P3-8 澄清——旧措辞把"同日先卖后买
+§5.4.2 写死语义（跨标的 vs 同标的，澄清——旧措辞把"同日先卖后买
 允许"与"边卖边买不允许"并列，同标的时二者指的是同一件事）：
 
 - **跨标的**：当日卖出释放的现金与槽位当日即可用于新买入（先卖后买）；
@@ -72,7 +72,7 @@ def _build_tradability_cards(frame) -> dict[tuple[date, str], TradabilityCard]:
 def _precompute_atr(panel, periods: set[int]) -> dict[int, np.ndarray]:
     """ATR 面板（T,N）：逐标的因果 rolling（含当根口径即当日行含当日 bar）。
 
-    停牌缺口口径（loop-review R1-P3-5）：close 先列内前向填充再算 TR——
+    停牌缺口口径：close 先列内前向填充再算 TR——
     复牌日的 TR 用最近可得前收计跳空波幅（否则 close.shift 在 NaN 行后
     为 NaN，TR 退化为 high−low，跨停牌缺口被系统性低估）。连续序列
     （golden/parity 用例）ffill 前后逐值相同。"""
@@ -164,7 +164,7 @@ def run_backtest(
 
     universe_symbols = _universe_symbols(gateway.metadata, config, registry)
     if not universe_symbols:
-        # R1-P3-11：全 none 的配置（如种子里的 blank-base@1）此前会一路走到
+        # 全 none 的配置（如种子里的 blank-base@1）此前会一路走到
         # 面板层，以 `PanelRequestError("symbols must be non-empty")` 顶层报错
         # ——不是领域错误、无 run 行、原因不可读。这里显式给出可行动的报错。
         raise BacktestError(
@@ -194,7 +194,7 @@ def run_backtest(
 
         # 组合告警（DS-R2 P2）：heat_cap × 按设计无止损价的持仓风控模块——
         # heat_cap 将退化为"不卡控"，运行级警告随结果与 verdict 聚合。
-        # R1-P3-1：元模块（any_of）成员同样下钻——只查顶层名字会漏掉
+        # 元模块（any_of）成员同样下钻——只查顶层名字会漏掉
         # any_of[time_stop,...] 这类组合。
         run_warnings: list[str] = []
         prisk_binding = config.slots.get("position_risk")
@@ -211,7 +211,7 @@ def run_backtest(
         _stop_less = ("time_stop", "breakeven", "none")
         for name in prisk_names:
             if uses_heat_cap and str(name).split("@")[0] in _stop_less:
-                # loop-review-ds4f R1-P2-4：措辞与实现严格对齐——该模块的
+                # 措辞与实现严格对齐——该模块的
                 # estimate_stop 恒为 None，故**候选自身没有止损估计**、
                 # 增量的组合热算不出来；卡控对这些候选不生效但持仓照常建立
                 # （heat_cap.admit 的放行分支 + gate_log 逐候选留痕）。
@@ -225,7 +225,7 @@ def run_backtest(
 
         store_obj = EngineStore(db, run_id) if store else None
         if store_obj:
-            # 决策 C3（R1-P2-6）：非实验路径触碰 holdout 不拦截但必留痕——
+            # 决策 C3：非实验路径触碰 holdout 不拦截但必留痕——
             # 触碰标记显式进 run_params_json（不依赖从 window 间接推断）
             store_obj.begin_run(
                 kind="backtest", strategy_ref=strategy_ref or config.name,
@@ -382,7 +382,7 @@ def run_backtest(
         "data_version": data_version,
         "daily_nav": nav_rows,
         "trades": trades,
-        # 去掉去重用的内部键（R1-P3-10）：对外/落库的记录保持原字段形状
+        # 去掉去重用的内部键：对外/落库的记录保持原字段形状
         "unfilled": [{k: v for k, v in u.items() if k != "_key"} for u in unfilled_log],
         "gate_log": gate_log,
         "warnings": run_warnings,
@@ -475,7 +475,7 @@ def evaluate_exits(ctx, *, modules, panel, t_idx):
     ctx.params["_members_count"] = len(members)
     held = set(ctx.account.positions)
     member_symbols = {m.symbol for m in members}
-    # R1-P3-4：`held - member_symbols` 是 set——迭代顺序随 PYTHONHASHSEED 变化，
+    # `held - member_symbols` 是 set——迭代顺序随 PYTHONHASHSEED 变化，
     # 退出/成交记录的落库顺序因此不可复现（净值与数量不受影响）。排序固定。
     extra_held = [
         _member(symbol, ctx.params["_meta_map"])
@@ -541,7 +541,7 @@ def _record_result(result, trades, unfilled_log, day, side) -> None:
             "qty": result.fill.quantity, "price": result.fill.fill_price,
         })
     elif result.status == "unfilled" and result.unfilled is not None:
-        # R1-P3-10：同一 (日, 标的, 方向) 可能被两条独立路径各拒一次
+        # 同一 (日, 标的, 方向) 可能被两条独立路径各拒一次
         # （止损被阻塞 + 同日信号退出被阻塞），两条记录字段完全相同 →
         # unfilled_by_reason 重复计数。只保留首条。
         key = (day.isoformat(), result.unfilled.symbol, side)
@@ -587,7 +587,7 @@ def _round_trips_enriched(trades: list[dict], panel) -> list[dict]:
         exit_price = float(t["price"])
         pnl = qty * (exit_price - entry_price)
         atr_e = 0.0
-        # close 先 ffill（R2-P3-12：与 _precompute_atr 同口径——跨停牌入场
+        # close 先 ffill（与 _precompute_atr 同口径——跨停牌入场
         # 窗时 TR 含复牌跳空，r_multiple 分母不再被低估）
         closes_ffill = pd.Series(close[: e_idx + 1, col]).ffill().to_numpy(dtype=float)
         df = pd.DataFrame({"high": high[: e_idx + 1, col], "low": low[: e_idx + 1, col],
@@ -601,7 +601,7 @@ def _round_trips_enriched(trades: list[dict], panel) -> list[dict]:
         mfe = float(np.nanmax(window_high) / entry_price - 1.0) if np.isfinite(window_high).any() else None
         # 通用分母 = 1.5×ATR（与持仓实际配置的止损倍数无关——首个课题
         # "止损选型"下各臂的 R 因此不可比）。字段名带分母，避免跨策略比较时
-        # 被误读为"按各自止损距离的 R"（R1-P3-3；口径变更属运行期决定）。
+        # 被误读为"按各自止损距离的 R"（口径变更属运行期决定）。
         risk = qty * 1.5 * atr_e
         out.append({
             "symbol": symbol,

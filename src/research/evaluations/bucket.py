@@ -35,11 +35,11 @@ FEATURES = ("atr_pct", "momentum_20", "er_10")
 
 class BucketScanCtx:
     """分桶扫描的逐日上下文（模块级：钉子必须能驱动**真实**上下文与 scan 路径，
-    而不是只断言桩对象自身的属性——V1/V2 复核均实证"只断言桩"的钉子是空钉）。
+    而不是只断言桩对象自身的属性——均实证"只断言桩"的钉子是空钉）。
 
     事件扫描不需要账户，但信号插槽协议允许模块读 ``ctx.account``（内置件
     abs_momentum@1 会读 ``positions`` 做"持仓跌出 top 集就退出"）。必须给只读
-    空账户桩，不能留 None——loop-review-ds4f R1-P1-3：留 None 时
+    空账户桩，不能留 None——留 None 时
     bucket_analysis 会 AttributeError 崩掉整个实验（status=failed），而按
     experiments.py 的计数口径工程失败**计入 attempt_index**，每次崩溃都在虚增
     DSR 的试验次数 N。与 event.py 共用 `_common.EmptyAccount`（单一实现）。
@@ -62,7 +62,7 @@ class BucketScanCtx:
 def permutation_p_value(spread: float | None, random_spreads: list[float]) -> float | None:
     """置换对照的经验 p 值（|随机利差| ≥ |实际利差| 的比例）。
 
-    R1-P2-11（V2 复核要求可直测）：`spread` 为 NaN 时**必须**记 None——
+    （要求可直测）：`spread` 为 NaN 时**必须**记 None——
     旧实现只判 ``is not None``，`np.abs(random) >= nan` 全 False → p=0.0
     （全族最显著），被送进课题内 BH-FDR 抬高 still_significant。
     """
@@ -135,7 +135,7 @@ def _spec_errors(spec: dict, ctx: dict) -> list[str]:
         errors.append("spec.buckets must be 2..10")
     if spec.get("expect", "positive") not in ("positive", "negative"):
         errors.append("spec.expect must be positive|negative")
-    # universe 非法值入口拦截（R1-P3-9）：runner 里 resolve_universe_symbols
+    # universe 非法值入口拦截：runner 里 resolve_universe_symbols
     # 才炸会把可防的 spec 错误变成 failed 实验入表（污染研究线+DSR 计数）
     uni = spec.get("universe")
     if uni is not None and uni != "liquidity_default":
@@ -267,7 +267,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
         for b in range(n_buckets):
             vals = bucket_returns[b]
             if not vals:
-                empty_buckets += 1  # R1-P3-17：空桶可见化
+                empty_buckets += 1  # 空桶可见化
             means.append(float(np.mean(vals)) if vals else np.nan)
             bucket_table.append({
                 "bucket": b + 1,
@@ -276,7 +276,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
                 "feature_range": [float(quantiles[b]), float(quantiles[b + 1])],
             })
         if empty_buckets:
-            # R1-P3-17：特征值大量并列时等频分桶出空桶 → means 含 NaN →
+            # 特征值大量并列时等频分桶出空桶 → means 含 NaN →
             # spread/单调性 NaN → 静默 inconclusive；必须警告点破原因
             warnings.append(
                 f"empty_buckets({empty_buckets}/{n_buckets})：特征值并列导致等频分桶空组，"
@@ -309,7 +309,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
                 random_spreads.append(float(g_means[-1] - g_means[0]))
         if random_spreads:
             random_band = float(np.percentile(np.abs(random_spreads), 95))
-            # 经验 p 值（评审 DS-P2-3 + R1-P2-11）：NaN spread 必须记 None
+            # 经验 p 值（评审 DS-P2-3）：NaN spread 必须记 None
             evidence["p_value"] = permutation_p_value(spread, random_spreads)
 
         if spread is not None and np.isfinite(spread) and random_band is not None:
@@ -318,7 +318,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
             elif monotonicity <= 0.2 and abs(spread) > random_band:
                 suggested = "rejected"  # 倒挂（方向反了本身也是结论）
 
-    # §6.6.3 五类注记对**全部**评估模块生效（loop-review-ds4f R1-P2-12）：
+    # §6.6.3 五类注记对**全部**评估模块生效：
     # 重叠率 / top1% 日集中度 / 单 regime 此前只有 event_study 侧算，
     # bucket 结构性拿不到其中三类。与 event 共用 _common 的实现，
     # bucket 用同一个 benchmark（510500.SS）打 regime 标签。
@@ -326,7 +326,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
         events, max_h=max_h, event_days=[panel.dates[t] for t, _c, _f in events]
     )
     _regimes = {labels[t] for t, _c, _f in events} if events else set()
-    # loop-review-ds4f R1-P2-11：这里必须是 extend 而不是重绑定——上面
+    # 这里必须是 extend 而不是重绑定——上面
     # 已 append 的 empty_buckets 等模块级告警不能被覆盖掉（旧实现
     # `warnings = collect_warnings(...)` 把空桶告警整条丢弃）。
     warnings.extend(collect_warnings(
