@@ -1,7 +1,8 @@
 # Round 5 审查报告（loop-review-ds4f）
 
 > **状态：CLOSED（2026-09-25 闭合）**
-> - 修复清单与验收记录：`round5-fixes.md`（含 Round 6 两个确认代理的复核结论与后续修复）；
+> - 修复清单与验收记录：`round5-fixes.md`；Round 6 两个确认代理的复核结论与后续修复见
+>   `round6-review.md` / `round6-fixes.md`（Round 6 起每轮独立成文件，索引见 `round5-fixes.md`）；
 > - 全量回归：1637 passed / 2 failed（失败均为既有 Windows 临时文件 flake）；
 > - ruff：(file, rule) 集合与基线完全一致。
 >

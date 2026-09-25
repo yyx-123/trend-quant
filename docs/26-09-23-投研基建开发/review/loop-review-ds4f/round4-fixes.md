@@ -1,5 +1,9 @@
 # Round 4 修复与回归（loop-review-ds4f）
 
+> **状态：CLOSED（2026-09-25 闭合）** —— 验收链：V10 **FAIL**（1 项 P2 回归：worker 回灌
+> 只进集合没进队列）→ 修复 → V11 **PASS**（ND-1 a–e 全子项 + ND-3/4/5 以自证探针闭合，
+> 每条探针在父提交上**变红**）；闭合补充见 `round4-review-closure.md`。
+>
 > 日期：2026-09-25
 > 对应审查：`round4-review.md`（新面审查轮：1 项 P1 + 1 项 P2 + 6 项 P3）
 
