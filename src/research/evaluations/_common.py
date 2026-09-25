@@ -22,6 +22,30 @@ from gateway.service import Gateway
 DEFAULT_MIN_AMOUNT20 = 1e8
 
 
+class EmptyAccount:
+    """事件/分桶扫描不需要账户：signal.scan 的 ctx.account 最小只读桩。
+
+    信号插槽协议允许模块读 ``ctx.account``（内置件 abs_momentum@1 会读
+    ``positions`` 做"持仓跌出 top 集就退出"）。评估侧扫描上下文必须给足这个
+    形状，否则该类模块在 bucket_analysis 下直接 AttributeError 崩掉整个实验
+    ——而按平台的计数口径，工程失败**计入 attempt_index**，每次崩溃都在虚增
+    DSR 的试验次数 N（loop-review-ds4f R1-P1-3）。
+    """
+
+    @property
+    def positions(self) -> dict:
+        return {}
+
+    def unstopped_symbols(self) -> list[str]:
+        return []
+
+    def equity(self) -> float:
+        return 0.0
+
+    def heat(self):
+        return None
+
+
 def resolve_universe_symbols(db, spec_universe: Any, panel_probe=None) -> list[str]:
     """spec.universe → 标的清单。
 
@@ -163,6 +187,37 @@ def bootstrap_band(values: np.ndarray, *, n_boot: int = 1000, seed: int = 7) -> 
         "low": float(np.percentile(means, 2.5)),
         "high": float(np.percentile(means, 97.5)),
     }
+
+
+def overlap_and_cluster_stats(events, *, max_h: int, event_days) -> tuple[float | None, float | None]:
+    """(前瞻窗口重叠率, top1% 交易日事件集中度)——§6.6.3 两条注记的输入。
+
+    event_study 与 bucket_analysis 共用同一实现。loop-review-ds4f
+    R1-P2-12：此前只有 event 侧算这两个量，bucket 调用
+    ``collect_warnings(event_count=...)`` 时既不传 overlap_ratio 也不传
+    top_day_share/regimes，导致 §6.6.3 要求"对全部评估模块生效"的五类注记
+    里，bucket **结构性**拿不到三类。
+
+    events：可迭代的 (t, col) 或 (t, col, ...) 元组序列（t = 面板行号）。
+    event_days：与 events 一一对应的事件日期（用于 top1% 日集中度）。
+    """
+    events = list(events)
+    if not events:
+        return None, None
+    per_symbol_days: dict[int, list[int]] = {}
+    for item in events:
+        t, c = int(item[0]), int(item[1])
+        per_symbol_days.setdefault(c, []).append(t)
+    from itertools import pairwise
+
+    overlaps = sum(
+        sum(1 for a, b in pairwise(sorted(ds)) if b - a < max_h)
+        for ds in per_symbol_days.values()
+    )
+    overlap_ratio = overlaps / len(events)
+    day_counts = pd.Series(list(event_days)).value_counts()
+    top_share = float(day_counts.head(max(1, len(day_counts) // 100)).sum() / len(events))
+    return overlap_ratio, top_share
 
 
 def regime_labels(panel, benchmark_symbol: str = "510500.SS", ma: int = 200) -> np.ndarray:

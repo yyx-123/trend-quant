@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import threading
 
+from audit.app_logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class AuditBuffer:
     def __init__(self, db, capacity: int = 200) -> None:
@@ -52,18 +56,37 @@ class AuditBuffer:
             self.flush()
 
     def flush(self) -> int:
+        """把缓冲行写入 gateway_audit；**审计失败绝不影响取数**。
+
+        loop-review-ds4f R1-P3-22：此前 flush 失败会（a）把已取走的 rows 整批
+        丢弃（缓冲被清空、无重试）、（b）异常沿 `record()` 的容量触发路径抛进
+        取数热路径（一次 GET 面板因此失败）、（c）run 收尾的 flush_audit()
+        把已完成的 run 弄炸——与本模块"异步不阻塞取数热路径"的声明相反。
+        改为：失败时把 rows 合并回缓冲待重试（有上界，避免磁盘故障吃穿内存），
+        只记日志、不抛。
+        """
         with self._lock:
             rows, self._rows = self._rows, []
         if not rows:
             return 0
-        with self._db.connect() as conn:
-            conn.executemany(
-                """INSERT INTO gateway_audit
-                   (caller_layer, run_id, method, as_of, symbols_count,
-                    date_start, date_end, fields, adjust, mode, data_version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                rows,
+        try:
+            with self._db.connect() as conn:
+                conn.executemany(
+                    """INSERT INTO gateway_audit
+                       (caller_layer, run_id, method, as_of, symbols_count,
+                        date_start, date_end, fields, adjust, mode, data_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+        except Exception:
+            logger.warning(
+                "gateway audit flush failed; %d row(s) requeued for retry",
+                len(rows), exc_info=True,
             )
+            keep = rows[-max(self._capacity, 1):]
+            with self._lock:
+                self._rows[:0] = keep
+            return 0
         return len(rows)
 
     def pending(self) -> int:

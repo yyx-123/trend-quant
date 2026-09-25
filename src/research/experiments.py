@@ -12,6 +12,9 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date
+
 from research.errors import IntakeRejected, LifecycleError
 from research.ledger import alloc_id, dumps, loads
 from research.lifecycle import get_experiment
@@ -211,6 +214,43 @@ def find_duplicates(
     return exact, similar
 
 
+_ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def validate_window_spec(window) -> list[str]:
+    """window 字段的入口校验（loop-review-ds4f R1-P1-2）。
+
+    `window` 是**平台级**骨架字段（各评估模块共用），必须在入口统一卡形状，
+    不能指望各模块的 `_spec_errors`——面板型三模块（event_study /
+    bucket_analysis / distribution）此前都不看 window，而 holdout 判定按原始
+    字符串比字典序、取数侧用 pandas 解析同一字符串，于是
+    `["2024-01-01", "01/01/2026"]` / `" 2026-01-01"` 这类"格式不同、语义相同"
+    的窗口既不触发 holdout 卡控、又照样取到 holdout 段数据（且留痕说谎）。
+
+    这里收口为严格 ISO：两元素、`YYYY-MM-DD`、start < end。日期也可解析时
+    才允许（`2024-02-31` 这类不存在的日期一并拒绝）。
+    """
+    if window is None:
+        return []
+    if not isinstance(window, (list, tuple)) or len(window) != 2:
+        return ["spec.window must be a 2-element list [start, end] (YYYY-MM-DD)"]
+    # 不做 strip：规范化的宽容度正是逃逸的温床（" 2026-01-01" 曾被判"未触碰"），
+    # 入口要求**严格** ISO 字面量；holdout 侧另有解析后比较作为 fail-closed 兜底。
+    start, end = str(window[0] if window[0] is not None else ""),         str(window[1] if window[1] is not None else "")
+    errors: list[str] = []
+    for label, value in (("start", start), ("end", end)):
+        if not _ISO_DAY_RE.match(value):
+            errors.append(f"spec.window.{label} must be YYYY-MM-DD, got {value!r}")
+            continue
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            errors.append(f"spec.window.{label} is not a real date: {value!r}")
+    if not errors and start >= end:
+        errors.append(f"spec.window start must be < end ({start} >= {end})")
+    return errors
+
+
 def propose_experiment(
     db,
     *,
@@ -264,6 +304,11 @@ def propose_experiment(
             reasons.extend(module.validate_spec(spec or {}, ctx))
         except Exception as exc:  # 模块 schema 自身的错误也视为不合法 spec
             reasons.append(f"spec validation failed: {exc}")
+
+    # 骨架 3.5：window 形状与格式（loop-review-ds4f R1-P1-2）——平台级字段
+    # 统一卡口，见 validate_window_spec 的说明。
+    if isinstance(spec, dict) and "window" in spec:
+        reasons.extend(validate_window_spec(spec.get("window")))
 
     # 骨架 5：attempt_index 平台赋值 = 同研究线（subject_key）已达入口的
     # 实验数 + 1（rejected_intake 未真正取证，不计入尝试次数）。

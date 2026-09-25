@@ -145,9 +145,16 @@ def _probe(slot: str, instance, ctx):
         pos = Position(symbol=ctx.panel.symbols[0], quantity=1000, sellable_quantity=1000,
                        avg_cost=price, entry_date=ctx.date, entry_price=price, stop=state)
         intent = instance.evaluate(ctx, pos)
+        # estimate_stop 也在协议里，且**直接进 sizing**（backtester.py:497
+        # 把它喂给 sizing_mod.size 换算风险预算→股数）——不探针它，一个
+        # "init_stop/evaluate 因果、estimate_stop 偷看未来"的模块能自动过门
+        # 变 reviewed（loop-review-ds4f R1-P2-3 实证）。与前缀稳定性探针一起
+        # 取值，任何对未来数据的依赖都会让截断前缀的输出发生变化。
+        est = instance.estimate_stop(ctx, ctx.panel.symbols[0])
         return (
             None if state.stop_price is None else round(float(state.stop_price), 9),
             None if intent is None else (intent.reason, intent.fill_mode),
+            None if est is None else round(float(est), 9),
         )
     if slot == "execution":
         policy = instance.fill_policy()

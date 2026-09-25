@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 import pandas as pd
 import pytest
@@ -210,18 +210,79 @@ def test_tradability_limit_prices_and_rounding():
 
 
 def test_tradability_ex_dividend_base_price():
-    """除权日基准价 = raw close(t-1) / f_t（交易所口径；开发日志 §1 决策 3）。"""
-    days = [date(2024, 3, 11), date(2024, 3, 12)]
+    """除权基准价：因子存储日 E 是**除权前**最后一根 bar，价格在 E 的**后一根
+    bar（除权除息日 D）** 跳水——交易所参考前收只在 D 上做 ÷f。
+
+    口径依据（loop-review-ds4f R1-P1-1，真实库 107/107 无歧义样本实证：跌幅
+    落在 E+1，落在 E 的为 0；与 core/adjustment.py 的
+    qfq(t)=raw(t)/Π_{ex_date≥t}f 语义自洽）。旧钉子把"跌幅与因子同一天"当
+    既定前提，反而把错误口径钉死，历轮审查全绿。
+    """
+    days = [date(2024, 3, 11), date(2024, 3, 12), date(2024, 3, 13)]
+    # E=2024-03-12（登记日，除权前价 10.0）；D=2024-03-13（跳水到 6.6 ≈ 10/1.5）
     frame = compute_tradability(
         None, symbols=["600519.SS"], dates=days,
-        raw_closes={"600519.SS": pd.Series({date(2024, 3, 11): 10.0, date(2024, 3, 12): 6.6})},
+        raw_closes={"600519.SS": pd.Series(
+            {date(2024, 3, 11): 9.8, date(2024, 3, 12): 10.0, date(2024, 3, 13): 6.6}
+        )},
         ex_factors={"600519.SS": [("2024-03-12", 1.5)]},
         listing_dates={"600519.SS": None},
     )
-    row = frame[frame["date"] == date(2024, 3, 12)].iloc[0]
-    # 10.0 / 1.5 = 6.6667 → 涨停 7.33 / 跌停 6.0
-    assert row["limit_up_price"] == 7.33
-    assert row["limit_down_price"] == 6.0
+    row_e = frame[frame["date"] == date(2024, 3, 12)].iloc[0]
+    # 登记日无除权修正：基准 = 9.8 → 涨停 10.78 / 跌停 8.82；收盘 10.0 在带内
+    assert row_e["limit_up_price"] == 10.78
+    assert row_e["limit_down_price"] == 8.82
+    assert bool(row_e["is_limit_up"]) is False
+    assert bool(row_e["is_limit_down"]) is False
+    row_d = frame[frame["date"] == date(2024, 3, 13)].iloc[0]
+    # 除权除息日：10.0 / 1.5 = 6.6667 → 涨停 7.33 / 跌停 6.0；收盘 6.6 在带内
+    assert row_d["limit_up_price"] == 7.33
+    assert row_d["limit_down_price"] == 6.0
+    assert bool(row_d["is_limit_up"]) is False
+    # 关键反向断言：修复前该日会被判成跌停（收盘 6.6 ≤ 10.0×0.9=9.0）→ 卖不出
+    assert bool(row_d["is_limit_down"]) is False
+
+
+def test_tradability_ex_dividend_real_call_form(test_db):
+    """真实调用形态（Gateway 门面 + 真库 raw_close/ex_factors 取数路径）：
+    登记日不误判涨停、除权日不误判跌停。
+
+    loop-review-ds4f R1-P1-1 的钉子复刻教训：可交易性的四个旧用例全部手搓
+    raw_closes/ex_factors，绕过 `_load_raw_closes` / `load_ex_factors` /
+    元数据派生三条真实分支——错误口径因此在所有既有用例里都看不见。
+    """
+    from datetime import timedelta
+
+    from gateway.service import Gateway
+
+    d_e, d_d = date(2024, 3, 12), date(2024, 3, 13)
+    rows = [
+        (date(2024, 3, 11), 10.0),
+        (d_e, 10.0),
+        (d_d, 6.6),  # 10送5 → 因子 1.5 的跳水
+    ]
+    df = pd.DataFrame([
+        {"time": f"{d.isoformat()} 00:00:00", "open": c, "high": c, "low": c,
+         "close": c, "volume": 1000, "amount": c * 1000}
+        for d, c in rows
+    ])
+    test_db.save_market_data("600519.SS", df, price_mode="raw", period="1d")
+    test_db.replace_ex_factors("600519.SS", [("2024-03-12", 1.5)], provider="test")
+
+    frame = Gateway(test_db).get_tradability(
+        symbols=["600519.SS"], dates=[d_e, d_d],
+        as_of=datetime.combine(d_d, time(15, 0)), caller_layer="test",
+    )
+    day_e = frame[frame["date"] == d_e].iloc[0]
+    day_d = frame[frame["date"] == d_d].iloc[0]
+    # 登记日（E）：基准价用 03-11 的 10.0，无除权修正
+    assert day_e["limit_up_price"] == 11.0 and day_e["limit_down_price"] == 9.0
+    # 除权除息日（D）：参考前收 10.0 / 1.5
+    assert day_d["limit_up_price"] == pytest.approx(7.33, abs=0.01)
+    assert day_d["limit_down_price"] == pytest.approx(6.0, abs=0.01)
+    assert bool(day_e["is_limit_up"]) is False
+    assert bool(day_d["is_limit_down"]) is False
+    _ = timedelta  # 垫片期取前收由 Gateway 内部完成（见 compute_tradability 注释）
 
 
 def test_tradability_suspension_on_trading_day():

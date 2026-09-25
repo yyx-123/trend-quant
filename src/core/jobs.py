@@ -127,6 +127,7 @@ def intraday_period_refresh_job(
 
 def _spawn_same_day_catchup(
     settings: Settings, data_service: DataService | None, *, force: bool, today,
+    after_update=None,
 ) -> None:
     """冻结顺延后的当日一次性补跑哨兵（GLM53F-P2-13）。
 
@@ -158,9 +159,20 @@ def _spawn_same_day_catchup(
                 return  # 跨日了，交给当日 cron/启动补偿
             logger.info("same-day catchup: unfrozen, running daily update now")
             try:
-                daily_market_update_job(settings, data_service, force=force)
+                payload = daily_market_update_job(settings, data_service, force=force)
             except Exception:
                 logger.exception("same-day catchup failed")
+                return
+            # 补跑 = 数据 + post-update pipeline（除权检测 + 指标重建）。
+            # loop-review-ds4f R1-P2-13：pipeline 的编排在 app/main.py
+            # （core 不得 import services），此前哨兵只调日更本体 → 顺延日
+            # 的 indicator_daily/trend_daily 整日缺失，且 main 的启动补偿看到
+            # last_ok==today 也不再补。回调由调用方注入（core 保持无 services 依赖）。
+            if after_update is not None:
+                try:
+                    after_update(payload)
+                except Exception:
+                    logger.exception("same-day catchup post-update pipeline failed")
 
         _catchup_sentinel = threading.Thread(
             target=_watch, daemon=True, name="daily-update-catchup"
@@ -180,6 +192,7 @@ def daily_market_update_job(
     settings: Settings,
     data_service: DataService | None = None,
     force: bool = False,
+    after_update=None,
 ) -> dict:
     """Incrementally backfill daily K-line data for the whole instrument pool.
 
@@ -203,7 +216,9 @@ def daily_market_update_job(
             "results": [],
         }
     try:
-        return _daily_market_update_job_locked(settings, data_service, force=force)
+        return _daily_market_update_job_locked(
+            settings, data_service, force=force, after_update=after_update
+        )
     finally:
         _DAILY_UPDATE_LOCK.release()
 
@@ -213,6 +228,7 @@ def _daily_market_update_job_locked(
     data_service: DataService | None,
     *,
     force: bool,
+    after_update=None,
 ) -> dict:
     today = market_now().date()
     if not force and not is_trading_day(today):
@@ -254,7 +270,10 @@ def _daily_market_update_job_locked(
                 run_date=today.isoformat(), status="deferred_backtest_running",
             )
             # GLM53F-P2-13：顺延 ≠ 饿一整天——挂当日一次性补跑哨兵
-            _spawn_same_day_catchup(settings, data_service, force=force, today=today)
+            _spawn_same_day_catchup(
+                settings, data_service, force=force, today=today,
+                after_update=after_update,
+            )
             return payload
 
     try:
@@ -333,10 +352,11 @@ def live_daily_list_job(settings: Settings) -> dict:
     strategy_version_id = db.get_config("portfolio.live_strategy_version_id")
     if not strategy_version_id:
         return {"status": "skipped_no_deployed_strategy"}
-    user_id = int(db.get_config("portfolio.live_user_id", 1))
-    initial_capital = float(db.get_config("portfolio.live_initial_capital", 1_000_000))
-
     try:
+        # R1-P3-23：配置解析此前在 try 之外——配置畸形（如非数字的
+        # live_initial_capital）会直接抛穿，job_runs 无任何留痕。
+        user_id = int(db.get_config("portfolio.live_user_id", 1))
+        initial_capital = float(db.get_config("portfolio.live_initial_capital", 1_000_000))
         target = generate_daily_list(
             db, strategy_version_id=strategy_version_id, user_id=user_id,
             as_of=now, initial_capital=initial_capital,

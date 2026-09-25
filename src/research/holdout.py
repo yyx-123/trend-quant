@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import pandas as pd
+
 from research.errors import HoldoutError
 from research.ledger import alloc_id, row_to_dict, rows_to_dicts
 from research.sessions import require_human_session
@@ -42,12 +44,47 @@ def set_enforced(db, enabled: bool) -> None:
     db.set_config(_ENFORCE_KEY, "1" if enabled else "0")
 
 
-def window_touches_holdout(db, start: str | None, end: str | None) -> bool:
-    """窗口 [start, end] 是否与 holdout 段 [holdout_start, now) 相交。"""
-    if not start or not end:
+def parse_window_bound(value, *, what: str = "window") -> str | None:
+    """把窗口端点规范化为 ``YYYY-MM-DD`` 字符串（失败即 HoldoutError）。
+
+    loop-review-ds4f R1-P1-2：窗口判定此前按**原始字符串**比字典序，而取数侧
+    用 ``pd.Timestamp`` 解析同一字符串——`"01/01/2026"`（`'0' < '2'`）、
+    `" 2026-01-01"`（`' ' < '2'`）都会被判成"未触碰 holdout"，同时 panel 却
+    真取到了 holdout 段的数据，留痕也一并说谎。必须解析后比较，且**解析失败
+    即 fail-closed**（宁可拒，不可放行）。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        stamp = pd.Timestamp(text)
+    except (ValueError, TypeError) as exc:
+        raise HoldoutError(
+            f"{what} bound {value!r} is not a valid date (YYYY-MM-DD required)"
+        ) from exc
+    if pd.isna(stamp):
+        raise HoldoutError(f"{what} bound {value!r} is not a valid date")
+    return stamp.date().isoformat()
+
+
+def window_touches_holdout(db, start, end) -> bool:
+    """窗口 [start, end] 是否与 holdout 段 [holdout_start, now) 相交。
+
+    端点先经 :func:`parse_window_bound` 规范化（含格式校验），再按日期比较；
+    非日期输入抛 HoldoutError（fail-closed）。``end`` 缺失时保守视为未指定
+    （由调用方的 spec 校验保证窗口完整）。
+    """
+    if start is None or end is None:
         return False
-    holdout_start = str(get_windows(db)["holdout_start"])
-    return str(end)[:10] >= holdout_start
+    if not str(start).strip() or not str(end).strip():
+        return False
+    holdout_start = parse_window_bound(
+        get_windows(db)["holdout_start"], what="research.holdout_start"
+    )
+    end_day = parse_window_bound(end, what="window.end")
+    return bool(end_day and holdout_start and end_day >= holdout_start)
 
 
 def grant_token(

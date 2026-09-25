@@ -127,3 +127,55 @@ def test_confirm_rejects_cross_site_form_post(client, seeded):
         follow_redirects=False,
     )
     assert resp2.status_code == 303
+
+
+def test_holdout_grant_via_page_records_token(client, seeded, test_db):
+    """Q10：`POST /research-ledger/holdout/grant` 此前零用例——治理动作的
+    发放通路（含 purpose 留痕）必须被钉住。"""
+    resp = client.post(
+        "/research-ledger/holdout/grant",
+        data={"purpose": "复核基线一致性", "experiment_id": seeded["exp"]["id"]},
+        headers={"Sec-Fetch-Site": "same-origin"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    with test_db.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM holdout_tokens ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert row["purpose"] == "复核基线一致性"
+    assert row["experiment_id"] == seeded["exp"]["id"]
+
+
+def test_holdout_grant_rejects_empty_purpose(client, seeded):
+    """空 purpose = 无留痕的治理授权，必须拒绝（HTML required 不是防线）。"""
+    resp = client.post(
+        "/research-ledger/holdout/grant",
+        data={"purpose": "   ", "experiment_id": ""},
+        headers={"Sec-Fetch-Site": "same-origin"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 409
+
+
+def test_ledger_mutating_posts_reject_weak_csrf_vectors(client, seeded):
+    """R1-P2-8：`same-site`（同注册域子域/同主机不同端口）与跨源 Origin 都必须
+    被拒——旧实现只挡 `cross-site`。"""
+    for headers in ({"Sec-Fetch-Site": "same-site"},
+                    {"Sec-Fetch-Site": "cross-site"},
+                    {"Origin": "https://evil.example.com", "Host": "testserver"},
+                    {"Origin": "http://evil.example.com"}):
+        resp = client.post(
+            f"/research-ledger/experiments/{seeded['exp']['id']}/confirm",
+            data={"final_verdict": "inconclusive", "reasoning": "x"},
+            headers=headers, follow_redirects=False,
+        )
+        assert resp.status_code == 403, headers
+
+
+def test_experiment_report_json_endpoint(client, seeded):
+    """Q10：`/report.json` 全量下载端点此前零用例（DS-P1-1 的修复面）。"""
+    resp = client.get(f"/research-ledger/experiments/{seeded['exp']['id']}/report.json")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body, dict)

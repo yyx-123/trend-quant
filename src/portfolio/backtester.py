@@ -9,9 +9,13 @@ for t in trading_days(start, end):
     5. 日结：NAV、heat、exposure 落 engine_daily_nav
 ```
 
-§5.4.2 写死语义：同一标的同日先卖后买允许；边卖边买不允许；买入失败
-不递补；止损优先于信号；卖出全部整仓；不加仓；空仓计息 1%；窗口默认
-2015-01-01 起（sample/holdout 由 L4 传入，backtester 本身不感知）。
+§5.4.2 写死语义（跨标的 vs 同标的，R1-P3-8 澄清——旧措辞把"同日先卖后买
+允许"与"边卖边买不允许"并列，同标的时二者指的是同一件事）：
+
+- **跨标的**：当日卖出释放的现金与槽位当日即可用于新买入（先卖后买）；
+- **同标的**：当日卖出后当日不再买回（`exited_symbols` 过滤）；
+- 其余：买入失败不递补；止损优先于信号；卖出全部整仓；不加仓；空仓计息
+  1%；窗口默认 2015-01-01 起（sample/holdout 由 L4 传入，backtester 不感知）。
 """
 
 from __future__ import annotations
@@ -158,9 +162,19 @@ def run_backtest(
     load_start = (pd.Timestamp(start) - pd.Timedelta(days=LOOKBACK_PAD_DAYS)).date()
     as_of = datetime.combine(end, time(15, 0))
 
+    universe_symbols = _universe_symbols(gateway.metadata, config, registry)
+    if not universe_symbols:
+        # R1-P3-11：全 none 的配置（如种子里的 blank-base@1）此前会一路走到
+        # 面板层，以 `PanelRequestError("symbols must be non-empty")` 顶层报错
+        # ——不是领域错误、无 run 行、原因不可读。这里显式给出可行动的报错。
+        raise BacktestError(
+            "universe slot is empty (no symbols): 该配置没有标的池，"
+            "无法回测——请为 universe 槽绑定 static_list/category_filter/"
+            "liquidity_filter 等模块"
+        )
     with run_freeze.frozen_writes():
         panel = gateway.get_panel(
-            symbols=_universe_symbols(gateway.metadata, config, registry),
+            symbols=universe_symbols,
             start=load_start, end=end,
             fields=["open", "high", "low", "close", "volume", "amount"],
             adjust="qfq", as_of=as_of, mode="historical",
@@ -197,9 +211,16 @@ def run_backtest(
         _stop_less = ("time_stop", "breakeven", "none")
         for name in prisk_names:
             if uses_heat_cap and str(name).split("@")[0] in _stop_less:
+                # loop-review-ds4f R1-P2-4：措辞与实现严格对齐——该模块的
+                # estimate_stop 恒为 None，故**候选自身没有止损估计**、
+                # 增量的组合热算不出来；卡控对这些候选不生效但持仓照常建立
+                # （heat_cap.admit 的放行分支 + gate_log 逐候选留痕）。
+                # 旧措辞说"组合热不可知"，而空仓时 heat 已知为 0，
+                # 与实现的 `continue`（拒绝全部）一起构成双重失真。
                 run_warnings.append(
-                    f"heat_cap×{name}: 该持仓风控模块不提供止损价，组合热不可知，"
-                    "heat_cap 本 run 不卡控（告警放行）"
+                    f"heat_cap×{name}: 该持仓风控模块不提供止损价（estimate_stop=None），"
+                    "新增仓位的风险增量不可算，heat_cap 对该 run 不生效（放行并落 "
+                    "gate_log）——不是零成交，也不要把成交结果当作受 cap 约束的产物"
                 )
 
         store_obj = EngineStore(db, run_id) if store else None
@@ -361,7 +382,8 @@ def run_backtest(
         "data_version": data_version,
         "daily_nav": nav_rows,
         "trades": trades,
-        "unfilled": unfilled_log,
+        # 去掉去重用的内部键（R1-P3-10）：对外/落库的记录保持原字段形状
+        "unfilled": [{k: v for k, v in u.items() if k != "_key"} for u in unfilled_log],
         "gate_log": gate_log,
         "warnings": run_warnings,
         "final_equity": nav_rows[-1]["equity"] if nav_rows else initial_capital,
@@ -453,7 +475,12 @@ def evaluate_exits(ctx, *, modules, panel, t_idx):
     ctx.params["_members_count"] = len(members)
     held = set(ctx.account.positions)
     member_symbols = {m.symbol for m in members}
-    extra_held = [_member(symbol, ctx.params["_meta_map"]) for symbol in held - member_symbols]
+    # R1-P3-4：`held - member_symbols` 是 set——迭代顺序随 PYTHONHASHSEED 变化，
+    # 退出/成交记录的落库顺序因此不可复现（净值与数量不受影响）。排序固定。
+    extra_held = [
+        _member(symbol, ctx.params["_meta_map"])
+        for symbol in sorted(held - member_symbols)
+    ]
     events = signal_mod.scan(ctx, members + extra_held) if signal_mod else []
 
     signal_exits = [
@@ -514,9 +541,15 @@ def _record_result(result, trades, unfilled_log, day, side) -> None:
             "qty": result.fill.quantity, "price": result.fill.fill_price,
         })
     elif result.status == "unfilled" and result.unfilled is not None:
+        # R1-P3-10：同一 (日, 标的, 方向) 可能被两条独立路径各拒一次
+        # （止损被阻塞 + 同日信号退出被阻塞），两条记录字段完全相同 →
+        # unfilled_by_reason 重复计数。只保留首条。
+        key = (day.isoformat(), result.unfilled.symbol, side)
+        if any(u.get("_key") == key for u in unfilled_log):
+            return
         unfilled_log.append({
-            "date": day.isoformat(), "symbol": result.unfilled.symbol,
-            "reason": result.unfilled.reason, "side": side,
+            "date": key[0], "symbol": key[1],
+            "reason": result.unfilled.reason, "side": side, "_key": key,
         })
 
 
@@ -566,7 +599,10 @@ def _round_trips_enriched(trades: list[dict], panel) -> list[dict]:
         window_high = high[e_idx: x_idx + 1, col]
         mae = float(np.nanmin(window_low) / entry_price - 1.0) if np.isfinite(window_low).any() else None
         mfe = float(np.nanmax(window_high) / entry_price - 1.0) if np.isfinite(window_high).any() else None
-        risk = qty * 1.5 * atr_e  # 以 1.5×ATR 止损距离为通用分母
+        # 通用分母 = 1.5×ATR（与持仓实际配置的止损倍数无关——首个课题
+        # "止损选型"下各臂的 R 因此不可比）。字段名带分母，避免跨策略比较时
+        # 被误读为"按各自止损距离的 R"（R1-P3-3；口径变更属运行期决定）。
+        risk = qty * 1.5 * atr_e
         out.append({
             "symbol": symbol,
             "entry_date": entry["date"].isoformat(),
@@ -576,6 +612,7 @@ def _round_trips_enriched(trades: list[dict], panel) -> list[dict]:
             "qty": qty,
             "pnl": pnl,
             "r_multiple": (pnl / risk) if risk > 0 else None,
+            "r_multiple_denominator": "1.5xATR20",
             "mae_pct": mae * 100 if mae is not None else None,
             "mfe_pct": mfe * 100 if mfe is not None else None,
             "holding_days": x_idx - e_idx,

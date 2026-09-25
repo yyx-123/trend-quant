@@ -413,7 +413,8 @@ BEGIN SELECT RAISE(ABORT, 'research_experiments content is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_research_runs_no_delete
 BEFORE DELETE ON research_runs
 BEGIN SELECT RAISE(ABORT, 'research_runs is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_research_runs_no_update
+DROP TRIGGER IF EXISTS trg_research_runs_no_update;
+CREATE TRIGGER trg_research_runs_no_update
 BEFORE UPDATE ON research_runs
 BEGIN SELECT RAISE(ABORT, 'research_runs is append-only'); END;
 
@@ -421,7 +422,8 @@ BEGIN SELECT RAISE(ABORT, 'research_runs is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_research_verdicts_no_delete
 BEFORE DELETE ON research_verdicts
 BEGIN SELECT RAISE(ABORT, 'research_verdicts is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_research_verdicts_guard_update
+DROP TRIGGER IF EXISTS trg_research_verdicts_guard_update;
+CREATE TRIGGER trg_research_verdicts_guard_update
 BEFORE UPDATE ON research_verdicts
 WHEN OLD.id <> NEW.id
   OR OLD.experiment_id <> NEW.experiment_id
@@ -442,7 +444,8 @@ BEGIN SELECT RAISE(ABORT, 'research_verdicts content is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_research_topics_no_delete
 BEFORE DELETE ON research_topics
 BEGIN SELECT RAISE(ABORT, 'research_topics is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_research_topics_guard_update
+DROP TRIGGER IF EXISTS trg_research_topics_guard_update;
+CREATE TRIGGER trg_research_topics_guard_update
 BEFORE UPDATE ON research_topics
 WHEN OLD.id <> NEW.id
   OR OLD.title <> NEW.title
@@ -456,7 +459,8 @@ BEGIN SELECT RAISE(ABORT, 'research_topics content is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_research_sessions_no_delete
 BEFORE DELETE ON research_sessions
 BEGIN SELECT RAISE(ABORT, 'research_sessions is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_research_sessions_guard_update
+DROP TRIGGER IF EXISTS trg_research_sessions_guard_update;
+CREATE TRIGGER trg_research_sessions_guard_update
 BEFORE UPDATE ON research_sessions
 WHEN OLD.session_id <> NEW.session_id
   OR OLD.kind <> NEW.kind
@@ -468,14 +472,16 @@ BEGIN SELECT RAISE(ABORT, 'research_sessions content is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_portfolio_strategy_versions_no_delete
 BEFORE DELETE ON portfolio_strategy_versions
 BEGIN SELECT RAISE(ABORT, 'portfolio_strategy_versions is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_portfolio_strategy_versions_no_update
+DROP TRIGGER IF EXISTS trg_portfolio_strategy_versions_no_update;
+CREATE TRIGGER trg_portfolio_strategy_versions_no_update
 BEFORE UPDATE ON portfolio_strategy_versions
 BEGIN SELECT RAISE(ABORT, 'portfolio_strategy_versions is immutable'); END;
 
 CREATE TRIGGER IF NOT EXISTS trg_portfolio_strategies_no_delete
 BEFORE DELETE ON portfolio_strategies
 BEGIN SELECT RAISE(ABORT, 'portfolio_strategies is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_portfolio_strategies_guard_update
+DROP TRIGGER IF EXISTS trg_portfolio_strategies_guard_update;
+CREATE TRIGGER trg_portfolio_strategies_guard_update
 BEFORE UPDATE ON portfolio_strategies
 WHEN OLD.id <> NEW.id
   OR OLD.is_benchmark <> NEW.is_benchmark
@@ -488,7 +494,8 @@ BEGIN SELECT RAISE(ABORT, 'portfolio_strategies content is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_holdout_tokens_no_delete
 BEFORE DELETE ON holdout_tokens
 BEGIN SELECT RAISE(ABORT, 'holdout_tokens is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_holdout_tokens_guard_update
+DROP TRIGGER IF EXISTS trg_holdout_tokens_guard_update;
+CREATE TRIGGER trg_holdout_tokens_guard_update
 BEFORE UPDATE ON holdout_tokens
 WHEN OLD.id <> NEW.id
   OR OLD.granted_by <> NEW.granted_by
@@ -501,7 +508,8 @@ BEGIN SELECT RAISE(ABORT, 'holdout_tokens content is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_module_drafts_no_delete
 BEFORE DELETE ON module_drafts
 BEGIN SELECT RAISE(ABORT, 'module_drafts is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS trg_module_drafts_guard_update
+DROP TRIGGER IF EXISTS trg_module_drafts_guard_update;
+CREATE TRIGGER trg_module_drafts_guard_update
 BEFORE UPDATE ON module_drafts
 WHEN OLD.id <> NEW.id
   OR OLD.slot <> NEW.slot

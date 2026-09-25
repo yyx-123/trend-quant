@@ -33,10 +33,12 @@ from portfolio.registry import parse_module_ref
 from portfolio.slots.universe import UniverseMember
 from research.evaluations._common import (
     DEFAULT_MIN_AMOUNT20,
+    EmptyAccount,
     collect_warnings,
     forward_returns,
     load_eval_panel,
     long_window_annotations,
+    overlap_and_cluster_stats,
     regime_labels,
     resolve_universe_symbols,
     unconditional_baseline,
@@ -197,7 +199,7 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
         def __init__(self, day, upto):
             self.date = day
             self.panel = PanelView(panel, upto)
-            self.account = _EmptyAccount()
+            self.account = EmptyAccount()
             self.params = {}
             self.run_seed = day.toordinal()
             self.gateway = None
@@ -319,35 +321,47 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
     # regime 拆分
     regime_split: dict[str, dict] = {}
     if events:
+        matrix_full = fwd[primary_h]
+        _start_day, _end_day = pd.Timestamp(start).date(), pd.Timestamp(end).date()
+        in_window = np.array([_start_day <= d <= _end_day for d in panel.dates])
         for label in ("above", "below"):
             sel = [k for k, (t, _c) in enumerate(events) if labels[t] == label]
             if not sel:
                 continue
-            matrix = fwd[primary_h]
-            vals = np.array([matrix[t, c] for k, (t, c) in enumerate(events) if k in sel])
+            vals = np.array([matrix_full[t, c] for k, (t, c) in enumerate(events) if k in sel])
             vals = vals[np.isfinite(vals)]
             base = baseline.get(primary_h, {})
+            # regime 匹配基线（R1-P3-14）：对照必须取**同 regime 日**的无条件
+            # 均值，否则该 regime 自身的漂移会被记成事件效应（实证：全局基线
+            # 0.00344 vs regime 匹配 0.00449 → delta_mean 差 30%，regime 平均
+            # 收益与全局反向时符号都会翻）。全局口径同时保留供阅读对照。
+            regime_days = np.array(
+                [bool(in_window[i]) and labels[i] == label
+                 for i in range(len(panel.dates))]
+            )
+            sub = matrix_full[regime_days, :]
+            sub = sub[np.isfinite(sub)]
+            regime_base_mean = float(np.mean(sub)) if len(sub) else None
             regime_split[label] = {
                 "n_events": len(vals),
-                "delta_mean": float(np.mean(vals) - base.get("mean", 0.0)) if len(vals) else None,
+                "delta_mean": (
+                    float(np.mean(vals) - regime_base_mean)
+                    if len(vals) and regime_base_mean is not None else None
+                ),
+                "baseline_kind": "regime_matched",
+                "baseline_mean": regime_base_mean,
+                "baseline_n": len(sub),
+                "delta_mean_vs_global": (
+                    float(np.mean(vals) - base.get("mean", 0.0)) if len(vals) else None
+                ),
             }
 
     # 警告
     regimes_in_events = {labels[t] for t, _c in events} if events else set()
-    overlap_ratio = None
-    if events:
-        per_symbol_days: dict[int, list[int]] = {}
-        for t, c in events:
-            per_symbol_days.setdefault(c, []).append(t)
-        overlaps = sum(
-            sum(1 for a, b in zip(ds, ds[1:]) if b - a < max_h)
-            for ds in per_symbol_days.values()
-        )
-        overlap_ratio = overlaps / len(events)
-        day_counts = pd.Series(event_days).value_counts()
-        top_share = float(day_counts.head(max(1, len(day_counts) // 100)).sum() / len(events))
-    else:
-        top_share = None
+    # 重叠率/日集中度与 bucket_analysis 共用同一实现（R1-P2-12 收口）
+    overlap_ratio, top_share = overlap_and_cluster_stats(
+        events, max_h=max_h, event_days=event_days
+    )
     warnings = collect_warnings(
         event_count=len(events),
         overlap_ratio=overlap_ratio,
@@ -425,20 +439,6 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
             "window_kind": "holdout" if touched else "sample", "holdout_touched": touched,
         }],
     }
-
-
-class _EmptyAccount:
-    """事件扫描不需要账户：signal.scan 的 ctx.account 最小桩（只读）。"""
-
-    @property
-    def positions(self) -> dict:
-        return {}
-
-    def equity(self) -> float:
-        return 0.0
-
-    def heat(self):
-        return None
 
 
 def build_module() -> EvaluationModule:

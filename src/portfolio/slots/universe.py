@@ -91,7 +91,12 @@ class LiquidityFilterUniverse:
     """近 N 日成交额 ≥ 阈值（等风险世界里的"可交易池"）。
 
     params: min_amount20（近 20 日成交额均值下限）、top_n（可选：按成交额
-    均值取前 N）、levels/asset_type/enabled_only 同 category_filter。
+    均值取前 N）、asset_type/enabled_only 同 category_filter。
+
+    注（loop-review-ds4f R1-P3-6）：本模块**没有** `levels` 参数（schema 只
+    声明上面四个，未知参数在载入期被拒），此前 docstring 把它列进来，照文档
+    写配置会直接报"unknown param"。要按类目过滤请把 category_filter 与本模块
+    组合（或直接用 category_filter）。
     """
 
     def __init__(self, params: dict) -> None:

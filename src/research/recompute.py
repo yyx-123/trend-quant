@@ -119,6 +119,23 @@ def recompute_campaign(
             skipped.append({"id": exp_id, "reason": "evaluation module not runnable"})
             continue
         new_spec = _rewrite_module_ref(item["spec"], old_ref=old_module_ref, new_ref=new_module_ref)
+        # R1-P3-18：campaign 没有 holdout token 的传递通路（CLI/MCP 都没有
+        # 参数），触碰过 holdout 的目标实验必然以 HoldoutError 报 failed——
+        # 批量复核会"静默丢目标"。这里先判定，命中即按 skipped 显式记账，
+        # 让"有哪些目标没复核"在结果里可见（而不是混进 failed 的原因字符串）。
+        try:
+            from research import holdout as _holdout
+
+            _win = (new_spec or {}).get("window") or []
+            if len(_win) == 2 and _holdout.window_touches_holdout(db, _win[0], _win[1]):
+                skipped.append({
+                    "id": exp_id,
+                    "reason": "holdout_touched（campaign 无 token 传递通路，"
+                              "需人工单跑并附带 holdout token）",
+                })
+                continue
+        except Exception:
+            pass  # 判定失败不阻断复核（交给 runner 自行拒绝）
         # 复核运行：直接调 runner（不走状态机——原实验已是 verdicted 终态，
         # 复核是台账追加，不是生命周期重开）
         try:

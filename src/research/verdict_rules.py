@@ -142,8 +142,12 @@ def suggest_backtest_verdict(evidence: dict, rules: dict | None = None) -> str:
     regime = evidence.get("regime_split") or {}
     paired = (evidence.get("stats") or {}).get("paired")
 
+    # R1-P3-15：只有**样本足够**的 regime 分段才有资格行使塌陷否决——
+    # 极短分段（如 9 个交易日）的 ΔSharpe 是噪声，却足以一票否决 confirmed。
+    # 样本不足的段视为不可用（不足以否决），其存在本身由报告的 n_days 可见。
     collapse = any(
         (seg.get("delta_sharpe") is not None
+         and seg.get("sufficient_sample", True)
          and seg["delta_sharpe"] <= rules["regime_collapse_delta_sharpe"])
         for seg in regime.values()
     )

@@ -18,10 +18,13 @@ from core.indicators import efficiency_ratio
 from portfolio.slots.universe import UniverseMember
 from research.evaluations._common import (
     DEFAULT_MIN_AMOUNT20,
+    EmptyAccount,
     collect_warnings,
     forward_returns,
     load_eval_panel,
     long_window_annotations,
+    overlap_and_cluster_stats,
+    regime_labels,
     resolve_universe_symbols,
 )
 from research.evaluations.base import EvaluationModule, register_evaluation
@@ -148,6 +151,8 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
     module = spec_obj.factory(signal_params)
     if hasattr(module, "prepare"):
         module.prepare(panel)
+    # regime 标签（§6.6.3 的 single_regime 注记输入；与 event_study 同口径）
+    labels = regime_labels(panel)
     # 生产指标类信号（trend_score_cross 等）：经受限句柄取面板外数据——
     # 评审 A-R2：不接线的死模块会产出 0 事件、伪装成合法 inconclusive 进台账
     if hasattr(module, "prepare_with_gateway"):
@@ -175,7 +180,14 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
         def __init__(self, day, upto):
             self.date = day
             self.panel = PanelView(panel, upto)
-            self.account = None
+            # 事件扫描不需要账户，但信号模块会读 ctx.account.positions
+            # （如 abs_momentum@1）——必须给只读空账户桩，不能留 None。
+            # loop-review-ds4f R1-P1-3：留 None 时 bucket_analysis 会
+            # AttributeError 崩掉整个实验（status=failed），且按
+            # experiments.py 的计数口径，工程失败**计入 attempt_index**，
+            # 每次崩溃都在虚增 DSR 的试验次数 N。与 event.py 共用
+            # _common.EmptyAccount（单一实现）。
+            self.account = EmptyAccount()
             self.params = {}
             self.run_seed = day.toordinal()
             self.gateway = None
@@ -278,19 +290,38 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
                 random_spreads.append(float(g_means[-1] - g_means[0]))
         if random_spreads:
             random_band = float(np.percentile(np.abs(random_spreads), 95))
-            # 经验 p 值（评审 DS-P2-3）：|随机利差| ≥ |实际利差| 的比例
-            if spread is not None:
+            # 经验 p 值（评审 DS-P2-3）：|随机利差| ≥ |实际利差| 的比例。
+            # loop-review-ds4f R1-P2-11：必须判 isfinite——空桶时 spread 是
+            # **NaN 而不是 None**，`np.abs(random) >= nan` 全 False → p=0.0
+            # （全族最"显著"的值）被送进课题内 BH-FDR 抬高 still_significant。
+            if spread is not None and np.isfinite(spread):
                 evidence["p_value"] = float(
                     np.mean(np.abs(random_spreads) >= abs(spread))
                 )
 
-        if spread is not None and random_band is not None:
+        if spread is not None and np.isfinite(spread) and random_band is not None:
             if monotonicity >= 0.8 and abs(spread) > random_band:
                 suggested = "confirmed"
             elif monotonicity <= 0.2 and abs(spread) > random_band:
                 suggested = "rejected"  # 倒挂（方向反了本身也是结论）
 
-    warnings = collect_warnings(event_count=len(events))
+    # §6.6.3 五类注记对**全部**评估模块生效（loop-review-ds4f R1-P2-12）：
+    # 重叠率 / top1% 日集中度 / 单 regime 此前只有 event_study 侧算，
+    # bucket 结构性拿不到其中三类。与 event 共用 _common 的实现，
+    # bucket 用同一个 benchmark（510500.SS）打 regime 标签。
+    _overlap_ratio, _top_day_share = overlap_and_cluster_stats(
+        events, max_h=max_h, event_days=[panel.dates[t] for t, _c, _f in events]
+    )
+    _regimes = {labels[t] for t, _c, _f in events} if events else set()
+    # loop-review-ds4f R1-P2-11：这里必须是 extend 而不是重绑定——上面
+    # 已 append 的 empty_buckets 等模块级告警不能被覆盖掉（旧实现
+    # `warnings = collect_warnings(...)` 把空桶告警整条丢弃）。
+    warnings.extend(collect_warnings(
+        event_count=len(events),
+        overlap_ratio=_overlap_ratio,
+        top_day_share=_top_day_share,
+        regimes=_regimes,
+    ))
     warnings.extend(panel_warnings)  # F2：流动性过滤缩水进 evidence
     warnings.extend(long_window_annotations(start))
 

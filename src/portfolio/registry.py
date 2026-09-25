@@ -115,6 +115,22 @@ class ModuleRegistry:
             raise ModuleRegistrationError(f"module not registered: {ref}")
         return spec
 
+    def unregister(self, ref: str, *, slot: str | None = None) -> bool:
+        """按 ref 摘除注册项（模块下架用；返回是否真的摘掉）。
+
+        R1-P3-13：`retire_module` 此前只改库行，进程内注册表纹丝不动——被下架
+        的模块在**重启前**仍可被新实验引用，与"下架只禁止新引用"的宣称不符。
+        """
+        name, version = parse_module_ref(ref)
+        slots = [slot] if slot else list(SEVEN_SLOTS) + list(META_MODULES)
+        removed = False
+        for s in slots:
+            key = self._key(s, name, version)
+            if key in self._modules:
+                del self._modules[key]
+                removed = True
+        return removed
+
     def has(self, ref: str, slot: str | None = None) -> bool:
         return self.get(ref, slot=slot) is not None
 

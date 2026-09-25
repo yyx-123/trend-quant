@@ -24,6 +24,13 @@ if TYPE_CHECKING:
     from gateway.service import BoundGateway
 
 
+def _readonly(arr: np.ndarray) -> np.ndarray:
+    """把面板切片标为只读（不拷贝）。视图与其父数组共享内存，但 writeable=False
+    的视图拒绝赋值——模块拿不到可写句柄（R1-P3-9）。"""
+    arr.setflags(write=False)
+    return arr
+
+
 class PanelView:
     """Panel 的逐日限窗视图：所有读取截到 upto_idx（含当日）。"""
 
@@ -56,15 +63,20 @@ class PanelView:
         return self.__panel.symbols
 
     def series(self, symbol: str, field_name: str) -> np.ndarray:
-        """某标的截至当日的字段序列（含当日，因果无未来）。"""
+        """某标的截至当日的字段序列（含当日，因果无未来）。
+
+        R1-P3-9：返回**只读**视图（不拷贝，零开销）——面板是全体模块共享的
+        数据面，此前返回可写切片意味着任一模块可以静默改写后续所有日子看到的
+        行情（无告警、无留痕）。
+        """
         col = self.__panel._symbol_index.get(symbol)
         if col is None:
             return np.empty(0)
-        return self.__panel.data[field_name][: self._upto + 1, col]
+        return _readonly(self.__panel.data[field_name][: self._upto + 1, col])
 
     def matrix(self, field_name: str) -> np.ndarray:
-        """(t+1, N) 矩阵视图（截面计算用；缺数据 NaN）。"""
-        return self.__panel.data[field_name][: self._upto + 1, :]
+        """(t+1, N) 矩阵视图（截面计算用；缺数据 NaN）。只读，理由同 series。"""
+        return _readonly(self.__panel.data[field_name][: self._upto + 1, :])
 
     def bar(self, symbol: str) -> dict | None:
         return self.__panel.bar_at(symbol, self.__panel.dates[self._upto])
@@ -77,7 +89,9 @@ class PanelView:
         return float(v) if np.isfinite(v) else None
 
     def lookback(self, symbol: str, field_name: str, n: int) -> np.ndarray:
-        """最近 n 根（含当日）。"""
+        """最近 n 根（含当日）。n<=0 返回空数组（R1-P3-9：`[-0:]` 是整条序列）。"""
+        if n <= 0:
+            return np.empty(0)
         return self.series(symbol, field_name)[-n:]
 
     def has_symbol(self, symbol: str) -> bool:

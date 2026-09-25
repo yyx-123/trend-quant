@@ -82,12 +82,21 @@ class HeatCapGate:
         heat = heat or 0.0
         cap = equity * self.max_heat_pct
         est_stops: dict = ctx.params.get("_est_stops", {})
+        # 候选自身没有止损估计（持仓风控模块按设计不给，如 time_stop/
+        # breakeven/none）：与"组合热不可知"同一裁决口径——**告警放行**，
+        # cap 对这类候选不生效，并在 gate_log 与 run warnings 里明说。
+        # loop-review-ds4f R1-P2-4：旧实现此处 `continue`（拒绝全部候选），
+        # 与 backtester 同步发出的"heat_cap 本 run 不卡控（告警放行）"完全
+        # 相反 → 该策略族静默零成交（实证 breakeven/time_stop/none 全 0 笔，
+        # hard_stop 对照组 9 笔）。"止损选型"恰是首个课题。
         out: list[OrderIntent] = []
         for intent in intents:
             stop = est_stops.get(intent.symbol)
             price = ctx.panel.value(intent.symbol, "close")
             if stop is None or price is None:
-                _log(ctx, "heat_cap", intent.symbol, "no_stop_estimate")
+                _log(ctx, "heat_cap", intent.symbol,
+                     "no_stop_estimate — cap NOT enforced for this candidate")
+                out.append(intent)
                 continue
             qty = _intent_qty_estimate(ctx, intent)
             add = max(0.0, (price - stop) * qty)

@@ -80,8 +80,20 @@ def propose_module(
                     reject_reason = json.dumps(report["checks"], ensure_ascii=False)[:500]
             except Exception as exc:
                 status = "rejected"
-                report = {"gate": "python", "ok": False, "error": str(exc)[:500]}
-                reject_reason = f"load: {exc}"
+                # R1-P3-19：对外只给业务原因（异常细节只进日志）——装载/门的
+                # 内部异常可能含本机路径与栈内细节，与 _error_payload 的口径
+                # 保持一致（detail 由 reject_reason 暴露给 MCP 客户端）。
+                import logging
+
+                # 异常细节（可能含本机路径/栈内信息）只进日志；对外文案见 report
+                logging.getLogger(__name__).exception("module draft review failed")
+                report = {
+                    "gate": "python", "ok": False,
+                    "error": f"{type(exc).__name__}: 模块装载/自动测试失败"
+                             "（细节见服务端日志）",
+                }
+                reject_reason = "load: module failed to load or pass the gate"
+
 
     with db.connect() as conn:
         draft_id = alloc_id(conn, "module_drafts", "M", width=4)
@@ -124,12 +136,31 @@ _RESTRICTED_BUILTINS = {
 }
 
 
+# 危险模块属性名（R1-D-1 低成本缓解）：白名单库上仍可经属性链取到"模块对象"
+# 的逃生口（`pd.io.common.os`、`np.ctypeslib.ctypes` 等）。命名级黑名单掐断
+# 常见链路；**不是**真沙箱——真隔离需子进程/容器，见 round1-review R1-D-1。
+_DENIED_ATTR_NAMES = frozenset({
+    "os", "sys", "subprocess", "ctypes", "ctypeslib", "pickle", "shutil",
+    "importlib", "builtins", "socket", "urllib", "requests", "multiprocessing",
+    "threading", "tempfile", "pathlib", "glob", "signal", "pty", "platform",
+    "resource", "gc", "inspect", "marshal", "code", "codeop", "cmd",
+    "system", "popen", "spawn", "spawnl", "spawnv", "execv", "execve",
+    "fork", "kill", "remove", "unlink", "rmtree", "chmod", "chown",
+    "write", "writelines", "to_csv", "to_pickle", "to_json", "to_sql",
+    "read_csv", "read_pickle", "read_sql", "load", "loads", "dump", "dumps",
+})
+
+
 def _prescreen_python_source(source: str) -> list[str]:
     """exec 前 AST 静态筛查（评审 B-P1-4）：白名单 import + 禁属性逃逸。
 
-    信任模型（写死在文档）：本系统是单人本地研究基建，python 模块门的
-    定位是"防误伤的前视/越界探针 + 明显的逃逸拦截"，不是对抗恶意代码的
-    真沙箱（详设 §6.7：若未来放开任意代码执行，再升级为容器级隔离）。
+    信任模型（写死在文档，R1-D-1 如实化）：本系统是单人本地研究基建，
+    python 模块门 + 预筛的定位是"防误伤的前视/越界探针 + 常见逃逸拦截"，
+    **不是对抗恶意代码的真沙箱**——门与装载仍在**进程内 exec**，命名级
+    属性黑名单只能抬高门槛、不能给出"无任意代码执行路径"的保证。因此
+    MCP 通道应按**完全信任通道**理解；若要兑现详设 §6.7 的"AI 无任意代码
+    执行路径"，须把门/装载迁到子进程或容器（见 loop-review-ds4f
+    round1-review 的 R1-D-1 决策点）。
     """
     import ast
 
@@ -149,6 +180,15 @@ def _prescreen_python_source(source: str) -> list[str]:
         elif isinstance(node, ast.Attribute):
             if node.attr.startswith("__"):
                 errors.append(f"dunder attribute access not allowed: {node.attr}")
+            elif node.attr in _DENIED_ATTR_NAMES:
+                # R1-D-1 缓解：白名单库的**模块对象属性链**此前不受限——
+                # `pd.io.common.os.system(...)` / `np.ctypeslib.ctypes...` 都能
+                # 过预筛拿到任意命令执行（代理已实证 marker 文件写出）。这里
+                # 掐断常见链路；真隔离需子进程/容器（决策点 R1-D-1）。
+                errors.append(
+                    f"attribute name not allowed: {node.attr} "
+                    "(dangerous module attribute chain)"
+                )
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             # R2-P3-5：真逃逸向量是 "{0.__class__}".format(x)——dunder 藏在
             # 字符串常量里（f-string 内表达式反而会被上面的 Attribute 扫描
@@ -159,13 +199,14 @@ def _prescreen_python_source(source: str) -> list[str]:
                     "string literal may not contain attribute-escape token '.__' "
                     "(format-string dunder access is not visible to AST scan)"
                 )
-        elif isinstance(node, ast.Name):
-            if node.id in ("eval", "exec", "open", "compile", "getattr", "setattr",
-                           "globals", "locals", "vars", "input", "breakpoint",
-                           "__import__", "__builtins__", "__globals__"):
-                # __builtins__/__globals__（R2VB B-6）：下标取 __import__ 的
-                # 逃逸路径（__builtins__["__import__"]("os")）从这里掐断
-                errors.append(f"name not allowed: {node.id}")
+        elif isinstance(node, ast.Name) and node.id in (
+            "eval", "exec", "open", "compile", "getattr", "setattr",
+            "globals", "locals", "vars", "input", "breakpoint",
+            "__import__", "__builtins__", "__globals__",
+        ):
+            # __builtins__/__globals__（R2VB B-6）：下标取 __import__ 的逃逸
+            # 路径（__builtins__["__import__"]("os")）从这里掐断
+            errors.append(f"name not allowed: {node.id}")
     return errors
 
 
@@ -224,7 +265,12 @@ def list_drafts(db, status: str | None = None) -> list[dict]:
 
 
 def retire_module(db, *, draft_id: str, session_id: str) -> dict:
-    """下架（仅 human；只禁止新引用，不影响已完成实验的记录）。"""
+    """下架（仅 human；只禁止新引用，不影响已完成实验的记录）。
+
+    R1-P3-13：除库行改态外，**同步从进程内注册表摘除**——否则被下架的模块
+    在重启前仍能被新实验引用（引用合法性判定读的是注册表、不是库行），
+    "下架只禁止新引用"名不副实。
+    """
     require_human_session(db, session_id)
     draft = get_draft(db, draft_id)
     if draft is None:
@@ -234,6 +280,17 @@ def retire_module(db, *, draft_id: str, session_id: str) -> dict:
             """UPDATE module_drafts SET status = 'retired',
                reviewed_at = datetime('now','localtime') WHERE id = ?""",
             (draft_id,),
+        )
+    try:
+        from portfolio.registry import REGISTRY
+
+        REGISTRY.unregister(f"{draft['name']}@{draft['version']}", slot=draft["slot"])
+    except Exception:  # 注册表不可用不影响下架本身（库行已改态，重启后即生效）
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "retire_module: failed to unregister %s@%s from in-process registry",
+            draft["name"], draft["version"],
         )
     return get_draft(db, draft_id)
 

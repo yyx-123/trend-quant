@@ -136,11 +136,25 @@ def cost_drag(fills: list[dict]) -> dict:
     }
 
 
+def _fill_price(fill: dict) -> float:
+    """成交价：DB 路径键名 fill_price，回测器内存路径键名 price（R1-P3-1）。"""
+    value = fill.get("fill_price")
+    return float(value if value is not None else fill.get("price") or 0.0)
+
+
+def _fill_qty(fill: dict) -> int:
+    value = fill.get("quantity")
+    return int(value if value is not None else fill.get("qty") or 0)
+
+
 def pair_round_trips(fills: list[dict]) -> list[dict]:
     """fills → round trips（同标的首笔买入配对随后的卖出；MVP 单仓位）。
 
     fills 需带 ``side``（DB 路径由 EngineStore.load_fills 联 engine_orders
-    补出；内存路径由回测器直接携带）。
+    补出；内存路径由回测器直接携带）。价格/数量键名两套形态都接受：
+    DB 侧是 ``fill_price``/``quantity``，回测器内存侧是 ``price``/``qty``
+    （R1-P3-1：此前 docstring 声称内存路径可用，实际按 DB 键名取值 →
+    KeyError）。
     """
     rounds: list[dict] = []
     open_lots: dict[str, list[dict]] = {}
@@ -153,13 +167,15 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
             if not lots:
                 continue
             entry = lots.pop(0)
-            qty = int(f["quantity"])
-            gross = qty * (float(f["fill_price"]) - float(entry["fill_price"]))
+            qty = _fill_qty(f)
+            entry_price = _fill_price(entry)
+            exit_price = _fill_price(f)
+            gross = qty * (exit_price - entry_price)
             rounds.append({
                 "symbol": symbol,
                 "entry_date": f0(entry), "exit_date": f0(f),
-                "entry_price": float(entry["fill_price"]),
-                "exit_price": float(f["fill_price"]),
+                "entry_price": entry_price,
+                "exit_price": exit_price,
                 "qty": qty,
                 "pnl_gross": gross,
                 "pnl_net": gross - float(entry.get("fee_total", 0.0)) - float(f.get("fee_total", 0.0)),
@@ -168,7 +184,7 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
 
 
 def f0(fill: dict) -> str:
-    return str(fill.get("fill_date") or "")
+    return str(fill.get("fill_date") or fill.get("date") or "")
 
 
 def build_report(
@@ -185,7 +201,8 @@ def build_report(
     round_trips: list[dict] | None = None,
 ) -> dict:
     """汇总一份组合回测报告（完整明细，不摘要化——§6.5.0 报告完整性）。"""
-    summary = compute_summary(nav_rows, trades=[], turnover_total=_turnover(fills, nav_rows))
+    traded_total = _traded_amount(fills)
+    summary = compute_summary(nav_rows, trades=[], turnover_total=traded_total)
     bench_rel = {
         name: benchmark_relative(nav_rows, rows)
         for name, rows in (benchmarks or {}).items()
@@ -206,10 +223,17 @@ def build_report(
         "drawdown_durations": drawdown_durations(nav_rows),
         "return_distribution": return_distribution(nav_rows),
         "cost": cost_drag(fills),
-        "turnover_total": _turnover(fills, nav_rows),
+        # turnover_total = **货币成交额**（与 evaluations/backtest.py、
+        # head_to_head.py 同一口径：compute_summary 内部再除以平均权益得到
+        # 换手率）；turnover_ratio 是已算好的比率，供阅读方直接用。
+        # loop-review-ds4f R1-P1-4：旧实现把已除过平均权益的**比率**当成交额
+        # 传回 compute_summary，被再除一次 → summary.turnover 恒为真值的
+        # 1/avg_equity（≈1e-6），即"假 0 换手"的第三次复发。
+        "turnover_total": traded_total,
+        "turnover_ratio": summary.get("turnover"),
         "heat_series": [{"date": r["date"], "heat": r.get("heat")} for r in nav_rows],
         "exposure_series": [{"date": r["date"], "exposure": r.get("exposure")} for r in nav_rows],
-        "slot_utilization": _slot_utilization(positions_snapshots or [], slot_limit),
+        "slot_utilization": _slot_utilization(positions_snapshots or [], slot_limit, nav_rows),
         "concentration_series": _concentration_series(db, positions_snapshots or []),
         # round trips：优先回测器的富化版（R 倍数/MAE/MFE）；缺省由 fills 配对
         "round_trips": round_trips if round_trips is not None else pair_round_trips(fills),
@@ -220,22 +244,34 @@ def build_report(
     return report
 
 
-def _turnover(fills: list[dict], nav_rows: list[dict]) -> float:
-    traded = sum(abs(float(f["fill_price"]) * int(f["quantity"])) for f in fills)
-    equities = [float(r["equity"]) for r in nav_rows if r.get("equity")]
-    avg = sum(equities) / len(equities) if equities else 0.0
-    return traded / avg if avg > 0 else 0.0
+def _traded_amount(fills: list[dict]) -> float:
+    """成交总额（|价×量| 求和）——compute_summary 的 turnover_total 入参口径。
+
+    比率由 compute_summary 自己算（÷平均权益）；本函数**只**返回货币总额，
+    绝不预除权益（R1-P1-4 的教训）。
+    """
+    return sum(abs(float(f["fill_price"]) * int(f["quantity"])) for f in fills)
 
 
-def _slot_utilization(snapshots: list[dict], slot_limit: int | None) -> list[dict]:
+def _slot_utilization(
+    snapshots: list[dict], slot_limit: int | None, nav_rows: list[dict] | None = None
+) -> list[dict]:
+    """逐日槽位占用（§5.4.3）。
+
+    日期轴以 nav_rows 为准、无持仓快照的日子记 0（R1-P3-2：此前直接由持仓
+    快照派生，空仓日整天缺行 → 报告里的利用率序列有缺齿，读图会以为"没有
+    数据"而不是"空仓"）。
+    """
     if not slot_limit:
         return []
     by_day: dict[str, int] = {}
     for s in snapshots:
         by_day[s["date"]] = by_day.get(s["date"], 0) + 1
+    axis = [str(r.get("date")) for r in (nav_rows or [])] or sorted(by_day)
     return [
-        {"date": d, "held": n, "limit": slot_limit, "utilization": n / slot_limit}
-        for d, n in sorted(by_day.items())
+        {"date": d, "held": by_day.get(d, 0), "limit": slot_limit,
+         "utilization": by_day.get(d, 0) / slot_limit}
+        for d in axis
     ]
 
 

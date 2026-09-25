@@ -202,24 +202,12 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Monthly industry sync failed")
 
-    def _run_daily_update(force: bool = False) -> None:
-        payload = daily_market_update_job(settings, force=force)
-        logger.info(
-            "Daily market data update (16:30): %s success, %s failed out of %s",
-            payload.get("success", 0),
-            payload.get("failed", 0),
-            payload.get("total", 0),
-        )
-        if payload.get("status") in (
-            "skipped_non_trading_day", "deferred_backtest_running", "skipped_already_running"
-        ):
-            # 冻结顺延（决策 A3）：当日更被回测冻结推迟时，post-update pipeline
-            # （除权检测 + 指标重建 = 写任务）同样不得抢跑。
-            # skipped_already_running（R1-P1-4）：另一触发源正在执行日更，
-            # post-update 由那次执行完成，本触发不得叠加。
-            return
-        # Post-update orchestration (dividend detection + indicator rebuild)
-        # lives here so that core/jobs stays free of services-layer imports.
+    def _finish_daily_update(payload: dict) -> None:
+        """日更成功后的 post-update 编排（除权检测 + 指标重建 + 看板预热）。
+
+        独立成函数（loop-review-ds4f R1-P2-13）：冻结顺延时的当日补跑哨兵
+        同样需要走这一段——此前哨兵只调日更本体，顺延日的指标缓存整日缺失。
+        """
         from core.calendar import market_now
         from data.service import get_data_service
         from data.storage.db import record_job_run_safely
@@ -238,6 +226,30 @@ async def lifespan(app: FastAPI):
         # Daily update changed the data revision; re-warm in background so the
         # next user request does not pay the cold-rebuild cost.
         threading.Thread(target=_warm_dashboard, daemon=True).start()
+
+    def _run_daily_update(force: bool = False) -> None:
+        # after_update 传入日更作业：仅当冻结顺延哨兵随后真正补跑成功时，
+        # 由哨兵回调本函数完成 pipeline（正常路径在本函数末尾直接调用一次，
+        # 两条路径互斥、不会重复执行）。
+        payload = daily_market_update_job(settings, force=force, after_update=_finish_daily_update)
+        logger.info(
+            "Daily market data update (16:30): %s success, %s failed out of %s",
+            payload.get("success", 0),
+            payload.get("failed", 0),
+            payload.get("total", 0),
+        )
+        if payload.get("status") in (
+            "skipped_non_trading_day", "deferred_backtest_running", "skipped_already_running"
+        ):
+            # 冻结顺延（决策 A3）：当日更被回测冻结推迟时，post-update pipeline
+            # （除权检测 + 指标重建 = 写任务）同样不得抢跑。
+            # skipped_already_running（R1-P1-4）：另一触发源正在执行日更，
+            # post-update 由那次执行完成，本触发不得叠加。
+            # deferred 分支：补跑由当日哨兵承担，成功后调 after_update。
+            return
+        # Post-update orchestration (dividend detection + indicator rebuild)
+        # lives here so that core/jobs stays free of services-layer imports.
+        _finish_daily_update(payload)
 
     def _daily_update_catchup() -> None:
         """启动补偿：EOD 数据落后于「本应已持久化的最近交易日」时补跑一次。

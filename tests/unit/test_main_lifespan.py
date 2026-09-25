@@ -73,7 +73,9 @@ class TestDailyUpdateCatchup:
         monkeypatch.setattr(
             main,
             "daily_market_update_job",
-            lambda settings, force=False: calls.append(force) or {"status": "skipped_non_trading_day"},
+            # 钉子复刻真实调用形态（R1-P2-13：作业新增 after_update 回调参数）
+            lambda settings, force=False, **kwargs: calls.append(force)
+            or {"status": "skipped_non_trading_day"},
         )
         created = _run_lifespan_and_capture_threads(monkeypatch, test_db)
         _catchup_target(created)()
@@ -102,7 +104,9 @@ class TestDailyUpdateCatchup:
         monkeypatch.setattr(
             main,
             "daily_market_update_job",
-            lambda settings, force=False: calls.append(force) or {"status": "skipped_non_trading_day"},
+            # 钉子复刻真实调用形态（R1-P2-13：作业新增 after_update 回调参数）
+            lambda settings, force=False, **kwargs: calls.append(force)
+            or {"status": "skipped_non_trading_day"},
         )
         created = _run_lifespan_and_capture_threads(monkeypatch, test_db)
         _catchup_target(created)()
@@ -130,7 +134,9 @@ class TestDailyUpdateCatchup:
         monkeypatch.setattr(
             main,
             "daily_market_update_job",
-            lambda settings, force=False: calls.append(force) or {"status": "skipped_non_trading_day"},
+            # 钉子复刻真实调用形态（R1-P2-13：作业新增 after_update 回调参数）
+            lambda settings, force=False, **kwargs: calls.append(force)
+            or {"status": "skipped_non_trading_day"},
         )
         created = _run_lifespan_and_capture_threads(monkeypatch, test_db)
         _catchup_target(created)()

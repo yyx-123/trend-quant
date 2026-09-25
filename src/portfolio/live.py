@@ -332,9 +332,22 @@ def generate_daily_list(
     )
     slip = fill_policy["slippage_base"] + fill_policy["slippage_tail"]
 
+    # 当日可交易性：as_of 当日的 EOD bar 要等 16:30 才落库，故把面板里的
+    # 盘中合成 bar（provisional 行）并入推导——否则当日每个标的都因
+    # has_bar=False 被判 suspended=True，涨跌停标记永不置位
+    # （loop-review-ds4f R1-P2-10：14:00 清单的 tradability 列全是"停牌"）。
+    _live_day = panel.dates[t_idx]
+    _live_bars: dict[str, float] = {}
+    if panel.provisional is not None:
+        for _col, _sym in enumerate(panel.symbols):
+            if bool(panel.provisional[t_idx, _col]):
+                _v = float(panel.data["close"][t_idx, _col])
+                if np.isfinite(_v) and _v > 0:
+                    _live_bars[_sym] = _v
     cards = _build_tradability_cards(
-        gateway.get_tradability(symbols=list(panel.symbols), dates=[panel.dates[t_idx]],
-                                as_of=as_of, caller_layer="live")
+        gateway.get_tradability(symbols=list(panel.symbols), dates=[_live_day],
+                                as_of=as_of, caller_layer="live",
+                                live_bars=_live_bars or None)
     )
     # 整手单位（loop-review R1-P1-5）：quantity 意图（equal_risk 产任意浮点
     # 股数）同样必须整手对齐——回测引擎在 matcher 内做，清单路径此前只

@@ -191,6 +191,10 @@ def build_panel(
                 continue  # 合成 bar 只代表 as_of 当日
             if start_day is not None and day < start_day:
                 continue
+            if end_day is not None and day > end_day:
+                # R1-P3-21：只校验 start 会让 overlay 行越过请求的 end 边界
+                # （end=03-13、as_of=03-15 时仍插入 03-15 行）
+                continue
             provisional_rows[symbol] = {
                 "_day": day,
                 "open": bar.get("open"),

@@ -33,9 +33,13 @@ def default_live_overlay(db):
             try:
                 import pandas as _pd
 
-                win_start = (_pd.Timestamp(as_of) - _pd.Timedelta(days=10)).date()
+                # R1-P3-20：窗口 10 自然日不够跨长假（实测 2023-10-09 前是
+                # 11 日缺口 → 取不到前 bar → 合成 bar volume=0）；且 end 必须
+                # 锚在 as_of，否则盘后重触发会把**当日自己的** bar 当"前一根"。
+                as_of_day = _pd.Timestamp(as_of).date()
+                win_start = (as_of_day - _pd.Timedelta(days=20)).date()
                 prev = db.load_market_data_window_many(
-                    [symbol], win_start, None, price_mode="raw", period="1d",
+                    [symbol], win_start, as_of_day, price_mode="raw", period="1d",
                 )
                 frames = prev.get(symbol) if isinstance(prev, dict) else None
                 if frames is not None and len(frames):

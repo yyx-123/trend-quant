@@ -36,6 +36,10 @@ def _is_first_day_of_period(ctx, freq: str) -> bool:
         return ctx.date.toordinal() % n == 0
     dates = ctx.panel.dates
     if idx == 0:
+        # 窗口首日无前一根 bar：无从判断"是否跨周期边界"，按动作日放行。
+        # 这是**刻意**的逃生口（R1-P3-5：面板无预热数据时若卡住，月度门在
+        # 窗口起点非月初的场景会一直等到下一月初）；副作用是动作日集合
+        # 依赖窗口起点——需要严格"每月首个交易日"的基准应保证面板含预热期。
         return True
     prev, cur = dates[idx - 1], dates[idx]
     if freq == "monthly":

@@ -24,16 +24,36 @@ router = APIRouter(prefix="/research-ledger", tags=["research-ledger"])
 templates = Jinja2Templates(directory=str(web_dir() / "templates"))
 
 
+_SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
 def _reject_cross_site_form(request: Request) -> None:
-    """CSRF 补充防线（loop-review R2-P2-1）：台账的 3 个变更 POST 是全站
-    仅有的不经过 AuthWall X-Requested-With 检查（那只覆盖 /api/ 路径）的
-    变更端点。SameSite=Lax 在 Chrome 有 2 分钟 "Lax+POST" 豁免窗口，且
-    confirm 不可逆（final 落定后库层触发器拒改）——现代浏览器跨站表单
-    必带 ``Sec-Fetch-Site: cross-site``，据此拒绝；旧浏览器无该头时仍由
-    SameSite=Lax 兜底（双层互补，零 UI 改动）。"""
-    site = str(request.headers.get("sec-fetch-site") or "").lower()
-    if site == "cross-site":
+    """CSRF 补充防线（loop-review R2-P2-1 + ds4f R1-P2-8）。
+
+    台账的 3 个变更 POST 是全站仅有的不经过 AuthWall X-Requested-With 检查
+    （那只覆盖 /api/ 路径）的变更端点，且是 **HTML 表单**（表单无法自带自定义
+    头，故不能沿用 /api 口径）。这里做两道与页面形态兼容的校验：
+
+    1. ``Sec-Fetch-Site`` 若存在，必须是 ``same-origin`` 或 ``none``——
+       旧实现只拒 ``cross-site``，于是 ``same-site``（同注册域子域/同主机不同
+       端口）与空白值都放行，而 confirm 不可逆、holdout 发放是治理动作；
+    2. ``Origin`` 若存在，其 host:port 必须与请求的 ``Host`` 一致——
+       浏览器跨站表单必带 Origin，这一道覆盖不发 Sec-Fetch-Site 的旧客户端。
+
+    两者都不存在时（非浏览器客户端 / 旧浏览器）仍由 SameSite=Lax 兜底
+    （双层互补，零 UI 改动）。
+    """
+    site = str(request.headers.get("sec-fetch-site") or "").strip().lower()
+    if site and site not in _SAME_ORIGIN_FETCH_SITES:
         raise HTTPException(status_code=403, detail="cross-site form post rejected")
+    origin = str(request.headers.get("origin") or "").strip()
+    if origin and origin.lower() != "null":
+        from urllib.parse import urlsplit
+
+        host = str(request.headers.get("host") or "").strip().lower()
+        origin_netloc = (urlsplit(origin).netloc or "").strip().lower()
+        if host and origin_netloc and origin_netloc != host:
+            raise HTTPException(status_code=403, detail="cross-origin form post rejected")
 
 
 def _service() -> ResearchService:
@@ -204,6 +224,11 @@ def grant_holdout(
     _reject_cross_site_form(request)
     service = _service_or_testbed()
     session = service.default_human_session()
+    # loop-review-ds4f R1-P3-13：holdout 发放是治理动作，purpose 是它唯一的
+    # 留痕内容；表单的 HTML `required` 不是防线（直接 POST 可绕过），空串会
+    # 落成一条无意义的授权记录。
+    if not str(purpose or "").strip():
+        raise HTTPException(status_code=409, detail="purpose must be non-empty")
     try:
         service.grant_holdout(
             session_id=session["session_id"], purpose=purpose,

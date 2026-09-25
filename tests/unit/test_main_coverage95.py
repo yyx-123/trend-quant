@@ -74,7 +74,8 @@ class TestUpdateJob:
         monkeypatch.setattr(
             main,
             "daily_market_update_job",
-            lambda settings, force=False: calls.append(force) or {"status": "skipped_non_trading_day"},
+            lambda settings, force=False, **kwargs: calls.append(force)
+            or {"status": "skipped_non_trading_day"},
         )
         jobs["update_job"](force=True)
         assert calls == [True]
@@ -87,7 +88,7 @@ class TestUpdateJob:
         _, jobs = _capture_lifespan(monkeypatch, test_db)
         calls: list = []
 
-        def fake_daily_job(settings, force=False):
+        def fake_daily_job(settings, force=False, **kwargs):
             calls.append(force)
             if len(calls) == 1:
                 jobs["update_job"]()  # 持锁期间嵌套触发 → 应被跳过
@@ -105,7 +106,7 @@ class TestUpdateJob:
         monkeypatch.setattr(
             main,
             "daily_market_update_job",
-            lambda settings, force=False: {"status": "skipped_non_trading_day"},
+            lambda settings, force=False, **kwargs: {"status": "skipped_non_trading_day"},
         )
         monkeypatch.setattr(
             "services.indicator_builder.run_post_update_pipeline",

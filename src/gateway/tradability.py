@@ -4,9 +4,13 @@
 
 - 停牌：当日是交易日但无 bar → suspended=True；
 - 涨跌停价：**除权基准修正后**的前收盘价 × 板块幅度——
-  基准价 = raw close(t-1)；若 t 是除权日（查 ex_factors），
-  基准价 = raw close(t-1) / f_t（与交易所口径一致——本项目因子语义为
-  qfq(t) = raw(t) / Π f，除权日参考前收 = 前收 ÷ 当日因子）；
+  基准价 = raw close(t-1)；若 t 是**除权除息日**（= ex_factors 存储日 E
+  之后的**第一根该标的 bar**），基准价 = raw close(t-1) / f_t。
+  口径依据（loop-review-ds4f R1-P1-1 实证修正）：本项目因子语义为
+  qfq(t) = raw(t) / Π_{ex_date≥t} f（core/adjustment.py），该语义要求
+  「存储日 E 的前收 ÷ f = E+1 的价格」才是无断裂的复权序列——即 E 是
+  权益登记日（除权前最后一根 bar），价格实际在 E+1 跳水。真实库
+  107/107 无歧义样本的跌幅落在 E+1，落在 E 的为 0；
   - 主板（.SS 60xxxx、.SZ 00xxxx）±10%；
   - 科创板（.SS 68xxxx）、创业板（.SZ 30xxxx）±20%；
   - ETF 跟随其**标的板块**（GLM53F-P1-1）：沪 588xxx、及名称含"创业板/
@@ -95,6 +99,8 @@ def compute_tradability(
     ex_factors: dict[str, list[tuple]] | None = None,
     listing_dates: dict[str, str] | None = None,
     asset_info: dict[str, dict] | None = None,
+    live_bars: dict[str, float] | None = None,
+    live_bar_day: date | None = None,
 ) -> pd.DataFrame:
     """逐 (date, symbol) 推导可交易性。返回 DataFrame：
 
@@ -107,6 +113,11 @@ def compute_tradability(
     listing_dates: {symbol: 'YYYY-MM-DD'}——缺省时读 instrument_metadata；
     asset_info: {symbol: {asset_type, name}}——缺省时读 instrument_metadata
     （ETF 幅度与新股豁免天数依赖它，GLM53F-P1-1/P2-17）。
+    live_bars: {symbol: as_of 当日盘中价}——**仅**在 ``live_bar_day``（须落在
+    请求的 dates 内）上并入，用于 live 模式：当日 EOD bar 尚未落库
+    （16:30 才写），不并入会让当日 ``suspended=True``（loop-review-ds4f
+    R1-P2-10：14:00 实盘清单的所有标的都被标成"停牌"、涨跌停标记永不置位）。
+    该参数只对 ``live_bar_day`` 生效，无法用于注入历史/未来任意日行情。
     """
     symbols = [str(s or "").strip().upper() for s in symbols if str(s or "").strip()]
     symbols = list(dict.fromkeys(symbols))
@@ -119,6 +130,26 @@ def compute_tradability(
         # 前收必须能从垫片期算出——30 日垫片对停牌 >30 天的标的 fail-open
         pad = pd.Timestamp(min(dates)) - pd.Timedelta(days=250)
         raw_closes = _load_raw_closes(db, symbols, pad.date(), max(dates))
+    # live 模式并入盘中合成 bar（见 docstring；只在 live_bar_day 生效）
+    if live_bars and live_bar_day is not None:
+        _live_day = pd.Timestamp(live_bar_day).date()
+        if _live_day in set(dates):
+            raw_closes = dict(raw_closes)
+            for _sym, _close in live_bars.items():
+                try:
+                    value = float(_close)
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(value) or value <= 0:
+                    continue
+                key = str(_sym or "").strip().upper()
+                ser = raw_closes.get(key)
+                if ser is None:
+                    raw_closes[key] = pd.Series({_live_day: value})
+                else:
+                    ser = ser.copy()
+                    ser.loc[_live_day] = value
+                    raw_closes[key] = ser
     if ex_factors is None:
         ex_factors = {s: db.load_ex_factors(s) for s in symbols}
     if listing_dates is None or asset_info is None:
@@ -155,7 +186,6 @@ def compute_tradability(
         dtype=np.int64,
     )
     is_trading_arr = np.array([trading_day_cache[d] for d in dates])
-    date_to_i = {d: i for i, d in enumerate(dates)}
     day_ordinals = np.array([d.toordinal() for d in dates], dtype=np.int64)
 
     def _round_fen_vec(x: np.ndarray) -> np.ndarray:
@@ -200,12 +230,36 @@ def compute_tradability(
         has_bar = np.isfinite(close_v)
         suspended = is_trading_arr & ~has_bar
 
-        # 除权日因子（仅除权当日生效）：基准价 = raw close(t-1) / f_t（交易所口径）
-        f_t = np.ones(len(dates), dtype=float)
-        for day_raw, factor in (ex_factors.get(symbol) or []):
-            idx = date_to_i.get(pd.Timestamp(str(day_raw)[:10]).date())
-            if idx is not None and float(factor) > 0:
-                f_t[idx] = float(factor)
+        # 除权基准修正（loop-review-ds4f R1-P1-1）：因子存储日 E 是**除权前**
+        # 的最后一根 bar（权益登记日口径，与 core/adjustment.py 的
+        # qfq(t)=raw(t)/Π_{ex_date≥t}f 语义自洽）——raw 价格实际在 E 之后的
+        # **第一根该标的 bar**（除权除息日）跳水。交易所参考前收只在那一根
+        # bar 上做 ÷f 修正；其余 bar 的基准价就是最近可得前收。
+        # 真实库实证：factor ≥ 1.15 的 107 个无歧义样本，跌幅 107/107 落在
+        # E 的后一根 bar（落在 E 的 0 个）。此前的"按 E 当日生效"会在 E 日
+        # 产出**假涨停**（f ≥ 1.1 时收盘 ≥ 被压低的涨停价）→ 买不进；在
+        # E+1 日产出**假跌停**（f ≥ 1/0.9 时收盘 ≤ 被抬高的跌停价）→ 卖不掉
+        # 且盘中止损被阻塞。enabled 池 274 只标的 / 932 个交易日受影响。
+        f_ax = np.ones(len(axis_days), dtype=float)
+        if ser is not None:
+            bar_pos = np.flatnonzero(np.isfinite(close_ax))
+            if bar_pos.size:
+                bar_ord = np.array(
+                    [axis_days[int(j)].toordinal() for j in bar_pos], dtype=np.int64
+                )
+                for day_raw, factor in (ex_factors.get(symbol) or []):
+                    try:
+                        ex_ord = pd.Timestamp(str(day_raw)[:10]).date().toordinal()
+                        f = float(factor)
+                    except (TypeError, ValueError):
+                        continue
+                    if not np.isfinite(f) or f <= 0:
+                        continue
+                    # 第一根「日期严格晚于 E 且有 bar」的轴日 = 除权除息日
+                    k = int(np.searchsorted(bar_ord, ex_ord, side="right"))
+                    if k < bar_pos.size:
+                        f_ax[int(bar_pos[k])] = f
+        f_t = f_ax[run_idx]
 
         # 新股上市初期无涨跌幅限制（天数分板块/分时代，GLM53F-P2-17）
         no_limit = np.zeros(len(dates), dtype=bool)

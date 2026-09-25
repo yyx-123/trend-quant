@@ -41,6 +41,21 @@ def _field_df(panel, name: str) -> pd.DataFrame:
     )
 
 
+def _filled_df(panel, name: str) -> pd.DataFrame:
+    """列内前向填充的面板切片（停牌日沿用最近可得价）。
+
+    loop-review-ds4f R1-P2-1：停牌日面板为 NaN，而
+    ``rolling(n, min_periods=n)`` 只计非 NaN 观测——NaN 行**及其后 n-1 行**
+    都取不到指标值，窗口恢复的那一根 bar 会被 ``~prev_above & above``
+    判成"新交叉" → 停牌后凭空多出一笔买入（实证：同价序列抽掉一根 bar，
+    干净序列 0 笔、缺口序列多出一笔 20 个交易日后的买单）。与
+    ``backtester._precompute_atr`` 的 R1-P3-5 裁决同口径：先列内 ffill
+    再算指标。MACD（ewm）不在此列——NaN 不会产生幻影交叉，且 ffill 会
+    改变 EMA 递归权重。
+    """
+    return _field_df(panel, name).ffill()
+
+
 def _last_true_idx(mask: np.ndarray) -> np.ndarray:
     """(T,N) bool → 每列截至当行最后一个 True 的行下标（无则 -1）。"""
     t_idx = np.arange(mask.shape[0])[:, None]
@@ -128,7 +143,7 @@ class MaCrossSignal:
         self._ready = None
 
     def prepare(self, panel) -> None:
-        close = _close_df(panel)
+        close = _filled_df(panel, "close")
         ma = close.rolling(self.n, min_periods=self.n).mean()
         above = (close > ma).to_numpy()
         prev_above = np.vstack([np.zeros((1, above.shape[1]), dtype=bool), above[:-1]])
@@ -170,9 +185,9 @@ class ChannelBreakoutSignal:
         self._ready = None
 
     def prepare(self, panel) -> None:
-        close = _close_df(panel)
-        high = _field_df(panel, "high")
-        low = _field_df(panel, "low")
+        close = _filled_df(panel, "close")
+        high = _filled_df(panel, "high")
+        low = _filled_df(panel, "low")
         prev_high = high.rolling(self.entry_n, min_periods=self.entry_n).max().shift(1)
         prev_low = low.rolling(self.exit_n, min_periods=self.exit_n).min().shift(1)
         close_v = close.to_numpy(dtype=float)
@@ -214,7 +229,7 @@ class High52wSignal:
         self._ready = None
 
     def prepare(self, panel) -> None:
-        close = _close_df(panel)
+        close = _filled_df(panel, "close")
         rolling_max = close.rolling(self.lookback, min_periods=self.min_bars).max()
         close_v = close.to_numpy(dtype=float)
         at_high = close_v >= rolling_max.to_numpy(dtype=float)
@@ -249,7 +264,7 @@ class AbsMomentumSignal:
         self._ready = None
 
     def prepare(self, panel) -> None:
-        close = _close_df(panel)
+        close = _filled_df(panel, "close")
         mom = close / close.shift(self.lookback) - 1.0
         self._ready = {"mom": mom.to_numpy(dtype=float)}
 

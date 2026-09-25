@@ -172,7 +172,8 @@ class TestMainJobClosures:
         monkeypatch.setattr(
             main,
             "daily_market_update_job",
-            lambda settings, force=False: {"status": "ok", "total": 1, "success": 1, "failed": 0, "symbols": ["X.SS"]},
+            lambda settings, force=False, **kwargs: {"status": "ok", "total": 1, "success": 1,
+                                                        "failed": 0, "symbols": ["X.SS"]},
         )
         pipeline_calls: list = []
         monkeypatch.setattr(

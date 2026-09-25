@@ -85,10 +85,16 @@ class Gateway:
         as_of: datetime | date,
         caller_layer: str,
         run_id: str | None = None,
+        live_bars: dict[str, float] | None = None,
     ) -> pd.DataFrame:
         as_of_day = as_of.date() if isinstance(as_of, datetime) else as_of
         clipped = [d for d in dates if pd.Timestamp(d).date() <= as_of_day]
-        frame = compute_tradability(self._db, symbols=symbols, dates=clipped)
+        # live_bars 的生效日**强制**为 as_of 当日（不由调用方指定）——
+        # 调用方无法借此注入历史/未来任意日的行情（PIT 边界不变）。
+        frame = compute_tradability(
+            self._db, symbols=symbols, dates=clipped,
+            live_bars=live_bars, live_bar_day=as_of_day,
+        )
         self.audit.record(
             caller_layer=caller_layer,
             run_id=run_id,
@@ -240,6 +246,7 @@ class BoundGateway:
             as_of=self._as_of,
             caller_layer=self._caller_layer,
             run_id=self._run_id,
+            live_bars=kwargs.get("live_bars"),
         )
 
     def get_production_indicator(self, *, symbols: list[str], name: str, since, **kwargs):

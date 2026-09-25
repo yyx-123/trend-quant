@@ -233,6 +233,9 @@ def attribute_diffs(
 
     classified = {k: 0 for k in ATTRIBUTION_WHITELIST}
     unexplained: list[dict] = []
+    # 已归类滑点的**实测**累积拖累（Π(1+slip)−1）：既用于数量漂移界限，
+    # 也用于 NAV 级联的上限（loop-review-ds4f R1-P2-7）。
+    drag_factor = 0.0
     for i, d in enumerate(diff["trade_diffs"]):
         if d["kind"] == "trade_mismatch":
             nt, ot = d["new"], d["old"]
@@ -241,19 +244,25 @@ def attribute_diffs(
                 and ot["price"] > 0
             ):
                 slip_ratio = abs(nt["price"] / ot["price"] - 1.0)
-                # 数量漂移界限：滑点对购买力的传导会跨轮**累积**（现金差
-                # 复利），界限 = 尾滑点比例 × 此前已发生笔数，再放一手底数
-                # （R2VB B-2 集成断言的实证形态：末笔 200 股差是 19 轮累积
-                # 的合法下游，不是口径差异）
-                qty_bound = max(
-                    int(lot_size),
-                    int(abs(int(ot["qty"])) * max_tail_slippage * max(i, 1)) + int(lot_size),
+                # 数量漂移界限：滑点对购买力的传导会跨轮**累积**（现金差复利），
+                # 界限 = 实测累积拖累对应的股数 + 一手底数。
+                # 旧实现的界限 = `|qty| × 尾滑点上界 × max(i,1) + 一手`：
+                # 上界 1.1% 与笔数线性放大，i ≥ 91 时已 ≥ 整仓量 → 数量差
+                # 100%、乃至 +100% 的净值错误都被"tail_slippage"吸收，
+                # 阶段 1 的 `unexplained == []` 机器判据形同摆设。
+                cum_drag = (1.0 + drag_factor) * (1.0 + slip_ratio) - 1.0
+                # 硬上限：单笔数量漂移不得超过该笔自身数量的 1/2——超过即
+                # 不是"滑点的下游"，而是另一笔订单（真实口径差异）。
+                qty_cap = max(int(lot_size), int(abs(int(ot["qty"])) // 2))
+                qty_bound = min(
+                    max(int(lot_size), int(abs(int(ot["qty"])) * cum_drag)) + int(lot_size),
+                    qty_cap,
                 )
                 qty_drift = abs(int(nt["qty"]) - int(ot["qty"]))
-                # 价差幅度在尾盘滑点界限内 → 归 tail_slippage（含合法数量
-                # 漂移）
+                # 价差幅度在尾盘滑点界限内 → 归 tail_slippage（含合法数量漂移）
                 if 0 < slip_ratio <= max_tail_slippage and qty_drift <= qty_bound:
                     classified["tail_slippage"] += 1
+                    drag_factor = cum_drag
                     continue
             unexplained.append(d)
         elif d["kind"] == "count_mismatch":
@@ -269,8 +278,12 @@ def attribute_diffs(
     daily_interest_bound = cash_interest_rate / 252.0
     # NAV 逐点差异的归类语境：若已有 trade 级白名单归类（如 tail_slippage），
     # NAV 路径漂移是其复利下游——同归该类；**零差异语境**（无任何 trade 级
-    # 白名单命中）下超界 NAV 差异=超纲（如计息误加进持仓市值），必须判负
+    # 白名单命中）下超界 NAV 差异=超纲（如计息误加进持仓市值），必须判负。
     downstream_kind = "tail_slippage" if classified["tail_slippage"] > 0 else None
+    # 级联上限（loop-review-ds4f R1-P2-7）：滑点最多解释"实测累积拖累"量级的
+    # 净值偏离（放宽 3× 余量）。旧实现只判 `classified["tail_slippage"] > 0`，
+    # 于是**任意一个**合法尾盘价差就能把 +100% 的净值错误全归入下游。
+    nav_cascade_bound = max(daily_interest_bound * 2.0, drag_factor * 3.0)
     for nd in diff["nav_divergence"]:
         if nd.get("kind") == "length_mismatch":
             unexplained.append({**nd, "kind": "nav_length_mismatch"})
@@ -280,7 +293,7 @@ def attribute_diffs(
         # 计息界限放宽 2 倍容差（复利/计提顺序的 1 日误差量级）
         if rel <= daily_interest_bound * 2.0:
             classified["cash_interest"] += 1
-        elif downstream_kind is not None:
+        elif downstream_kind is not None and rel <= nav_cascade_bound:
             classified[downstream_kind] += 1
         else:
             unexplained.append({**nd, "kind": "nav_point_diff_beyond_interest"})
