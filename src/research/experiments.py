@@ -112,12 +112,11 @@ def _expand_platform_defaults(spec: dict, evaluation_module: str = "") -> dict:
     for key, default in _MODULE_SPEC_DEFAULTS.get(module_key, {}).items():
         if key not in known:
             continue
-        # **缺键或 None 都取平台缺省**——这正是"省略 ≡ 显式缺省"的归一（R3C-P2-2）
-        if expanded.get(key) is None:
-            expanded[key] = default() if callable(default) else default
+        # **缺键或 None 都取平台缺省**——这正是"省略 ≡ 显式缺省"的归一（R3C-P2-2）。
         # V8 复核残留：runner 侧用 `spec.get(k, d) or d` 的字段（falsy 也落缺省）
-        # ——`n_folds: 0` / `window_mode: ""` / `buckets: 0` 与省略等价，必须同样归一
-        elif key in _FALSY_AS_DEFAULT and not expanded.get(key):
+        # ——`n_folds: 0` / `window_mode: ""` / `buckets: 0` 与省略等价，同样归一。
+        current = expanded.get(key)
+        if current is None or (key in _FALSY_AS_DEFAULT and not current):
             expanded[key] = default() if callable(default) else default
     # runner 侧 `primary_horizon` 的缺省不是常量而是 `horizons[0]`（ND-3：
     # 显式写出该值必须与省略等价）
