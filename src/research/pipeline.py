@@ -105,20 +105,18 @@ def _pick_unconsumed_token(db, experiment_id: str) -> str | None:
     无关实验按 id 抢先消费，与发放意图可能不符；全局 token 须调用方
     显式透传（CLI --token / run_experiment(holdout_token=...)）。
 
-    R22B-F4：复现实验（`is_reproduction=1`）额外回溯 `parent_experiment_id`。
-    token 是发给"受权做这件事"的原实验的，而复现是新 id——只按新 id 查永远
-    查不到，于是 MCP 侧 rerun 空烧一次试次（实测 E0008 发过 token、复现 E0009
-    仍失败且 token 未消费）。
+    R22B-F4 / R23B-F8：复现实现（`is_reproduction=1`）额外回溯整条父链——
+    token 是发给"受权做这件事"的原实验的，而复现是新 id，只按新 id（或只回溯
+    一级）都查不到 → 空烧一次运行（实测一级复现能带出、**二级复现**不能）。
+    血缘用 `holdout.experiment_lineage` 单一真源，与绑定校验同深度。
     """
+    from research.holdout import experiment_lineage
+
+    ids = experiment_lineage(db, experiment_id)
+    if not ids:
+        return None
+    placeholders = ", ".join("?" for _ in ids)
     with db.connect() as conn:
-        row = conn.execute(
-            "SELECT parent_experiment_id, is_reproduction FROM research_experiments WHERE id = ?",
-            (experiment_id,),
-        ).fetchone()
-        ids = [experiment_id]
-        if row is not None and row["is_reproduction"] and row["parent_experiment_id"]:
-            ids.append(str(row["parent_experiment_id"]))
-        placeholders = ", ".join("?" for _ in ids)
         token = conn.execute(
             f"""SELECT id FROM holdout_tokens
                 WHERE consumed_at IS NULL AND experiment_id IN ({placeholders})

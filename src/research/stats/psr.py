@@ -41,7 +41,10 @@ def moments(returns) -> tuple[float, float, float, float]:
         return 0.0, 0.0, 0.0, 3.0
     mean = float(np.mean(r))
     std = float(np.std(r, ddof=1))
-    if std <= 0:
+    # R23A-F10：`std <= 0` 挡不住浮点常量序列（[0.01]*10 的 std=1.8e-18 > 0 →
+    # 会算出 skew=1.19、kurt=0.43 这种物理上不可能的矩，再喂给 PSR/MinTRL）。
+    # 门槛改成与均值同量级的相对判据（与退化腿判据同精神）。
+    if std <= max(abs(mean), 1e-12) * 1e-9:
         return mean, 0.0, 0.0, 3.0
     skew = float(pd_skew(r))
     kurt = float(pd_kurt(r)) + 3.0  # 公式用非超额峰度
@@ -94,9 +97,19 @@ def dsr(sr_hat: float, n: int, skew: float, kurtosis: float, n_trials: int,
     """DSR：按尝试次数校正的 Sharpe 显著性。
 
     N=1（首次尝试）无多重性问题 → 退化为 PSR(0)。
-    sr_var 缺省时用 Sharpe 估计量的方差近似（Bailey 2014 的做法）。
+
+    `sr_var` 缺省时用 **Sharpe 估计量的方差**近似（更强假设：H0 下各试验同真值）。
+    注意这与 Bailey & López de Prado (2014) 的 `V[{SR_n}]`（**跨试验** Sharpe 方差）
+    不是同一个量——只有调用方显式传入跨试验方差时才与文献口径一致（R23A-F6）。
     """
-    if n_trials <= 1:
+    if n_trials < 1:
+        # R23A-F8：n_trials=0/负数此前与 N=1 同分支（静默不校正）——方向是
+        # **放松门**，属危险默认。当前唯一调用点传 max(attempt_index,1)，这里
+        # 显式拒绝错误输入，避免未来新调用点把 0 当"首次尝试"。
+        raise ValueError(
+            f"n_trials must be >= 1 (got {n_trials!r}); pass 1 for a single trial"
+        )
+    if n_trials == 1:
         return psr(sr_hat, 0.0, n, skew, kurtosis)
     if sr_var is None:
         sr_var = max(

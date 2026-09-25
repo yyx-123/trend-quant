@@ -151,11 +151,12 @@ def test_holdout_token_single_use_atomic(test_db):
     set_enforced(test_db, True)
     try:
         token = grant_token(test_db, session_id=session["session_id"], purpose="一次性")
+        # R23B-F1：消费必须点名实验（匿名消费路径已封）
         assert check_window(test_db, start="2025-01-01", end="2025-06-30",
-                            token_id=token["id"]) is True
+                            experiment_id="E-probe", token_id=token["id"]) is True
         with pytest.raises(HoldoutError):
             check_window(test_db, start="2025-01-01", end="2025-06-30",
-                         token_id=token["id"])
+                         experiment_id="E-probe", token_id=token["id"])
     finally:
         set_enforced(test_db, False)
 

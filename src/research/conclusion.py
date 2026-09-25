@@ -72,6 +72,7 @@ def build_conclusion_summary(db, topic_id: str) -> dict:
     effects_by_module: dict[str, list[float]] = {}
     warnings_counter: Counter = Counter()
     pvals: list[float] = []
+    excluded = 0   # 未产出可比 p 的实验数（R23A-F4）
     dir_hits = 0
     dir_total = 0
     for exp in exps:
@@ -101,17 +102,39 @@ def build_conclusion_summary(db, topic_id: str) -> dict:
             warnings_counter[w.split("(")[0]] += 1
         evidence_all = loads(v.get("evidence_json"), {})
         stats = evidence_all.get("stats") or {}
+        paired = stats.get("paired") or {}
         p_val = None
         # 退化腿（零成交/全现金）的 p 值是浮点噪声，
         # **不进课题 FDR 家族**（否则"零成交"实验会被算成显著）
         if evidence_all.get("degenerate_legs"):
             p_val = None
-        elif stats.get("psr") is not None:
+        elif paired.get("psr_on_diff") is not None:
+            # R23A-F3：p 值口径统一到**配对差序列**（与判定门同零假设、同方向）。
+            # 此前用 `1 - stats.psr`（单序列 PSR：分母是实验自身方差、阈值是基准
+            # 已实现 Sharpe）——平台自己在 verdict_rules 里点过名，同一份 evidence
+            # 里 `paired.psr_on_diff` 现成可用。实测同族 p 值差 1.6~1.9×
+            # （E0002：0.377 vs 0.201），方向随 ρ 变（高相关偏松、低相关偏保守）。
+            p_val = max(0.0, min(1.0, 1.0 - float(paired["psr_on_diff"])))
+        elif paired.get("delta_sharpe_band") is None and stats.get("psr") is not None:
+            # 无配对证据的模块（单腿实验/无基准）退回各自口径的量
             p_val = max(0.0, min(1.0, 1.0 - float(stats["psr"])))
         elif evidence_all.get("p_value") is not None:
             p_val = max(0.0, min(1.0, float(evidence_all["p_value"])))
+        elif paired.get("t_stat") is not None and paired.get("n_pairs"):
+            # h2h：只有配对 t（无 psr_on_diff 时）——用单尾 t 的 p（同零假设）
+            from research.stats.paired import t_sf_one_sided
+
+            p_val = max(0.0, min(1.0, t_sf_one_sided(
+                float(paired["t_stat"]), int(paired["n_pairs"]) - 1
+            )))
         if p_val is not None:
             pvals.append(p_val)
+        else:
+            # R23A-F4：家族成员此前是"能算出 p 的实验"却按 docstring 声称
+            # "课题内全部实验" → m 少计使 BH 阈值偏松（m=8→10 时阈值放大 1.25×）。
+            # design 上不出 p 的模块（如 distribution）与工程失败（failed）都计入
+            # 这里，如实报出，让 n_tested 可解释。
+            excluded += 1
 
     direction_consistency = (dir_hits / dir_total) if dir_total else None
 
@@ -148,7 +171,14 @@ def build_conclusion_summary(db, topic_id: str) -> dict:
             "note": "方向一致率 = 与假设（spec.expect）同向的占比（§6.4.2）；"
                     "median 为跨族混合口径，分族中位数（by_module）才可解释",
         },
-        "fdr": {"n_tested": len(pvals), "still_significant": still_significant},
+        "fdr": {
+            "n_tested": len(pvals),
+            "still_significant": still_significant,
+            # R23A-F4：家族成员 = **本课题内可算出配对/独立 p 的实验**，工程失败
+            # 与设计上不出 p 的模块（如 distribution）不计入 → 如实报出被排除数，
+            # 避免"n_tested < 课题实验总数"被误读成校正完整。
+            "n_excluded": excluded,
+        },
         "warnings_aggregated": dict(warnings_counter),
         "suggested_grade": suggested,
         "note": "不做跨实验 p 值合并（独立性不成立）；分级建议可降不可升",

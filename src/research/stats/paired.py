@@ -18,6 +18,21 @@ from research.stats.bootstrap import _circular_blocks
 from research.stats.psr import dsr, moments, psr
 
 
+def t_sf_one_sided(t_stat: float, df: int) -> float:
+    """单尾 p 值 P(T > t_stat)，自由度 df（0/1 时退化为 0.5 的保守值）。
+
+    与判定门同零假设、同方向（H1: ΔSharpe > 0）。用 ``scipy`` 的 t 分布；
+    仅在"模块只产出配对 t（如 head_to_head 无 psr_on_diff）"时用于课题 FDR 家族
+    （R23A-F3/F4）。
+    """
+    try:
+        from scipy import stats as _scipy_stats
+
+        return float(_scipy_stats.t.sf(float(t_stat), max(int(df), 1)))
+    except Exception:     # pragma: no cover - scipy 缺失时的保守回退
+        return 0.5 if t_stat > 0 else 1.0
+
+
 def paired_sharpe_comparison(
     rets_exp,
     rets_base,

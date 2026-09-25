@@ -20,7 +20,8 @@ from rule_backtest.metrics import DEGENERATE_SHARPE_ABS_LIMIT
 def bh_fdr(pvalues, q: float = 0.05) -> list[dict]:
     """Benjamini-Hochberg。返回 [{"p", "rank", "threshold", "significant"}]。
 
-    adjusted p_i = min_{k≥i} (m/k · p_(k))（单调化），significant = p_i ≤ adj 判定。
+    adjusted p_i = min_{k≥i} (m/k · p_(k))（单调化）；判定口径是
+    ``significant ⇔ adjusted_p_i ≤ q``（等价于 step-up 的最大 k），不是 p_i ≤ adj。
     """
     p = np.asarray(pvalues, dtype=float)
     m = len(p)
@@ -65,6 +66,8 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
     blocks = np.array_split(np.arange(t), n_blocks)
     half = n_blocks // 2
     lambdas: list[float] = []
+    usable_counts: list[int] = []
+    skipped_single = 0
     for combo in combinations(range(n_blocks), half):
         is_idx = np.concatenate([blocks[i] for i in combo])
         oos_idx = np.concatenate([blocks[i] for i in range(n_blocks) if i not in combo])
@@ -73,9 +76,10 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
         # R8 复核（P2）：退化列（全现金/零成交）的 `_sharpe_vec` 是 1e12 级噪声，
         # 会在每个 CSCV 组合里**同时**赢下 IS argmax 与 OOS 最优 → λ≡1 → pbo=0.0
         # （假的"绝不拟合"）。退化列不参与比较：全退化则本组合不产生 λ。
-        _usable = np.isfinite(is_sharpe) & np.isfinite(oos_sharpe) & (
-            np.abs(is_sharpe) <= _SHARPE_ABS_LIMIT
-        )
+        # R23A-F11：此前还比了 `|is_sharpe| <= 50`——`is_sharpe` 是**日频**量而
+        # 50 是年化闸门（`_sharpe_vec` 已按年化口径过滤过），该条件恒真。去掉，
+        # 只保留"两端都可用"的判据（退化由 `_sharpe_vec` 记 NaN 表达）。
+        _usable = np.isfinite(is_sharpe) & np.isfinite(oos_sharpe)
         if not _usable.any():
             continue
         _is_masked = np.where(_usable, is_sharpe, -np.inf)
@@ -86,18 +90,31 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
         # pbo=1.0（"必然过拟合"），与同一批证据里的 `plateau=plateau` 自相矛盾。
         _best_oos = oos_sharpe[best_is]
         _oos_usable = oos_sharpe[_usable]
+        if len(_oos_usable) <= 1:
+            # R23A-F2：只剩一个可用变体时，"IS 最优"必然是它、它在 OOS 里也没有
+            # 同侪可比——此前走 `else 0.0` → λ=0 → 计入 `pbo=1.0`（伪造"必然过拟合"），
+            # 且 `degenerate_variants` 只看"全 0.5"故不标注。改为本组合不产 λ
+            # （与"全退化"同语义），并单独计数以便如实标注。
+            skipped_single += 1
+            continue
+        usable_counts.append(len(_oos_usable))
         rank = float(np.sum(_oos_usable < _best_oos)) + 0.5 * float(
             np.sum(_oos_usable == _best_oos) - 1
         )
-        lam = rank / (len(_oos_usable) - 1) if len(_oos_usable) > 1 else 0.0
+        lam = rank / (len(_oos_usable) - 1)
         lambdas.append(lam)
 
     if not lambdas:
-        # 所有变体都退化（零成交/全现金）→ PBO 无判别力
+        # 所有组合都没有 ≥2 个可用变体（零成交/全现金探针，或只剩一个可用列）
+        # → PBO 无判别力。字段形状与正常分支保持一致（消费方按同一套键读）。
         return {"pbo": None, "n_combinations": comb(n_blocks, half),
-                "lambda_median": None, "degenerate_variants": True}
+                "lambda_median": None, "degenerate_variants": True,
+                "n_variants": int(np.median(usable_counts)) if usable_counts else 0,
+                "pbo_null_expected": None,
+                "combinations_skipped": skipped_single}
     lambdas = np.array(lambdas)
     pbo = float(np.mean(lambdas < 0.5))
+    n_variants = int(np.median(usable_counts)) if usable_counts else 0
     return {
         "pbo": pbo,
         "n_combinations": comb(n_blocks, half),
@@ -105,7 +122,27 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
         # 全并列（含"所有变体同一条 run"）时 λ 恒 0.5、PBO 无判别力——
         # 显式标注，避免把 0.0 读成"绝不过拟合"
         "degenerate_variants": bool(np.all(lambdas == 0.5)),
+        # R23A-F12：PBO 的零假设期望随变体数 N 变化（E[PBO] = #{r/(N-1)<0.5}/N：
+        # N=2→0.50、N=3→0.33、N=4→0.50…）——只报"PBO=0.4"会被读成"不过拟合"，
+        # 而 N=3 时 0.4 其实**高于**零假设期望。如实带出对照基准。
+        "n_variants": n_variants,
+        "pbo_null_expected": _pbo_null_expected(n_variants),
+        # 可用变体不足 2 的组合数（R23A-F2）：这些组合不产 λ，
+        # 样本量一旦偏少，PBO 的可解释性下降
+        "combinations_skipped": skipped_single,
     }
+
+
+def _pbo_null_expected(n_variants: int) -> float | None:
+    """H0（变体无技能差异）下 PBO 的期望值：均匀秩里 λ<0.5 的占比。
+
+    λ = rank/(N-1)（秩 0..N-1），故 E[PBO] = #{r: r/(N-1)<0.5}/N。N 为奇数时
+    中位秩恰落在 0.5、不计入过拟合，期望低一档（N=3→1/3）。
+    """
+    if n_variants < 2:
+        return None
+    below = sum(1 for r in range(n_variants) if r / (n_variants - 1) < 0.5)
+    return below / n_variants
 
 
 _SHARPE_ABS_LIMIT = DEGENERATE_SHARPE_ABS_LIMIT
@@ -124,7 +161,14 @@ def _sharpe_vec(x: np.ndarray) -> np.ndarray:
         sharpe = np.where(std > 0, mean / std, 0.0)
     # 闸门是**年化**口径（50）——这里 sharpe 是逐块的日频口径，先年化再比
     annualized = sharpe * (252.0 ** 0.5)
-    degenerate = (std <= np.abs(mean) * 1e-6) | (
-        np.abs(annualized) > _SHARPE_ABS_LIMIT
+    # 全 NaN / 只有一个观测的列：`nanstd` 给 NaN、`std<=...` 比较恒 False，
+    # 会让它带着 sharpe=0.0 混进"可用列"（R23A-F2 的复算即暴露此点）——
+    # 观测不足同样属"不可参与比较"。
+    n_obs = np.isfinite(x).sum(axis=0)
+    degenerate = (
+        (n_obs < 2)
+        | ~np.isfinite(sharpe)
+        | (std <= np.abs(mean) * 1e-6)
+        | (np.abs(annualized) > _SHARPE_ABS_LIMIT)
     )
     return np.where(degenerate, np.nan, sharpe)

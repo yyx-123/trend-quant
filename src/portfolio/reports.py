@@ -242,27 +242,35 @@ def f0(fill: dict) -> str:
     return str(fill.get("fill_date") or fill.get("date") or "")
 
 
-def _trades_from_fills(
-    fills: list[dict], round_trips: list[dict] | None = None
-) -> list[dict]:
-    """把引擎成交（+回合）适配成 `compute_summary` 认的交易列表（R22A-F2）。
+def _trades_from_fills(fills: list[dict]) -> list[dict]:
+    """把引擎成交适配成 `compute_summary` 认的交易列表（R22A-F2）。
 
     买卖各算一笔——与旧栈 `trade_count`（成交笔数）同口径，也与报告里印出的
-    成交明细行数一致；卖出笔的 `pnl` 取配对回合的净额（回测器内存侧是
-    `pnl_net`，引擎 round_trips 是 `pnl`，两套键名都接受）。取不到 pnl 的卖出
-    （例如期末未平仓或配对缺失）不写该键，`compute_summary` 会按 0 计入
-    胜率分母——与引擎"未平仓不计入"的语义接近，且不会伪造盈利。
+    成交明细行数一致。
+
+    R23B-F4（P2）：卖出笔的 `pnl` 必须是**费后净额**（`compute_summary` 的既有
+    契约：旧栈喂的就是 `net − qty×avg_cost`）。此前优先取传入 `round_trips` 的
+    `pnl_net`、缺了退回 `pnl`——而单 run 路径传进来的引擎富化回合只有
+    `pnl = qty×(exit−entry)`（**费前毛额**），于是同一份 fills 会因 round_trips
+    来源不同得出**相反胜率**（实测毛 +6.0 判盈利 / 净 −9.0 判亏损，`win_rate`
+    1.0 vs 0.0，`profit_factor` 999 vs 0）。这里改为**从成交本身配对算净额**
+    （`pair_round_trips`），不再依赖调用方给的口径。
+
+    R23B-F9：配对按**逐笔顺序消费**（同一标的同日出场的两笔回合各取自己的
+    pnl），不再用 `(symbol, exit_date)` 当唯一键（同日双平仓会互相覆盖）。
+    取不到配对的卖出（如期末未平仓/无对应买入）不写 `pnl`，按 0 计入胜率分母
+    ——与引擎"未平仓不计入"接近，且不伪造盈利。
     """
-    pnl_by_exit: dict[tuple[str, str], float] = {}
-    for rt in round_trips or []:
-        if not isinstance(rt, dict):
-            continue
-        pnl = rt.get("pnl_net")
-        if pnl is None:
-            pnl = rt.get("pnl")
-        if pnl is None:
-            continue
-        pnl_by_exit[(str(rt.get("symbol", "")), str(rt.get("exit_date", ""))[:10])] = float(pnl)
+    net_by_sell: list[dict] = []          # 顺序消费的净额队列（FIFO）
+    for rt in pair_round_trips(fills or []):
+        pnl_net = rt.get("pnl_net")
+        if pnl_net is None:
+            pnl_net = rt.get("pnl")
+        net_by_sell.append({
+            "symbol": str(rt.get("symbol", "")),
+            "exit_date": str(rt.get("exit_date", ""))[:10],
+            "pnl": None if pnl_net is None else float(pnl_net),
+        })
 
     trades: list[dict] = []
     for fill in fills or []:
@@ -278,9 +286,13 @@ def _trades_from_fills(
             "stamp_tax": float(fill.get("stamp_tax", 0.0) or 0.0),
         }
         if side == "SELL":
-            pnl = pnl_by_exit.get((symbol, str(trade["date"])[:10]))
-            if pnl is not None:
-                trade["pnl"] = pnl
+            day = str(trade["date"])[:10]
+            for idx, item in enumerate(net_by_sell):
+                if item["symbol"] == symbol and item["exit_date"] == day:
+                    if item["pnl"] is not None:
+                        trade["pnl"] = item["pnl"]
+                    net_by_sell.pop(idx)   # 一笔回合只认领一笔卖出
+                    break
         trades.append(trade)
     return trades
 
@@ -313,7 +325,7 @@ def build_report(
     """
     traded_total = _traded_amount(fills)
     summary = compute_summary(
-        nav_rows, trades=_trades_from_fills(fills, round_trips), turnover_total=traded_total
+        nav_rows, trades=_trades_from_fills(fills), turnover_total=traded_total
     )
     degenerate = is_degenerate_summary(nav_rows, summary)
     if degenerate:

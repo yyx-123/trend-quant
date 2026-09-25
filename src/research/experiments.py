@@ -264,7 +264,7 @@ def _spec_similar(a: dict, b: dict, *, evaluation_module: str) -> bool:
 
 
 def find_duplicates(
-    db, *, evaluation_module: str, subject_key: str, spec: dict
+    db, *, evaluation_module: str, subject_key: str, spec: dict, conn=None
 ) -> tuple[list[str], list[str]]:
     """两档重复检测（详设 §6.6.6 + DS-R2 P2）。返回 (exact_ids, similar_ids)。
 
@@ -280,7 +280,10 @@ def find_duplicates(
     spec = _expand_platform_defaults(spec or {}, evaluation_module)
     target_sig = _canonical_spec(spec)
     target_norm = {k: _normalize_spec_value(v) for k, v in spec.items()}
-    with db.connect() as conn:
+    # `conn` 传入时复用调用方的事务（R23B-F10：查重与 INSERT 必须看到同一快照，
+    # 否则两个进程同时提同一 spec 会各自通过查重 → 双双落库，"完全重复硬拒"
+    # 在并发下失效）
+    if conn is not None:
         rows = conn.execute(
             """SELECT id, spec_json FROM research_experiments
                WHERE evaluation_module = ? AND subject_key = ?
@@ -288,6 +291,15 @@ def find_duplicates(
                ORDER BY id""",
             (evaluation_module, subject_key),
         ).fetchall()
+    else:
+        with db.connect() as _own:
+            rows = _own.execute(
+                """SELECT id, spec_json FROM research_experiments
+                   WHERE evaluation_module = ? AND subject_key = ?
+                     AND status <> 'rejected_intake'
+                   ORDER BY id""",
+                (evaluation_module, subject_key),
+            ).fetchall()
     exact, similar = [], []
     for row in rows:
         existing = _expand_platform_defaults(
@@ -411,28 +423,35 @@ def propose_experiment(
     # ux_research_experiments_line_attempt），撞号会当场报错而不是静默污染。
     subject_key = module.subject_key(spec or {}) if module is not None else ""
 
-    if not reasons:
-        exact_dupes, similar_dupes = find_duplicates(
-            db, evaluation_module=evaluation_module, subject_key=subject_key, spec=spec or {}
-        )
-        if exact_dupes:
-            reasons.append(
-                "duplicate_of: " + ",".join(exact_dupes)
-                + "（与历史实验完全重复，硬拒——请修改 spec 或用 rerun 复现；"
-                "注意：若原实验所在课题已关题，rerun 会被课题状态拒绝，"
-                "此时请新建课题并在 hypothesis 中显式声明为复现）"
-            )
-        elif similar_dupes and not allow_duplicate:
-            reasons.append(
-                "similar_to: " + ",".join(similar_dupes)
-                + "（相似实验已存在，含失败记录；确认非重复发现后用 allow_duplicate=True 重提）"
-            )
-
     status = "queued" if not reasons else "rejected_intake"
     reject_reason = "; ".join(reasons) if reasons else None
 
     with db.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # 查重**在同一事务内**（R23B-F10）：此前查重用独立连接、位于立即事务之前，
+        # 两个进程只要都停在"查重通过、INSERT 之前"就会各自落一条真实验
+        # （实测：同 spec/同研究线落库 2 条，拿到 attempt 1 与 2），"完全重复硬拒"
+        # 的纪律在并发下失效。
+        if not reasons:
+            exact_dupes, similar_dupes = find_duplicates(
+                db, evaluation_module=evaluation_module, subject_key=subject_key,
+                spec=spec or {}, conn=conn,
+            )
+            if exact_dupes:
+                reasons.append(
+                    "duplicate_of: " + ",".join(exact_dupes)
+                    + "（与历史实验完全重复，硬拒——请修改 spec 或用 rerun 复现；"
+                    "注意：若原实验所在课题已关题，rerun 会被课题状态拒绝，"
+                    "此时请新建课题并在 hypothesis 中显式声明为复现）"
+                )
+            elif similar_dupes and not allow_duplicate:
+                reasons.append(
+                    "similar_to: " + ",".join(similar_dupes)
+                    + "（相似实验已存在，含失败记录；确认非重复发现后用 allow_duplicate=True 重提）"
+                )
+            if reasons:
+                status = "rejected_intake"
+                reject_reason = "; ".join(reasons)
         row = conn.execute(
             """SELECT COUNT(*) AS n FROM research_experiments
                WHERE subject_key = ? AND status <> 'rejected_intake'

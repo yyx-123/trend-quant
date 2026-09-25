@@ -130,27 +130,41 @@ def get_token(db, token_id: str) -> dict | None:
     return row_to_dict(row)
 
 
-def _token_covers_experiment(db, bound_experiment_id: str, experiment_id: str) -> bool:
-    """token 绑定的实验是否覆盖本次实验（相等，或沿复现链回溯到它）。
+LINEAGE_MAX_DEPTH = 8
 
-    R22B-F4：只沿 `parent_experiment_id` 逐级回溯，且**只认复现链**
-    （当前实验 `is_reproduction=1`）——放行范围严格限定为"同一份 spec 的重跑"，
-    无关实验依旧被绑定检查拦住。
+
+def experiment_lineage(db, experiment_id: str) -> list[str]:
+    """本实验 + 沿 `parent_experiment_id` 回溯的**复现链**祖先 id（近→远）。
+
+    R22B-F4 / R23B-F8：只沿 `parent_experiment_id` 走，且只从
+    `is_reproduction=1` 的节点继续向上——放行范围严格限定"同一份 spec 的重跑链"。
+    **单一真源**：自动带出 token（`pipeline._pick_unconsumed_token`）与绑定校验
+    （本模块）必须用同一份链，否则出现"显式传能过、自动带出查不到"（实测二级复现）
+    的错位。深度上限 `LINEAGE_MAX_DEPTH` 防御异常 lineage 环。
     """
-    current = str(experiment_id or "")
-    bound = str(bound_experiment_id or "")
-    for _ in range(8):                      # 深度上限：防御异常 lineage 环
-        if not current or current == bound:
-            return bool(current) and current == bound
+    chain: list[str] = []
+    current = str(experiment_id or "").strip()
+    for _ in range(LINEAGE_MAX_DEPTH):
+        if not current or current in chain:
+            break
+        chain.append(current)
         with db.connect() as conn:
             row = conn.execute(
                 "SELECT parent_experiment_id, is_reproduction FROM research_experiments WHERE id = ?",
                 (current,),
             ).fetchone()
         if row is None or not row["is_reproduction"] or not row["parent_experiment_id"]:
-            return False
+            break
         current = str(row["parent_experiment_id"])
-    return False
+    return chain
+
+
+def _token_covers_experiment(db, bound_experiment_id: str, experiment_id: str) -> bool:
+    """token 绑定的实验是否覆盖本次实验（相等，或在本实验的复现链上）。"""
+    bound = str(bound_experiment_id or "").strip()
+    if not bound:
+        return False
+    return bound in experiment_lineage(db, experiment_id)
 
 
 def list_tokens(db) -> list[dict]:
@@ -188,8 +202,20 @@ def check_window(
     # 是"这件事"而不是某一个 id。严格按 id 绑定会让复现永远越不过样本外门
     # （实测 E0008 拿过 token，复现 E0009 仍失败且 token 未被消费，白烧一次试次）。
     # 沿 lineage 逐级回溯父实验即可（只放行复现链，不放行无关实验）。
+    # R23B-F1（P1，安全）：**未绑定**（全局）token 只能在明确点名实验的调用里使用——
+    # `experiment_id` 缺失时此前整段校验被跳过（返回 True，任何调用方都能消费它）。
+    # R22 给 MCP 加了裸 token 参数后，4 位顺序号（H0001…）成了可猜的"自授权凭证"
+    # （实测 AI 传全局 token 即越过样本外门并消费了人发的凭证），所以：
+    # ① 全局 token 必须显式声明用途（`experiment_id` 非空即"这是一次具名实验运行"）；
+    # ② MCP 通道不再接受裸 token（见 trend_mcp.research_tools，只放行绑定到本实验/
+    #    本复现链的 token）。
+    if not experiment_id:
+        raise HoldoutError(
+            f"holdout token {token_id} requires an explicit experiment_id "
+            "(unbound tokens cannot be consumed anonymously)"
+        )
     if (
-        token["experiment_id"] and experiment_id
+        token["experiment_id"]
         and token["experiment_id"] != experiment_id
         and not _token_covers_experiment(db, token["experiment_id"], experiment_id)
     ):

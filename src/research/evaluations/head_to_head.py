@@ -125,6 +125,21 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
     )
     psr_ab = _psr(sr_a, sr_b, len(ra), skew_a, kurt_a)
 
+    # R23A-F1（P1）：判定门必须用**配对**口径。h2h 比较的两条腿同窗同池（天然高相关
+    # 配对），此前却拿"单序列 PSR + 基准已实现 Sharpe 当常数"当 AND 门——平台在
+    # `verdict_rules` 里已明确那是口径错误（DS-P1-6），backtest 已改配对门，h2h 漏改。
+    # 实测（n=2430、ρ=0.98、真 ΔSR=0.3）：配对 t 命中 99.9%，而该 PSR 门命中 0.0%
+    # → `confirmed` 在高相关场景恒不可达（一律落 insufficient-evidence）。
+    # 这里复用与 backtest 完全相同的配对统计（同一函数、同一 n_trials 语义），
+    # 判定阈值也走 verdict_rules 的单一真源。
+    from research.stats.paired import paired_sharpe_comparison
+    from research.verdict_rules import load_rules, paired_gate_ok
+
+    paired_stats = paired_sharpe_comparison(
+        ra, rb, n_trials=max(int(experiment.get("attempt_index") or 1), 1)
+    ) if len(ra) >= 30 else None
+    _rules = load_rules(db)
+
     from rule_backtest.metrics import compute_summary
     from research.evaluations._common import long_window_annotations
 
@@ -187,6 +202,11 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
             "t_stat": t_stat,
             "delta_sharpe_band": d_band,
             "psr_a_over_b": psr_ab,
+            # R23A-F1：配对显著性（判定真源）——单调件 PSR/DSR 只作展示
+            "dsr_on_diff": None if paired_stats is None else paired_stats.get("dsr_on_diff"),
+            "delta_sharpe_annual": None if paired_stats is None else paired_stats.get("delta_sharpe_annual"),
+            "n_pairs": None if paired_stats is None else paired_stats.get("n_pairs"),
+            "gate": "paired",
         },
     }
     warnings = [
@@ -207,10 +227,16 @@ def run_head_to_head(db, experiment: dict, ctx: dict) -> dict:
             "已记 None，判定按 inconclusive)"
         )
     elif d_band is not None and len(joined) >= 30:
-        if d_band["low"] > 0 and psr_ab >= 0.95:
+        # 配对门（R23A-F1）：显著性 = 配对 t ≥ max(min_t_stat, t_crit(n−1)) 且
+        # 差序列 DSR > min_dsr_on_diff，**且**区块 bootstrap 置信带不含 0
+        # （带本身是配对构造，保留为双重确认而非 AND 一票否决）。
+        paired_ok = paired_gate_ok(paired_stats, rules=_rules)
+        if d_band["low"] > 0 and paired_ok:
             suggested = "confirmed"   # A 显著优于 B
-        elif d_band["high"] < 0 and psr_ab <= 0.05:
-            suggested = "rejected"    # A 显著劣于 B
+        elif d_band["high"] < 0 and paired_gate_ok(
+            paired_stats, rules=_rules, direction="negative"
+        ):
+            suggested = "rejected"    # A 显著劣于 B（对称的配对显著性）
 
     report = {
         "spec": spec, "window": [start, end],

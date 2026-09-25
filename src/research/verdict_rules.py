@@ -56,6 +56,41 @@ def dsr_gate_binding(rules: dict | None = None) -> bool:
     return float((rules or DEFAULT_RULES).get("min_dsr_on_diff", 0.0)) > 0.0
 
 
+def paired_gate_ok(
+    paired: dict | None, *, rules: dict | None = None, direction: str = "positive"
+) -> bool:
+    """配对显著性门（**单一真源**；R23A-F1：backtest 与 head_to_head 共用）。
+
+    direction="positive"：ΔSharpe 显著为正 —— t 统计 ≥ max(min_t_stat,
+    t_{0.95}(n_pairs−1)) 且差序列 DSR > min_dsr_on_diff；
+    direction="negative"：对称的显著为负（判定 A 显著劣于 B；DSR 是同向单调量，
+    负向判定只看 t 临界）。
+
+    为什么必须是配对口径：改进型实验是**高相关配对**（同窗同池），单序列 PSR
+    的分母是实验自身方差、阈值是基准的已实现 Sharpe（`stats/psr.py` 注释里
+    点名的口径错误）。实测（n=2430、ρ=0.98、真 ΔSR=0.3）：配对 t 命中 99.9%，
+    单序列 PSR 门命中 0.0% → 高相关场景 confirmed 恒不可达。
+    """
+    if not isinstance(paired, dict):
+        return False
+    rules = rules or load_rules()
+    t_stat = paired.get("t_stat")
+    if t_stat is None:
+        return False
+    t_stat = float(t_stat)
+    n_pairs = int(paired.get("n_pairs") or 0)
+    t_crit = (
+        max(float(rules["min_t_stat"]), _t_critical_95(n_pairs - 1))
+        if n_pairs >= 2 else float(rules["min_t_stat"])
+    )
+    if direction == "negative":
+        return t_stat <= -t_crit
+    dsr_on_diff = paired.get("dsr_on_diff")
+    return t_stat >= t_crit and float(dsr_on_diff or 0.0) > float(
+        rules["min_dsr_on_diff"]
+    )
+
+
 def _t_critical_95(df: int) -> float:
     """单尾 95% t 临界值（Cornish–Fisher 展开，ν≥10 精度 ~1e-3）。
 
@@ -115,8 +150,24 @@ def plateau_neighbors(param: str, value: float) -> list[float]:
 
 def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
                     rules: dict | None = None, *, skipped: int = 0) -> dict:
-    """高原/孤峰判定：邻域同向 + Alvarez 1σ 检查（选定参数偏离邻域均值
-    1σ 以上 → 疑似过拟合）。
+    """高原/孤峰判定：邻域同向 + **95% 预测区间**偏离检查。
+
+    R23A-F5（P2）重写判据。此前是"选定值偏离邻域均值 `plateau_sigma`(=1.0) × σ̂"，
+    而 σ̂ 取自 k 个邻域点、选定点又**不在**邻域内——偏离量的 sd 是
+    σ√(1+1/k)，拿它去比"1.0×σ̂"在结构上就不是 1σ 检验；`same_direction` 更是
+    "逐点符号全一致"（k=2 时 3 个符号相乘），近零效应下退化成硬币。
+    实测（20000~40000 次 MC，见 round23-review.md 的表）：
+      - 真高原（等均值）误判 peak 50%~60%（k=2 时 59%）；
+      - 边际真实改进（ΔSharpe≈0.10，E0002 量级）误判 peak **74%~91%**；
+      - 而 `low_confidence`（<5 点）恰好在误判最重处静默。
+    新判据：
+      - 同向 = **邻域均值**与选定值同号（零均值/零选定视为中性，R23A-F7：
+        逐点符号全一致会把"该参数在此取值不生效"的零效应点判成反向）；
+      - 偏离 = |选定 − 邻域均值| > t_{0.975, k−1} · σ̂ · √(1+1/k)（预测区间，
+        双侧名义 5%）；
+      - `low_confidence` 仍按去重邻域点数 <5 标注（σ̂ 由很少的点估计），但此时的
+        误判率已由判据本身校准（实测 H0 6.5%~7.4%，而旧判据 50%~60%）。
+    实测功效（真孤峰 +0.5 vs 邻域 0±0.1）：k=2 61%、k=5 94%、k=10 99%。
 
     ``skipped``：因退化腿（Sharpe 不可用）被剔除的邻域点数——必须显式可见，
     否则"邻域点变少"会静默降低判定的可信度（连带修）。
@@ -126,14 +177,13 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
         reason = "no neighbors" if not skipped else f"no usable neighbors (skipped {skipped})"
         return {"verdict": "unknown", "reason": reason, "skipped": int(skipped)}
     import numpy as np
+    from scipy import stats as _scipy_stats
 
     arr = np.asarray(neighbor_deltas, dtype=float)
     mean = float(arr.mean())
     # 邻域点太少时 σ 没有意义，判据必须**停止**而不是给一个随机答案（R18B-P2-2）：
-    #  - 1 个点（合法配置 max_positions/top_n/per_day/n=1 等，或两个邻域点取值相同）
-    #    → σ=0 → 旧实现 `deviates=False` → 孤立峰被**静默**记成"高原"、台账永记"非孤峰"；
-    #  - 2 个点 → σ 由 df=1 估计，H0（三点可交换）下 1σ 规则误判"孤峰"的概率实测 56%
-    #    （与噪声尺度无关）→ 真高原半数被挡、且把"疑似过拟合"写进 append-only 台账。
+    #  - 1 个点（合法配置 max_positions/top_n/max_positions=1 等，或两个邻域点取值相同）
+    #    → σ=0 → 旧实现 `deviates=False` → 孤立峰被**静默**记成"高原"；
     # 统一按"证据不足 = unknown + 可见告警"处理（与该函数对"无邻域点"的既有口径一致）。
     distinct = np.unique(arr)
     if distinct.size < 2:
@@ -149,30 +199,34 @@ def plateau_verdict(selected_delta: float, neighbor_deltas: list[float],
             "insufficient_neighbors": True,
         }
     std = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
-    same_direction = all(
-        (d > 0) == (selected_delta > 0) for d in arr
+    k = int(distinct.size)
+    # 同向判定（R23A-F7）：零效应视为中性，不当作反向
+    sel = float(selected_delta)
+    same_direction = bool(
+        sel == 0.0 or mean == 0.0
+        or (np.sign(mean) == np.sign(sel))
     )
-    # 判据 = 设计口径（Alvarez 1σ）。小邻域（去重后 2~4 点）时 σ̂ 由很少的点估计，
-    # 结论**必须标注低置信**（R18B-P2-2 + R19A-F2 的收敛口径）：
-    #  - 不改成 unknown：那会让"非孤峰"条件对单参数实验永远不阻断（假安全）；
-    #  - 不换 t 预测区间：2 点时比值统计量重尾（H0 误判率实测 78%），换汤不换药；
-    #  - 因此保留阻断力 + 如实标注，并把"扩邻域（±10/20/30%）"作为口径决策项。
     low_confidence = distinct.size < 5
-    deviates = std > 0 and abs(selected_delta - mean) > float(rules["plateau_sigma"]) * std
+    t_crit = float(_scipy_stats.t.ppf(0.975, max(k - 1, 1)))
+    se = std * float(np.sqrt(1.0 + 1.0 / k))
+    deviation = abs(sel - mean)
+    deviates = std > 0 and deviation > t_crit * se
     verdict = "plateau" if (same_direction and not deviates) else "peak"
     return {
         "verdict": verdict,
         "neighbor_mean": mean,
         "neighbor_std": std,
-        "selected": selected_delta,
+        "selected": sel,
         "same_direction": same_direction,
-        "deviates_over_1sigma": deviates,
+        # 键名沿用（消费面/台账兼容）：语义已从"偏离 1σ"改为"落在 95% 预测区间外"
+        "deviates_over_1sigma": bool(deviates),
+        "deviation": float(deviation),
+        "pi_t_crit": t_crit,
+        "pi_half_width": float(t_crit * se),
         "neighbor_points": int(distinct.size),
         "low_confidence": bool(low_confidence),
         "skipped": int(skipped),
     }
-
-
 def suggest_backtest_verdict(evidence: dict, rules: dict | None = None) -> str:
     """backtest 实验的判定建议（平台按阈值化规则给出；AI 不能改判定规则）。"""
     rules = rules or DEFAULT_RULES
@@ -196,14 +250,9 @@ def suggest_backtest_verdict(evidence: dict, rules: dict | None = None) -> str:
         for seg in regime.values()
     )
     is_plateau = plateau is None or plateau.get("verdict") != "peak"
-    paired_ok = False
-    if paired is not None:
-        # GLM53F-P2-1②：小样本用 t 分布临界（自由度 n_pairs−1），不退回 z
-        t_crit = max(rules["min_t_stat"], _t_critical_95(int(paired.get("n_pairs", 30)) - 1))
-        paired_ok = (
-            paired["t_stat"] >= t_crit
-            and paired["dsr_on_diff"] > rules["min_dsr_on_diff"]
-        )
+    # GLM53F-P2-1②：小样本用 t 分布临界（自由度 n_pairs−1），不退回 z；
+    # R23A-F1：判定逻辑收敛到 paired_gate_ok 单一真源（h2h 同用）
+    paired_ok = paired_gate_ok(paired, rules=rules)
     if delta_sharpe > rules["min_delta_sharpe"] and is_plateau and not collapse and paired_ok:
         return "confirmed"
     return "inconclusive"

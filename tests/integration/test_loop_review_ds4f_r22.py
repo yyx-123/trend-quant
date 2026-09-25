@@ -192,11 +192,15 @@ def test_report_summary_trade_fields_are_not_zero(market, registry):
     assert cost_fees > 0, f"夹具必须产生成交（否则本钉子无对象）：{full.get('cost')}"
     assert summary["trade_count"] > 0, "summary.trade_count 不得为 0（同载荷里有真实成交）"
     assert summary["closed_trade_count"] > 0, "closed_trade_count 不得为 0"
-    assert summary["total_commission"] > 0, "summary 费用合计不得为 0"
-    assert abs(summary["total_commission"] - cost_fees) < 1e-6, (
-        f"summary 佣金合计（{summary['total_commission']}）必须与 cost.total_fees"
-        f"（{cost_fees}）同源"
+    assert summary["total_commission"] > 0, "summary 佣金合计不得为 0"
+    # R23B-F3：同源的是**交易成本合计**（佣金+印花税）——`total_commission` 只含
+    # 佣金，股票有印花税时两者相差一个税额（实测差 307.49，近 3 倍）
+    assert abs(summary["total_trading_cost"] - cost_fees) < 1e-6, (
+        f"summary 交易成本合计（{summary['total_trading_cost']}）必须与 "
+        f"cost.total_fees（{cost_fees}）同源"
     )
+    assert abs(summary["total_trading_cost"]
+               - (summary["total_commission"] + summary["total_stamp_tax"])) < 1e-9
     # 与同载荷的 round_trips 交叉核对（两条独立来源：summary 由成交适配而来，
     # 回合表由 pair_round_trips 配对而来）
     trips = full.get("round_trips") or []
@@ -295,14 +299,15 @@ def test_mcp_dispatch_envelope_reports_run_failure(market, registry, monkeypatch
     # 补上 token 后同一步必须成功（fail-closed 不是"永远失败"）
     from research.holdout import grant_token
 
-    token = grant_token(
+    grant_token(
         market, session_id=env["session"]["session_id"],
-        purpose="钉子：验证 MCP holdout 通路", experiment_id=res["experiment_id"],
+        purpose="钉子：验证 MCP holdout 通路（放行靠血缘自动带出）",
+        experiment_id=res["experiment_id"],
     )
-    token_id = token["id"]
-    res2 = tools["research_rerun_experiment"](
-        experiment_id=res["experiment_id"], run=True, holdout_token=token_id,
-    )
+    # R23B-F1：MCP 不再接受 caller 直传 token（4 位顺序号可猜 = 自授权）。
+    # 放行只能来自"人把 token 绑定到本实验/本复现链" —— 这里正是那条路径：
+    # 复现链回溯自动带出父实验的 token。
+    res2 = tools["research_rerun_experiment"](experiment_id=res["experiment_id"], run=True)
     assert res2["dispatch"]["run_status"] == "ran", res2
 
 

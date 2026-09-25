@@ -711,12 +711,17 @@ def test_plateau_unknown_verdict_is_surfaced_as_absent():
     assert insuf["verdict"] == "unknown" and insuf["insufficient_neighbors"] is True
     warn = plateau_warnings(insuf, is_creation=False)
     assert warn and warn[0].startswith("plateau_evidence_absent")
-    # 2 点邻域：保留判定但标注低置信，告警里必须说明邻域点数
+    # 2 点邻域：判据已按 95% 预测区间校准（R23A-F5）——k=2 时 t_{.975,1}=12.71，
+    # 因此"1.0 vs [0.1,0.2]"这种差距**不足以**判孤峰（证据只有两个点），
+    # 结论按低置信如实标注；差距极大时仍能识别（阻断力保留）。
     low = plateau_verdict(1.0, [0.1, 0.2])
-    assert low["verdict"] in ("plateau", "peak") and low["low_confidence"] is True
+    assert low["verdict"] == "plateau" and low["low_confidence"] is True
     lw = plateau_warnings(low, is_creation=False)
-    assert len(lw) == 1 and lw[0].startswith("plateau_peak")
+    assert len(lw) == 1 and lw[0].startswith("plateau_low_confidence")
     assert "邻域仅 2 个点" in lw[0]
+    extreme = plateau_verdict(50.0, [0.1, 0.2])
+    assert extreme["verdict"] == "peak", extreme
+    assert plateau_warnings(extreme, is_creation=False)[0].startswith("plateau_peak")
     quiet = plateau_verdict(0.4, [0.38, 0.42])
     assert plateau_warnings(quiet, is_creation=False)[0].startswith("plateau_low_confidence")
 

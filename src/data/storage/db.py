@@ -656,7 +656,7 @@ class Database:
     def _init_tables(self) -> None:
         with self._connect() as conn:
             conn.executescript(
-                """
+                "BEGIN IMMEDIATE;\n" + """
                 CREATE TABLE IF NOT EXISTS rule_strategies (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL DEFAULT '',
@@ -1107,8 +1107,13 @@ class Database:
                 );
 
                 """
+                + "COMMIT;"
             )
-            conn.executescript(_RESEARCH_STACK_DDL)
+            # 研究栈 DDL（触发器/索引）同事务：R23B-F5——`executescript` 逐语句
+            # 自动提交时，DROP/CREATE 触发器会被并发打开的另一进程交错打断
+            # （"trigger ... already exists" → 进程起不来）。带事务边界后要么
+            # 全部生效要么整体回滚，且 BEGIN IMMEDIATE 让第二个进程排队等待。
+            conn.executescript("BEGIN IMMEDIATE;\n" + _RESEARCH_STACK_DDL + "\nCOMMIT;")
 
     # ------------------------------------------------------------------
     # schema migration

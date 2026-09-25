@@ -207,13 +207,15 @@ def test_report_summary_trade_stats_derive_from_round_trips():
         {"symbol": "A.SS", "side": "sell", "fill_date": "2024-01-22", "fill_price": 11.0,
          "quantity": 900, "commission": 5.0, "stamp_tax": 0.0, "fee_total": 5.0},
     ]
+    # 传进来的回合只作展示（且刻意给"毛额"误导值）：报告的 summary 必须由
+    # **成交自身**按净额配对算（R23B-F4），不受调用方口径影响
     trips = [
         {"symbol": "A.SS", "entry_date": "2024-01-02", "exit_date": "2024-01-08",
-         "pnl_net": 985.0},
+         "pnl": 1005.0},
         {"symbol": "A.SS", "entry_date": "2024-01-09", "exit_date": "2024-01-12",
-         "pnl_net": 885.0},
+         "pnl": 905.0},
         {"symbol": "A.SS", "entry_date": "2024-01-15", "exit_date": "2024-01-22",
-         "pnl_net": -915.0},
+         "pnl": -900.0},
     ]
     summary = build_report(
         None, run_id="R22C", nav_rows=nav, fills=fills, unfilled=[], gate_log=[],
@@ -222,10 +224,15 @@ def test_report_summary_trade_stats_derive_from_round_trips():
     assert summary["trade_count"] == 6, "成交笔数（买卖各一笔）"
     assert summary["closed_trade_count"] == 3, "平仓回合数"
     assert abs(summary["win_rate"] - 2 / 3) < 1e-12, summary["win_rate"]
+    # 净额由成交现算：每笔回合净 = 价差额 − 两笔佣金(5+5)
+    win1, win2, loss = 1000 * 1.0 - 10.0, 900 * 1.0 - 10.0, 900 * -1.0 - 10.0
     # 盈亏比 = 盈利回合合计 / 亏损回合合计（与 compute_summary 同定义）
-    assert abs(summary["profit_factor"] - (985.0 + 885.0) / 915.0) < 1e-12, summary["profit_factor"]
-    assert abs(summary["avg_win"] - (985.0 + 885.0) / 2) < 1e-9
-    assert abs(summary["avg_loss"] - 915.0) < 1e-9
+    assert abs(summary["profit_factor"] - (win1 + win2) / abs(loss)) < 1e-12, (
+        f"盈亏比必须由成交净额现算（得到 {summary['profit_factor']}）；"
+        "传入的毛额回合不得改变口径"
+    )
+    assert abs(summary["avg_win"] - (win1 + win2) / 2) < 1e-9
+    assert abs(summary["avg_loss"] - abs(loss)) < 1e-9
     assert abs(summary["total_commission"] - 30.0) < 1e-9
     # 持有天数：用**净值序列下标差**（本夹具是连续自然日序列：01-02→01-08 = 6、
     # 01-09→01-12 = 3、01-15→01-22 = 7 → 均值 16/3）

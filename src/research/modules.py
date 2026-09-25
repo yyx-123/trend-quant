@@ -121,7 +121,10 @@ def propose_module(
             # 已存在"）此前有两种口径：查重分支给可读文案，撞约束分支把 sqlite
             # 异常冒到通道层 → MCP 回 "internal error (see server logs)"，模型
             # 误判平台故障并盲目重试（实测命中）。约束冲突是业务结果，就地翻译。
-            if "module_drafts" in str(exc):
+            # R23B-F7：只翻译**唯一约束**（同 name@version 已存在）。按表名子串匹配
+            # 会把 `NOT NULL constraint failed: module_drafts.source` 也说成"模块已
+            # 存在"——把入参非法误导成"改个名字再提"，正是本条要消灭的误诊类。
+            if "UNIQUE constraint failed: module_drafts.name" in str(exc):
                 raise ResearchError(f"module already exists: {name}@{version}") from exc
             raise
     return get_draft(db, draft_id)

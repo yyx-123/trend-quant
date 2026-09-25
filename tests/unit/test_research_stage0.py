@@ -555,13 +555,18 @@ def test_holdout_gate_enforced_requires_token(test_db, human_session):
         token = holdout.grant_token(
             test_db, session_id=human_session["session_id"], purpose="首次放行"
         )
+        # R23B-F1：token 必须点名实验才能消费（匿名消费 = 任何调用方都能用猜到的
+        # id 自授权样本外访问，实测 MCP 侧曾可做到）。全局（未绑定）token 在
+        # 明确点名实验时可用——这是人走 CLI 的路径。
         assert holdout.check_window(
-            test_db, start="2025-01-01", end="2025-06-01", token_id=token["id"]
+            test_db, start="2025-01-01", end="2025-06-01",
+            experiment_id="E-probe", token_id=token["id"],
         ) is True
         # 一次性：消费后失效
         with pytest.raises(HoldoutError):
             holdout.check_window(
-                test_db, start="2025-01-01", end="2025-06-01", token_id=token["id"]
+                test_db, start="2025-01-01", end="2025-06-01",
+                experiment_id="E-probe", token_id=token["id"],
             )
     finally:
         holdout.set_enforced(test_db, False)

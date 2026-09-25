@@ -138,9 +138,15 @@ def main() -> int:
 
             # 冻结写包裹（GLM53F-P2-11）：同步通道与 worker 同口径——run 期间
             # 日更写任务冻结，防"一次 run 读到两版 qfq"（决策 A3）
-            with run_freeze.frozen_writes():
-                result = run_experiment(service.db, exp["id"], registry=service.registry,
-                                        holdout_token=getattr(args, "token", None))
+            try:
+                with run_freeze.frozen_writes():
+                    result = run_experiment(service.db, exp["id"], registry=service.registry,
+                                            holdout_token=getattr(args, "token", None))
+            except Exception as exc:      # 同 `run` 子命令（R23B-F6）
+                print(json.dumps({"ok": False, "experiment_id": exp["id"],
+                                  "run_status": "failed", "error": str(exc)},
+                                 ensure_ascii=False))
+                return 1
             run_env = run_result_envelope(result)   # R22B-F2：统一信封 + 失败退出码
             print(json.dumps(run_env, ensure_ascii=False))
             return 0 if run_env["run_status"] == "ran" else 1
@@ -160,9 +166,18 @@ def main() -> int:
                               "error": f"experiment {args.experiment_id} not queued"
                                        f" (status={exp.get('status')})"}, ensure_ascii=False))
             return 1
-        with run_freeze.frozen_writes():
-            result = run_experiment(service.db, args.experiment_id, registry=service.registry,
-                                    holdout_token=getattr(args, "token", None))
+        try:
+            with run_freeze.frozen_writes():
+                result = run_experiment(service.db, args.experiment_id, registry=service.registry,
+                                        holdout_token=getattr(args, "token", None))
+        except Exception as exc:
+            # R23B-F6：并发认领竞态时 `lifecycle.transition` 抛 LifecycleError——
+            # 此前没有兜底 → stdout 全空、stderr 裸 traceback（MCP 同场景给
+            # `{"ok": false, "error": ...}`）。三个 run 入口统一成结构化输出。
+            print(json.dumps({"ok": False, "experiment_id": args.experiment_id,
+                              "run_status": "failed", "error": str(exc)},
+                             ensure_ascii=False))
+            return 1
         run_env = run_result_envelope(result)
         print(json.dumps({"ok": True, "experiment_id": args.experiment_id, **run_env},
                          ensure_ascii=False))
