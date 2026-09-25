@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import json
 from datetime import date
 from pathlib import Path
@@ -103,7 +105,7 @@ def test_cli_subcommands_exist():
     import subprocess
 
     out = subprocess.run(
-        [str(ROOT / ".venv" / "Scripts" / "python.exe"), str(ROOT / "scripts" / "research_cli.py"),
+        [sys.executable, str(ROOT / "scripts" / "research_cli.py"),
          "--help"],
         capture_output=True, text=True, cwd=str(ROOT), timeout=60,
     )

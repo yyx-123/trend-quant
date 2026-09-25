@@ -73,7 +73,22 @@ def _ensure_builtin_admin(db) -> None:
         db.create_user(_BUILTIN_ADMIN_USERNAME, password, is_admin=True)
         logger.info("Built-in admin '%s' created (bootstrap password; change after first login)",
                     _BUILTIN_ADMIN_USERNAME)
-    elif not user.get("is_admin"):
+        if not env.bootstrap_admin_password():
+            logger.warning(
+                "SECURITY: built-in admin '%s' was created with the **built-in default "
+                "password** (source-visible). Rotate it now, or set "
+                "TREND_QUANT_BOOTSTRAP_ADMIN_PASSWORD before first start.",
+                _BUILTIN_ADMIN_USERNAME,
+            )
+    elif db_module.verify_password(user.get("password") or "", _BUILTIN_ADMIN_DEFAULT_PASSWORD):
+        # R5-P1-1（Round 5 复核）：存量部署的引导密码若从未更换，账号等于公开
+        # ——启动即告警（不改行为：改密是运维动作，见最终报告待决策）
+        logger.warning(
+            "SECURITY: built-in admin '%s' still uses the built-in default password. "
+            "Rotate it immediately (登录后立即改密).",
+            _BUILTIN_ADMIN_USERNAME,
+        )
+    if user is not None and not user.get("is_admin"):
         db.set_user_admin(_BUILTIN_ADMIN_USERNAME, True)
         logger.info("Built-in admin '%s' promoted to is_admin", _BUILTIN_ADMIN_USERNAME)
 

@@ -190,14 +190,60 @@ _DELTA_METRICS = ("annual_return", "max_drawdown", "sharpe", "sortino", "calmar"
 def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict:
     """组合 NAV 摘要。turnover 必须来自真实成交（评审 DS-P1-3：恒 0 假证据已修）——
     trades 为回测器内存成交清单（{price, qty}）；None 时 turnover 记 None
-    （walk-forward 拼接路径无逐段成交，显式标注不可用）。"""
+    （walk-forward 拼接路径无逐段成交，显式标注不可用）。
+
+    **退化腿（R5-P2-2，Round 5 复核）**：全现金/零成交 run 的日收益只有空仓计息的
+    浮点残差（std ≈ 1e-16），`compute_summary` 的 `std_ret > 0` 守卫太弱 → 产出
+    Sharpe ≈ 6e12 的噪声值，而该值会进 `deltas_vs_base` 并**决定判定**
+    （实测：好实验 × 全现金基准 → ΔSharpe 巨负 → rejected）。这里把退化腿的
+    Sharpe/Sortino 记 None 并落警告，Δ 计算侧拒绝用退化腿作差。
+    """
     from rule_backtest.metrics import compute_summary
 
     turnover_total = _trades_turnover_total(trades) if trades is not None else None
     summary = compute_summary(nav_rows, trades=[], turnover_total=turnover_total or 0.0)
     if turnover_total is None:
         summary["turnover"] = None
+    # 退化判定：日收益标准差相对均值不可分辨（纯浮点噪声）
+    eq = [float(r["equity"]) for r in nav_rows if r.get("equity")]
+    if len(eq) >= 3:
+        rets = [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq)) if eq[i - 1]]
+        if rets:
+            mean_r = sum(rets) / len(rets)
+            var = sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1) if len(rets) > 1 else 0.0
+            std_r = var ** 0.5
+            scale = max(abs(mean_r), 1e-12)
+            if std_r <= scale * 1e-6:
+                summary["sharpe"] = None
+                summary["sortino"] = None
+                summary["degenerate_leg"] = True
     return summary
+
+
+def _deltas_from_summaries(exp_summary: dict, base_summary: dict | None) -> dict:
+    """Δ 指标（任一腿退化 → 该指标记 None 并落警告，绝不用噪声值作差）。
+
+    R5-P2-2（Round 5 复核）：全现金/零成交腿的 Sharpe 是浮点噪声（实测 ≈6e12），
+    用它作差会把好实验判成 rejected。退化腿由 `_nav_summary` 打 `degenerate_leg`。
+    """
+    deltas: dict[str, float | None] = {}
+    if not base_summary:
+        return deltas
+    degenerate = bool(exp_summary.get("degenerate_leg")) or bool(
+        base_summary.get("degenerate_leg")
+    )
+    for m in _DELTA_METRICS:
+        e_val, b_val = exp_summary.get(m), base_summary.get(m)
+        unavailable = (
+            e_val is None
+            or b_val is None
+            or (m == "turnover" and (e_val is None or b_val is None))
+            or (degenerate and m in ("sharpe", "sortino", "calmar"))
+        )
+        deltas[f"delta_{m}"] = (
+            None if unavailable else float(e_val) - float(b_val)
+        )
+    return deltas
 
 
 def _trades_turnover_total(trades: list[dict]) -> float:
@@ -432,13 +478,7 @@ def run_portfolio_backtest(db, experiment: dict, ctx: dict) -> dict:
         base_nav = stitched_base_nav
         base_summary = _nav_summary(stitched_base_nav)  # trades=None → turnover=None
         exp_summary = _nav_summary(stitched_nav)
-        deltas = {}
-        if base_summary:
-            for m in _DELTA_METRICS:
-                deltas[f"delta_{m}"] = (
-                    None if m == "turnover"
-                    else float(exp_summary.get(m, 0.0)) - float(base_summary.get(m, 0.0))
-                )
+        deltas = _deltas_from_summaries(exp_summary, base_summary)
         regime = {}
         return _assemble_result(
             db, experiment, spec, base_ref, resolved_yaml, is_creation,
@@ -496,13 +536,7 @@ def run_portfolio_backtest(db, experiment: dict, ctx: dict) -> dict:
 
     exp_summary = _nav_summary(exp_result["daily_nav"], exp_result.get("trades"))
     deltas = {}
-    if base_summary:
-        for m in _DELTA_METRICS:
-            deltas[f"delta_{m}"] = (
-                None
-                if m == "turnover" and (exp_summary.get(m) is None or base_summary.get(m) is None)
-                else float(exp_summary.get(m, 0.0)) - float(base_summary.get(m, 0.0))
-            )
+    deltas = _deltas_from_summaries(exp_summary, base_summary)
 
     # regime 拆分（基准沪深300 SMA200 上/下；breadth 分段待数据线二期）
     bench_nav_for_regime = None
@@ -571,7 +605,12 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
     from research.stats.psr import mintrl as _mintrl
     from research.stats.psr import moments as _moments
     from research.stats.psr import psr as _psr
-    from research.verdict_rules import load_rules, plateau_neighbors, plateau_verdict, suggest_backtest_verdict
+    from research.verdict_rules import (
+        load_rules,
+        plateau_neighbors,
+        plateau_verdict,
+        suggest_backtest_verdict,
+    )
 
     exp_rets_s = _daily_returns(exp_result["daily_nav"])
     base_rets_s = _daily_returns(base_nav) if base_nav else None

@@ -118,6 +118,14 @@ def macd(
     ``warmup=True`` starts the EMAs from the first bar (backtest behavior);
     ``warmup=False`` suppresses each EMA until its span is complete (chart
     behavior).
+
+    口径注记（R5-P3-7，Round 5 复核）：两种模式**不止**掩码不同——`warmup=False`
+    会把 DEA 的递推种子改在"第一根有效 DIF"上，故两者在预热窗**之后**仍有差异
+    （实测 ~140 根波动序列上 max|Δdea| ≈ 0.032，随后按 ≈0.8^k 衰减）。
+    各模式已被各自的参考实现钉住（tests/unit/test_core_indicators.py），属
+    **跨页面口径差**：同一标的/日在看板迷你图（chart 模式）与详情图（缓存模式）
+    上可能显示不同的 MACD，历史很短的标的（<~100 根）可能看到金叉/死叉判断不一致。
+    需要统一时，应让同一展示窗口固定用同一种模式。
     """
     if close.empty:
         return pd.DataFrame({"dif": pd.Series(dtype=float), "dea": pd.Series(dtype=float), "hist": pd.Series(dtype=float)})

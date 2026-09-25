@@ -1,6 +1,10 @@
 # Round 4 审查报告（loop-review-ds4f）
 
-> **状态：OPEN（待修复验收）**
+> **状态：CLOSED（2026-09-25 闭合）**
+> - 修复清单：`round4-fixes.md`；验收代理 V10 **FAIL**（1 项 P2 回归：worker 回灌只进
+>   集合没进队列）→ 修复 → V11 **PASS**（ND-1 a–e 全子项 + ND-3/4/5 均以自证探针闭合，
+>   且每条探针在父提交上变红；回归面/套件/lint/工件一致）。闭合补充见
+>   `round4-review-closure.md`。
 >
 > 日期：2026-09-25
 > 审查对象：commit `90e48f8`（Round 3 闭合后全量代码）
