@@ -338,5 +338,7 @@ def _empty_frame() -> pd.DataFrame:
         columns=[
             "date", "symbol", "suspended", "limit_up_price", "limit_down_price",
             "is_limit_up", "is_limit_down", "st_status", "no_limit",
+            # V10-ND-5：空帧的列集必须与非空帧一致（否则消费方按列取用会 KeyError）
+            "listing_known",
         ]
     )

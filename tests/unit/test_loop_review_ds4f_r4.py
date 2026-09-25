@@ -9,6 +9,9 @@ Round 4 是**新面审查轮**（分层/数据一致/并发/UI/验收脚本）�
 
 from __future__ import annotations
 
+from datetime import date
+
+import pandas as pd
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -51,17 +54,15 @@ def _legal_value(rule: dict, *, avoid=None):
 
 
 def _behaviour_fingerprint(instance) -> dict:
-    """模块自报的关键状态（只取标量属性，避免误比大对象）。"""
+    """模块的**全部**标量实例属性（V10-ND-4：此前用手写白名单，只覆盖 66 个
+    带默认值的 schema 字段中的 38 个 → 4/7 的"默认值矛盾"变异能逃逸。改为枚举
+    `vars(instance)` 的标量项，整类可见）。"""
     out = {}
-    for attr in ("mode", "atr_mul", "atr_period", "n", "lookback", "lookback_days",
-                 "max_positions", "threshold", "top_n", "per_l2", "max_heat_pct",
-                 "use_exit", "valid_days", "min_bars", "entry_n", "exit_n",
-                 "enabled_only", "exclude_st", "asset_type", "min_amount20",
-                 "max_turnover", "max_weight", "band", "freq", "max_days"):
-        if hasattr(instance, attr):
-            value = getattr(instance, attr)
-            if isinstance(value, (str, int, float, bool, type(None))):
-                out[attr] = value
+    for attr, value in vars(instance).items():
+        if attr.startswith("__"):
+            continue
+        if isinstance(value, (str, int, float, bool, type(None))):
+            out[attr] = value
     return out
 
 
@@ -323,3 +324,120 @@ def test_confirm_rejects_oversize_reasoning(test_db, registry=None):
 
     src = inspect.getsource(verdict.confirm_verdict)
     assert "max 4000 chars" in src
+
+
+# ----------------------------------------------------------------------
+# V10 复核：回灌必须落回 `_queue`（只进集合不等于可再派发）
+# ----------------------------------------------------------------------
+
+
+def test_worker_stop_before_start_keeps_experiments_dispatchable(test_db):
+    """V10-ND-1：stop() 早于 start()（或 stop 后重启）时，队列里的实验必须
+    仍然**可被再次派发**——`_queued_ids` 与 `_queue` 都要有它。"""
+    import time as _t
+
+    from portfolio.library import add_version_yaml, ensure_strategy
+    from portfolio.slots import REGISTRY, ensure_builtins
+    from research import experiments, lifecycle, sessions, topics
+
+    ensure_builtins()
+    session = sessions.get_or_create_default_human_session(test_db)
+    topic = topics.create_topic(test_db, session_id=session["session_id"],
+                                title="worker-requeue", question="?")
+    ensure_strategy(test_db, "requeue-line", name="requeue")
+    ver = add_version_yaml(test_db, "requeue-line", (
+        "name: requeue-line\n"
+        "universe: {module: category_filter@1}\n"
+        "signal: {module: macd_cross@1}\n"
+        "rank: {module: by_freshness@1}\n"
+        "sizing: {module: all_in@1}\n"
+        "portfolio_risk: []\n"
+        "position_risk: {module: hard_stop@1, params: {atr_mul: 1.5}}\n"
+        "execution: {module: tail_session@1}\n"
+    ), REGISTRY, created_by="human")
+    exp = experiments.propose_experiment(
+        test_db, session_id=session["session_id"], title="requeue",
+        topic_id=topic["id"], evaluation_module="portfolio_backtest@1",
+        spec={"base": ver["id"], "diff": [{"slot": "position_risk",
+                                          "to": "hard_stop@1", "params": {"atr_mul": 2.0}}]},
+        hypothesis="stop 后实验必须仍可被再次派发（回灌要落回队列）",
+        allow_duplicate=True, registry=REGISTRY,
+    )
+    worker = _mk_worker(test_db)
+    assert worker.submit(exp["id"]) is True
+    worker.stop()  # 从未 start
+    assert exp["id"] in worker._queued_ids
+    # 关键：必须也能"再派发"——start() 后 dispatcher 能把它取走并提交
+    import research.worker as _w
+
+    seen: list[str] = []
+    _orig = _w.run_experiment
+
+    def _spy(db, exp_id, **kw):
+        seen.append(exp_id)
+        return {"suggested_verdict": "inconclusive", "warnings": [], "evidence": {},
+                "report": {}, "baseline": {}, "runs": []}
+
+    _w.run_experiment = _spy
+    try:
+        worker.start()
+        _t.sleep(1.5)
+        worker.stop()
+    finally:
+        _w.run_experiment = _orig
+    assert exp["id"] in seen, (
+        "stop() 之后的实验没有被重新派发（回灌只进了集合没进队列）"
+        f"（seen={seen}，status={lifecycle.get_experiment(test_db, exp['id'])['status']}）"
+    )
+
+
+def test_worker_start_allows_restart_after_dispatcher_exits(test_db):
+    """V10-ND-3：旧调度线程已退出时，start() 必须允许重启（清引用）。"""
+    worker = _mk_worker(test_db)
+
+    class _DeadThread:
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            return None
+
+    worker._dispatcher = _DeadThread()
+    worker.start()
+    assert worker._dispatcher is not None
+    assert worker._dispatcher.__class__ is not _DeadThread, "应起一个新调度线程"
+    worker.stop()
+
+
+def test_empty_tradability_frame_has_the_same_columns():
+    """V10-ND-5：空帧与非空帧列集必须一致。"""
+    from gateway.tradability import _empty_frame, compute_tradability
+
+    empty = _empty_frame()
+    non_empty = compute_tradability(
+        None, symbols=["600519.SS"], dates=[date(2024, 3, 11)],
+        raw_closes={"600519.SS": pd.Series({date(2024, 3, 11): 10.0})},
+        ex_factors={"600519.SS": []}, listing_dates={"600519.SS": None},
+    )
+    assert set(empty.columns) == set(non_empty.columns), (
+        f"空帧缺列：{set(non_empty.columns) - set(empty.columns)}"
+    )
+    assert "listing_known" in non_empty.columns
+
+
+def test_tradability_listing_known_flag():
+    """V10-ND-5：`listing_known` 必须如实反映"上市日是否已知"。"""
+    from gateway.tradability import compute_tradability
+
+    days = [date(2024, 3, 11), date(2024, 3, 12)]
+    closes = pd.Series({date(2024, 3, 11): 10.0, date(2024, 3, 12): 11.0})
+    unknown = compute_tradability(
+        None, symbols=["600519.SS"], dates=days, raw_closes={"600519.SS": closes},
+        ex_factors={"600519.SS": []}, listing_dates={"600519.SS": None},
+    )
+    assert bool(unknown.iloc[0]["listing_known"]) is False
+    known = compute_tradability(
+        None, symbols=["600519.SS"], dates=days, raw_closes={"600519.SS": closes},
+        ex_factors={"600519.SS": []}, listing_dates={"600519.SS": "2015-01-05"},
+    )
+    assert bool(known.iloc[0]["listing_known"]) is True

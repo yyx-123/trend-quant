@@ -97,12 +97,13 @@ class ResearchWorker:
     def start(self) -> None:
         if self._dispatcher is not None:
             # P3-4（R4A 复核）：join 超时后引用被保留——若旧线程仍活着，绝不能
-            # 再起第二个调度线程（会共享 _queue/_queued_ids/_active_by_session）
+            # 再起第二个调度线程（会共享 _queue/_queued_ids/_active_by_session）。
+            # V10-ND-3：旧线程**已经退出**时必须清引用并允许重启（否则本进程内
+            # 再也起不来）。
             if getattr(self._dispatcher, "is_alive", lambda: False)():
-                _logger.warning(
-                    "research worker dispatcher still alive; start() ignored"
-                )
-            return
+                _logger.warning("research worker dispatcher still alive; start() ignored")
+                return
+            self._dispatcher = None
         swept = lifecycle.mark_interrupted_research_runs(self.db)
         if swept["experiments"] or swept["engine_runs"]:
             _logger.warning("startup sweep: %s experiments, %s engine runs marked failed",
@@ -146,12 +147,17 @@ class ResearchWorker:
         # R4A-P3-3：把原始队列里尚未消费的 id 并回 `_queued_ids`（dispatcher 退出
         # 时可能有 id 只在 `_queue` 里而不在集合里 → 之后 `status()`/重派都会漏它）
         with self._lock:
+            # 先把队列里剩余的 id 全部取出（**再**统一放回：边取边放会自旋），
+            # 保证"集合里有它"与"队列里有它"始终一致（V10-ND-1）
+            pending_ids: list[str] = []
             while True:
                 try:
-                    pending_id = self._queue.get_nowait()
+                    pending_ids.append(self._queue.get_nowait())
                 except Exception:
                     break
+            for pending_id in pending_ids:
                 self._queued_ids.add(pending_id)
+                self._queue.put(pending_id)
         if self._pool:
             pool = self._pool
             self._pool = None
@@ -166,6 +172,7 @@ class ResearchWorker:
                     # 返回 False（判不出状态时保守同样回灌，绝不静默丢）
                     fut.cancel()
                     self._queued_ids.add(exp_id)
+                    self._queue.put(exp_id)  # V10-ND-1：回灌必须落回队列
                     self._active_by_session[owner] = max(
                         0, self._active_by_session.get(owner, 1) - 1
                     )
@@ -217,6 +224,7 @@ class ResearchWorker:
                 # 并回退会话计数（否则该实验既不在队列也不在跑，计数永久泄漏）。
                 with self._lock:
                     self._queued_ids.add(experiment_id)
+                    self._queue.put(experiment_id)  # V10-ND-1：回灌必须落回队列
                     self._active_by_session[owner] = max(
                         0, self._active_by_session.get(owner, 1) - 1
                     )
