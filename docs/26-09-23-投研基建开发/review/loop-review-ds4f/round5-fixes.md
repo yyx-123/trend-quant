@@ -65,6 +65,30 @@ warnings；下游消费 → `conclusion`（FDR）、`_regime_split`（collapse �
 数值复算（reports/parity/nav-summary/stats/tradability）**零不匹配**；ruff 新增 0 条；
 两轮全量套件零漂移（1637/2 → 1642/2，失败均为既有 flake）。
 
+
+## Round 8 确认轮（两个独立代理）与其后续修复
+
+- **R8B：CLEAN**（零新增真实缺陷）。独立复核了：所有存量改动的逐 hunk 行为保持（含
+  迁移路径：用 `f93031e` 代码建的库被 HEAD 打开后 11 个 engine 守卫装上、2 个冗余索引
+  删除、旧数据 0 丢失）、跨进程逐字节确定性（NAV/fills/verdict/物化 4 文件全等）、
+  ~1500 条随机不变量断言（费用守恒/报告指标/统计件/可交易性/指标原语）**零不匹配**、
+  38 条失败模式探针（holdout 边界与 token/启动收割/坏 spec_json/入口拒绝）全符合预期、
+  生产库 49 表行数与 03:00 备份一致且 29 个触发器定义与代码 DDL 逐字节相同。
+- **R8A：NOT CLEAN**——退化腿类缺陷在第 5 次复发（三个新消费面）：
+
+| # | 项 | 证据 | 修复（定稿：幅值闸门单点收口） |
+|---|---|---|---|
+| **R8-F1**（P2） | `build_report` 从 NAV **重新派生**指标，不经过 L4 的退化闸门 → 持久化/发布 6.1e12 级 Sharpe + 394 条滚动 Sharpe 噪声（普通触发条件：前 255 日无成交） | 真 run 的 `research_verdicts.report_json` + HTTP + 物化文件 | `is_degenerate_nav` 单点实现（`rule_backtest/metrics.py`，含**幅值闸门** `\|sharpe\|>50` + 相对方差判据）；`build_report` 清零 summary/滚动 Sharpe；`_common` 委托同一实现 |
+| **R8-F2**（P2） | PBO 变体矩阵里全现金列的 1e12 "Sharpe" 赢下每个 CSCV 组合的 IS argmax 与 OOS 最优 → λ≡1 → `pbo=0.0`（假的"绝不拟合"） | 真 pipeline 持久化 `pbo=0.0` | `_sharpe_vec` 把退化列记 NaN；比较仅在有序列上进行；全退化 → `pbo=None + degenerate_variants=True` |
+| **R8-F3**（P3） | 相对判据有**近失配带**（std/\|mean\| ∈ 5.7e-6…1.8e-5）：单调低波路径的 8.7e5 级 Sharpe **翻转判定为 rejected**、wf 折 +2.8e6、regime 段 Δ −3.9e6 且 `sufficient_sample=true` | 真 run 四处 | 幅值闸门（`\|sharpe\|>50` 即判退化）接入 `_nav_summary`/regime 段/`build_report`；4 处阈值只剩 1 份实现 |
+| **R8-F4**（P3） | `up_capture`/`down_capture` 在退化基准上除以噪声均值（实测 11.4） | 探针 | 与 beta/alpha 同口径：退化腿整组记 None |
+| R8-F5（P3） | 钉子缺口：`_regime_segment_metrics` 的行为回退（保留标识符）可存活 1185 个用例 | 变异 | 新增 4 条**载荷级**钉子（幅值闸门 / build_report / PBO 退化列 / capture） |
+
+**至此"退化腿"类的单点收口链**：判据 → `rule_backtest.metrics.is_degenerate_nav`
+（唯一实现）；Δ 语义 → `_delta_or_none`/`_deltas_from_summaries`；持久化可见 →
+`evidence["degenerate_legs"]` + warnings；全部消费面 → summary/stats/滚动 Sharpe/
+regime 段/collapse 门/benchmark_relative（beta·alpha·capture）/head_to_head/PBO/课题 FDR。
+
 ## 回归结果
 
 - 全量（Round 7 修复后终跑）：**1642 passed / 2 failed**（唯一失败为既有 Windows 临时文件 flake）；

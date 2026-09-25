@@ -245,3 +245,97 @@ def test_pbo_marks_degenerate_variants():
     overfit[300:, 0] -= 0.01
     overfit[300:, 1] += 0.01
     assert pbo_cscv(overfit, n_blocks=8)["degenerate_variants"] is False
+
+
+# ----------------------------------------------------------------------
+# R8 复核后的定稿钉子：退化闸门必须覆盖**全部**派生面（幅值闸门单点收口）
+# ----------------------------------------------------------------------
+
+
+def _flat(n=120, rate=0.01 / 252):
+    return [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+             "equity": 1e6 * (1 + rate) ** i} for i in range(n)]
+
+
+def _monotone(n=200, rate=0.0004):
+    return [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+             "equity": 1e6 * (1 + rate) ** i} for i in range(n)]
+
+
+def test_degenerate_gate_uses_a_magnitude_floor():
+    """R8-F3：退化判据必须含**幅值闸门**——近失配带（std/|mean| ≈ 1e-5 的单调
+    低波路径）会漏过纯相对判据，产出 8.7e5 级 Sharpe 并**翻转判定**。"""
+    from research.evaluations.backtest import _nav_summary
+    from rule_backtest.metrics import DEGENERATE_SHARPE_ABS_LIMIT, is_degenerate_nav
+
+    assert DEGENERATE_SHARPE_ABS_LIMIT == pytest.approx(50.0)
+    # 近失配带：单调路径 + 极小平滑噪声（std/|mean| ≈ 1e-5）→ 纯相对判据漏判，
+    # 而 Sharpe 高达 1e3 量级 → 幅值闸门必须抓住（R8-F3 的实测形态）
+    _eq = 1e6
+    near = []
+    for i in range(200):
+        _eq *= 1.0 + (4e-4 + (5e-6 if i % 2 else -5e-6))  # mean/std ≈ 80 → Sharpe ≈ 1.3e3
+        near.append({"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}", "equity": _eq})
+    assert is_degenerate_nav(near) is False, "纯相对判据在近失配带确实漏判"
+    summary = _nav_summary(near)
+    assert summary["sharpe"] is None and summary.get("degenerate_leg") is True, summary
+    # 严格单调（方差为 0）由相对判据抓住
+    mono = _monotone()
+    assert is_degenerate_nav(mono) is True
+
+    # 正常策略的 Sharpe 不得被幅值闸门误杀
+    normal = [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+               "equity": 1e6 * (1.004 if i % 2 else 0.997)} for i in range(60)]
+    normal_summary = _nav_summary(normal)
+    assert normal_summary.get("degenerate_leg") is None
+    assert normal_summary["sharpe"] is not None
+
+
+def test_build_report_gates_degenerate_noise():
+    """R8-F1：`full_run_report` 从 NAV 重新派生指标，**不经过** L4 的退化闸门
+    → 6e12 级 Sharpe 与 394 条滚动 Sharpe 噪声曾被持久化/发布。"""
+    from portfolio.reports import build_report
+
+    rep = build_report(None, run_id="R-degen", nav_rows=_flat(), fills=[],
+                       unfilled=[], gate_log=[])
+    assert rep["summary"]["sharpe"] is None
+    assert rep["summary"]["degenerate_leg"] is True
+    assert rep["rolling_sharpe_6m"] == [] and rep["rolling_sharpe_12m"] == []
+    # 正常 NAV 不受影响
+    normal = [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+               "equity": 1e6 * (1.004 if i % 2 else 0.997)} for i in range(300)]
+    rep_ok = build_report(None, run_id="R-ok", nav_rows=normal, fills=[],
+                          unfilled=[], gate_log=[])
+    assert rep_ok["summary"]["sharpe"] is not None
+    assert rep_ok["rolling_sharpe_6m"], "正常 NAV 的滚动 Sharpe 不得被清空"
+
+
+def test_pbo_ignores_degenerate_variants():
+    """R8-F2：全现金变体的 1e12 级"Sharpe"会赢下每个 CSCV 组合的 argmax →
+    λ≡1 → pbo=0.0（假的"绝不拟合"）。退化列必须不参与比较；全退化则记 None。"""
+    import numpy as np
+
+    from research.stats.fdr_pbo import pbo_cscv
+
+    rng = np.random.default_rng(11)
+    t = 600
+    mixed = rng.normal(0.0004, 0.01, (t, 4))
+    mixed[:, 0] = 0.01 / 252.0  # 全现金列
+    out = pbo_cscv(mixed, n_blocks=8)
+    assert out["pbo"] is not None, out
+    all_degen = np.tile(0.01 / 252.0, (t, 3))
+    out2 = pbo_cscv(all_degen, n_blocks=8)
+    assert out2["pbo"] is None and out2["degenerate_variants"] is True, out2
+
+
+def test_capture_ratios_refuse_noise_denominators():
+    """R8-F4：up/down capture 此前会在退化基准上给出 11.4 这类无意义值。"""
+    from portfolio.reports import benchmark_relative
+
+    nav = [{"date": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}",
+            "equity": 1e6 * (1.003 if i % 2 else 0.997)} for i in range(60)]
+    flat = [{"date": r["date"], "equity": 1e6 * (1 + 0.01 / 252) ** i}
+            for i, r in enumerate(nav)]
+    out = benchmark_relative(nav, flat)
+    assert out["up_capture"] is None and out["down_capture"] is None, out
+    assert out["beta"] is None and out["alpha_annual"] is None

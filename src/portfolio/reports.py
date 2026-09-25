@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from rule_backtest.metrics import compute_summary
+from rule_backtest.metrics import compute_summary, is_degenerate_nav
 
 
 def daily_returns(nav_rows: list[dict]) -> pd.Series:
@@ -55,8 +55,19 @@ def benchmark_relative(nav_rows: list[dict], bench_nav_rows: list[dict]) -> dict
     ir = float(excess.mean() / excess.std(ddof=1) * np.sqrt(252)) if excess.std(ddof=1) > 0 else 0.0
     up = b > 0
     down = b < 0
-    up_capture = float(p[up].mean() / b[up].mean()) if up.any() and b[up].mean() != 0 else None
-    down_capture = float(p[down].mean() / b[down].mean()) if down.any() and b[down].mean() != 0 else None
+    # R8 复核（P3）：退化基准（零成交/全现金）下的 up/down capture 是"除以噪声均值"
+    # 的无意义比值（实测 11.4）——与 beta/alpha 同口径：退化腿整组记 None
+    _bench_degenerate = is_degenerate_nav(bench_nav_rows)
+    _up_mean = float(b[up].mean()) if up.any() else 0.0
+    _down_mean = float(b[down].mean()) if down.any() else 0.0
+    up_capture = (
+        float(p[up].mean() / _up_mean)
+        if up.any() and _up_mean != 0 and not _bench_degenerate else None
+    )
+    down_capture = (
+        float(p[down].mean() / _down_mean)
+        if down.any() and _down_mean != 0 and not _bench_degenerate else None
+    )
     return {
         "alpha_annual": None if alpha_daily is None else alpha_daily * 252,
         "beta": beta,
@@ -208,9 +219,23 @@ def build_report(
     slot_limit: int | None = None,
     round_trips: list[dict] | None = None,
 ) -> dict:
-    """汇总一份组合回测报告（完整明细，不摘要化——§6.5.0 报告完整性）。"""
+    """汇总一份组合回测报告（完整明细，不摘要化——§6.5.0 报告完整性）。
+
+    R8 复核（P2）：退化腿（零成交/全现金）的 Sharpe/滚动 Sharpe 是 1e6~1e13 级浮点
+    噪声——它们在**本函数重新从 NAV 派生**，不经过 L4 的退化闸门，于是原样进了
+    持久化的 `full_run_report`（实测 summary.sharpe=6.1e12 + 394 条滚动 Sharpe
+    噪声，并被 HTTP/物化产物原样发布）。这里对同一份 NAV 再判一次退化并清零。
+    """
+    from rule_backtest.metrics import is_degenerate_nav
+
     traded_total = _traded_amount(fills)
     summary = compute_summary(nav_rows, trades=[], turnover_total=traded_total)
+    degenerate = is_degenerate_nav(nav_rows)
+    if degenerate or is_degenerate_nav(nav_rows, sharpe=summary.get("sharpe")):
+        degenerate = True
+        summary["sharpe"] = None
+        summary["sortino"] = None
+        summary["degenerate_leg"] = True
     bench_rel = {
         name: benchmark_relative(nav_rows, rows)
         for name, rows in (benchmarks or {}).items()
@@ -226,8 +251,9 @@ def build_report(
         "run_id": run_id,
         "summary": summary,
         "benchmark_relative": bench_rel,
-        "rolling_sharpe_6m": rolling_sharpe(nav_rows, 126),
-        "rolling_sharpe_12m": rolling_sharpe(nav_rows, 252),
+        # R8：退化腿的滚动 Sharpe 是同一份噪声（此前原样持久化 394+268 条）
+        "rolling_sharpe_6m": [] if degenerate else rolling_sharpe(nav_rows, 126),
+        "rolling_sharpe_12m": [] if degenerate else rolling_sharpe(nav_rows, 252),
         "drawdown_durations": drawdown_durations(nav_rows),
         "return_distribution": return_distribution(nav_rows),
         "cost": cost_drag(fills),

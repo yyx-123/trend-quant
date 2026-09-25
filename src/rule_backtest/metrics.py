@@ -56,6 +56,40 @@ def flat_run_days(trades: list[dict], dates: list[str]) -> list[float]:
     return runs
 
 
+# 退化（不可用）指标的判据（R8 复核后单点收口，5 次复发后的定稿）：
+# 零成交/全现金腿（或近乎单调的路径）的日收益只有计息/路径的浮点残差，其
+# Sharpe/Sortino/PSR 是 1e6~1e13 级的噪声——**绝不允许**进入任何作差、判定、
+# 排序、格式化或持久化面。
+# 两条腿：① 相对方差不可分辨（std <= |mean|·1e-6）；② 幅值闸门（|sharpe| > 50
+# 在任何诚实样本上都不可能，实测噪声在 1e6 以上，而正常策略 |sharpe| < 5）。
+# 幅值闸门同时覆盖"近失配带"（相对判据在 5.7e-6~1.8e-5 之间漏判）的情形。
+DEGENERATE_SHARPE_ABS_LIMIT = 50.0
+DEGENERATE_REL_TOL = 1e-6
+
+
+def is_degenerate_nav(nav_rows, *, sharpe: float | None = None) -> bool:
+    """该 NAV 序列是否退化（指标不可用）。``sharpe`` 给了就一并做幅值闸门。"""
+    import math
+
+    if sharpe is not None and (
+        not math.isfinite(float(sharpe))
+        or abs(float(sharpe)) > DEGENERATE_SHARPE_ABS_LIMIT
+    ):
+        return True
+    eq = [float(r["equity"]) for r in (nav_rows or []) if r.get("equity") is not None]
+    if len(eq) < 3:
+        return False
+    rets = [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq)) if eq[i - 1]]
+    if not rets:
+        return False
+    mean_r = sum(rets) / len(rets)
+    var = (
+        sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1)
+        if len(rets) > 1 else 0.0
+    )
+    return (var ** 0.5) <= max(abs(mean_r), 1e-12) * DEGENERATE_REL_TOL
+
+
 def compute_summary(daily_nav: list[dict], trades: list[dict], turnover_total: float) -> dict:
     if not daily_nav:
         return {

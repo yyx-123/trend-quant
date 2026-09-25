@@ -67,18 +67,32 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
         oos_idx = np.concatenate([blocks[i] for i in range(n_blocks) if i not in combo])
         is_sharpe = _sharpe_vec(r[is_idx, :])
         oos_sharpe = _sharpe_vec(r[oos_idx, :])
-        best_is = int(np.argmax(is_sharpe))
+        # R8 复核（P2）：退化列（全现金/零成交）的 `_sharpe_vec` 是 1e12 级噪声，
+        # 会在每个 CSCV 组合里**同时**赢下 IS argmax 与 OOS 最优 → λ≡1 → pbo=0.0
+        # （假的"绝不拟合"）。退化列不参与比较：全退化则本组合不产生 λ。
+        _usable = np.isfinite(is_sharpe) & np.isfinite(oos_sharpe) & (
+            np.abs(is_sharpe) <= _SHARPE_ABS_LIMIT
+        )
+        if not _usable.any():
+            continue
+        _is_masked = np.where(_usable, is_sharpe, -np.inf)
+        best_is = int(np.argmax(_is_masked))
         # OOS 相对秩（0..1；λ<0.5 = IS 最优在 OOS 中位数以下 = 过拟合）。
         # R7 复核（R7B #1）：**同名次按半步计**——变体互不相上下（乃至所有变体
         # 是同一条 run）时，`oos < best` 会把并列全判为"更差"→ 秩 0 → λ=0 →
         # pbo=1.0（"必然过拟合"），与同一批证据里的 `plateau=plateau` 自相矛盾。
         _best_oos = oos_sharpe[best_is]
-        rank = float(np.sum(oos_sharpe < _best_oos)) + 0.5 * float(
-            np.sum(oos_sharpe == _best_oos) - 1
+        _oos_usable = oos_sharpe[_usable]
+        rank = float(np.sum(_oos_usable < _best_oos)) + 0.5 * float(
+            np.sum(_oos_usable == _best_oos) - 1
         )
-        lam = rank / (n - 1) if n > 1 else 0.0
+        lam = rank / (len(_oos_usable) - 1) if len(_oos_usable) > 1 else 0.0
         lambdas.append(lam)
 
+    if not lambdas:
+        # 所有变体都退化（零成交/全现金）→ PBO 无判别力
+        return {"pbo": None, "n_combinations": comb(n_blocks, half),
+                "lambda_median": None, "degenerate_variants": True}
     lambdas = np.array(lambdas)
     pbo = float(np.mean(lambdas < 0.5))
     return {
@@ -91,8 +105,18 @@ def pbo_cscv(returns_matrix, *, n_blocks: int = 8) -> dict:
     }
 
 
+_SHARPE_ABS_LIMIT = 50.0  # 与 rule_backtest.metrics.DEGENERATE_SHARPE_ABS_LIMIT 同口径
+
+
 def _sharpe_vec(x: np.ndarray) -> np.ndarray:
+    """逐列 Sharpe；**退化列记 NaN**（不可参与比较，R8 复核）。
+
+    退化 = 方差不可分辨（std <= |mean|·1e-6）或幅值超过闸门（|sharpe| > 50）——
+    零成交/全现金列的 1e12 级噪声会赢下每个 CSCV 组合的 argmax，把 PBO 伪造成 0。
+    """
     mean = np.nanmean(x, axis=0)
     std = np.nanstd(x, axis=0, ddof=1)
     with np.errstate(all="ignore"):
-        return np.where(std > 0, mean / std, 0.0)
+        sharpe = np.where(std > 0, mean / std, 0.0)
+    degenerate = (std <= np.abs(mean) * 1e-6) | (np.abs(sharpe) > _SHARPE_ABS_LIMIT)
+    return np.where(degenerate, np.nan, sharpe)

@@ -207,7 +207,7 @@ def _nav_summary(nav_rows: list[dict], trades: list[dict] | None = None) -> dict
     # 退化判定（R5-P2-2 + R7-F1/F2）：统一走 _common.is_degenerate_leg
     from research.evaluations._common import is_degenerate_leg, null_degenerate_metrics
 
-    if is_degenerate_leg(nav_rows):
+    if is_degenerate_leg(nav_rows, sharpe=summary.get("sharpe")):
         null_degenerate_metrics(summary)
     return summary
 
@@ -337,7 +337,13 @@ def _regime_segment_metrics(nav_rows: list[dict], days: set) -> dict:
     mean_r = float(arr.mean())
     # R7-F3：段内只有浮点残差（该腿整段零成交/全现金）→ Sharpe 是噪声（实测
     # 1.7e13），记 None 并由 sufficient_sample=False 阻止其行使塌陷否决
-    _degenerate_segment = std <= max(abs(mean_r), 1e-12) * 1e-6
+    from rule_backtest.metrics import is_degenerate_nav
+
+    _seg_sharpe = float(mean_r / std * np.sqrt(252)) if std > 0 else 0.0
+    _degenerate_segment = bool(
+        std <= max(abs(mean_r), 1e-12) * 1e-6
+        or is_degenerate_nav([{"equity": float(e)} for e in eq], sharpe=_seg_sharpe)
+    )
     sharpe = None if _degenerate_segment else (
         float(mean_r / std * np.sqrt(252)) if std > 0 else 0.0
     )
