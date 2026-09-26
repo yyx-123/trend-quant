@@ -252,12 +252,18 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
     evidence: dict[str, Any] = {"feature": feature, "buckets": n_buckets,
                                  "p_value": None}
     warnings: list[str] = list(_regime_warnings)
+    if len(events) < n_buckets * 10:
+        # R25A-F13：样本不足必须可见（否则与"算不出来"不可区分）
+        warnings.append(
+            f"insufficient_events({len(events)} < {n_buckets * 10}：证据不足以分桶判定)"
+        )
     suggested = "inconclusive"
     bucket_table: list[dict] = []
     spread = None
     random_band = None
     monotonicity = None
 
+    _n_perm = 2000
     if len(events) >= n_buckets * 10:
         feat_vals = np.array([f for _, _, f in events])
         quantiles = np.quantile(feat_vals, np.linspace(0, 1, n_buckets + 1))
@@ -307,7 +313,8 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
 
         # R24A-F2b：任一端桶为空（means 含 NaN）时 spread 不可比 → None（inconclusive），
         # 不再报一个"由内部空桶拼出来的有限利差"
-        if np.isfinite(means[0]) and np.isfinite(means[-1]):
+        # R25A-F5：**任一**桶为空（含内部空桶）都不可算 spread/单调性
+        if all(np.isfinite(m) for m in means):
             spread = means[-1] - means[0]  # Q5−Q1（expect=positive 语境）
             if expect == "negative":
                 spread = means[0] - means[-1]
@@ -320,7 +327,7 @@ def run_bucket_analysis(db, experiment: dict, ctx: dict) -> dict:
         ev_ret = np.array([matrix[t, col] for t, col, _f in events], dtype=float)
         # R24A-F2：B=200 的分辨率只有 0.005（p=0.03 vs 独立复算 0.0142 落在噪声内）、
         # 95 分位带偏高 7.5%。提到 2000（代价：bucket 单次评估多 ~1 秒）。
-        for _ in range(2000):
+        for _ in range(_n_perm):
             shuffled = rng.permutation(len(events))
             groups = np.array_split(shuffled, n_buckets)
             g_means = []

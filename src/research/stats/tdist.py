@@ -67,8 +67,9 @@ def _betainc(a: float, b: float, x: float) -> float:
 def t_sf(t_stat: float, df: int) -> float:
     """单尾上尾概率 P(T > t)（df 自由度）。"""
     df = max(int(df), 1)
+    # R25A-F11：NaN 不得被当成"最显著"（此前 NaN→0.0，经 p 值路径成为最强证据）
     if not math.isfinite(t_stat):
-        return 1.0 if t_stat < 0 else 0.0
+        return 1.0
     x = df / (df + t_stat * t_stat)
     tail = 0.5 * _betainc(df / 2.0, 0.5, x)
     return tail if t_stat >= 0 else 1.0 - tail

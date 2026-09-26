@@ -819,6 +819,11 @@ def _assemble_result(db, experiment, spec, base_ref, resolved_yaml, is_creation,
             for _dates, _rets in series:
                 keys = set(_dates)
                 common = keys if common is None else (common & keys)
+            if len(series) >= 2 and not common:
+                warnings_pbo = (
+                    "pbo_unavailable(no_common_dates：各变体 NAV 日期交集为空"
+                    "——口径不可比，PBO 记 None)"
+                )
             if len(series) >= 2 and common:
                 common_sorted = sorted(common)
                 if len(common_sorted) >= 60:
@@ -1060,7 +1065,12 @@ def _daily_rets_with_dates(nav_rows: list[dict]) -> tuple[list[str], list[float]
         return [], []
     dates = [rows[i][0] for i in range(1, len(rows))]
     eq = np.asarray([v for _d, v in rows], dtype=float)
-    rets = np.diff(eq) / eq[:-1]
+    # R25A-F9：equity<=0 → 收益 ±inf，inf 进 PBO 矩阵会产出 pbo=0.0 且
+    # degenerate_variants=False（最强结论 + 无标注）→ 非有限收益一律置 NaN
+    with np.errstate(all="ignore"):
+        rets = np.where(
+            eq[:-1] > 0, np.diff(eq) / np.where(eq[:-1] > 0, eq[:-1], 1.0), np.nan
+        )
     return dates, [float(x) for x in rets]
 
 

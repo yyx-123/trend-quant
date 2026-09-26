@@ -414,7 +414,10 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
             cluster_bootstrap_means,
         )
 
-        boot_means = cluster_bootstrap_means(ev_vals_f, ev_days_f, seed=7)
+        # R25A-F1：块长 = 主 horizon（前瞻窗口跨度），把跨日重叠保留在区块内
+        boot_means = cluster_bootstrap_means(
+            ev_vals_f, ev_days_f, seed=7, block_days=max(int(primary_h), 1)
+        )
         if boot_means is None:      # 单事件日等退化情形 → 退回 iid 并如实告警
             boot_means = _bootstrap_means(ev_vals_f, seed=7)
             warnings.append(
@@ -453,8 +456,19 @@ def run_event_study(db, experiment: dict, ctx: dict) -> dict:
             "design_effect": (round(float(design_effect), 3) if design_effect else None),
             "bootstrap": "cluster_by_event_day",
         }
-        significant = np.isfinite(band["low"]) and (
-            band["low"] > base_mean or band["high"] < base_mean
+        # R25A-F1：簇太少时（<10 个事件日）区块重抽无从体现跨日结构 →
+        # 不出判定（如实告警），避免 1~5 簇下 53%~86% 的假显著
+        _n_days_primary = int(np.unique(ev_days_f).size) if ev_days_f.size else 0
+        _min_days = 10
+        if _n_days_primary < _min_days:
+            warnings.append(
+                f"clusters_insufficient({_n_days_primary} 个事件日 < {_min_days}："
+                "区块重抽无法反映跨日重叠结构 → 本次不出判定)"
+            )
+        significant = bool(
+            _n_days_primary >= _min_days
+            and np.isfinite(band["low"])
+            and (band["low"] > base_mean or band["high"] < base_mean)
         )
         direction_ok = (primary["delta_mean"] > 0) == (expect == "positive")
         if significant and direction_ok:

@@ -460,14 +460,25 @@ class DataService:
         # 两侧时间格式不一（'YYYY-MM-DD' vs 'YYYY-MM-DD 00:00:00'），统一按前 10 位比较
         qfq_start = str(qfq_summary["start"] or "")[:10] or None
         qfq_end = str(qfq_summary["end"] or "")[:10] or None
+        # R25B-F7：守卫此前只看**首末日期**——raw 若中间缺一大段（首末不变）会被
+        # 放行，整表 qfq 被重写成带洞版本（静默丢历史）。这里补日期集合判据：
+        # raw 的日期集必须覆盖存量 qfq 的日期集（全库当前 875 只完全一致，
+        # 属防御性收紧）。
+        _raw_days = set(pd.to_datetime(raw["time"], errors="coerce").dt.strftime("%Y-%m-%d"))
+        _qfq_frame = db.load_market_data(symbol, price_mode="qfq")
+        _qfq_days = set(pd.to_datetime(_qfq_frame["time"], errors="coerce").dt.strftime("%Y-%m-%d"))             if not _qfq_frame.empty else set()
+        _missing_days = sorted(_qfq_days - _raw_days)
         if qfq_summary["rows"] and (
             (raw_start and qfq_start and raw_start > qfq_start)
             or (raw_end and qfq_end and raw_end < qfq_end)
+            or _missing_days
         ):
             logger.warning(
-                "raw coverage %s~%s does not cover stored qfq %s~%s for %s; "
-                "skip rematerialize (run the raw migration script first)",
+                "raw coverage %s~%s does not cover stored qfq %s~%s for %s "
+                "(中间缺口 %d 天，例：%s)；skip rematerialize "
+                "(run the raw migration script first)",
                 raw_start, raw_end, qfq_start, qfq_end, symbol,
+                len(_missing_days), _missing_days[:3],
             )
             return {"symbol": symbol, "status": "raw_incomplete", "rows": 0}
         if factors is None or (isinstance(factors, (list, tuple)) and len(factors) == 0):

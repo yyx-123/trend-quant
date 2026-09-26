@@ -371,6 +371,30 @@ def compute_tradability(
             is_limit_up = close_ok & valid & (close_rounded >= limit_up)
             is_limit_down = close_ok & valid & (close_rounded <= limit_down)
 
+            # R25B-F3（P2）：**无涨跌幅限制日自愈识别**。`instrument_metadata.start_date`
+            # 全库为空 → `listing_day is None` → `no_limit` 永不置位 → 新股上市前 5 个
+            # 交易日与长期停牌复牌首日被按板带判成"涨停/跌停"。
+            # 实测（真实池 874 只 × 1756 交易日、走本函数）：21 个 symbol-day 的
+            # |涨跌幅| 超出该板块板带且当日**无因子修正**（= 事实上的无限制日），
+            # 其中 13 个被标 is_limit_up、8 个被标 is_limit_down（命中 100%），
+            # 已有 **6 笔生产订单因此被拒**（engine_unfilled reason=limit_up，
+            # 000792.SZ 2021-08-10 +306.1%）。假涨停错过买入，假跌停会挡住止损卖出。
+            # 判据：无 bench 修正的日涨跌幅超出板带（留 2×tick 容差）即该日无限制，
+            # 不得据此报涨停/跌停（价格仍按 tick 取整输出，供展示）。
+            with np.errstate(all="ignore"):
+                raw_chg = close_v / prev - 1.0
+                band = limit_pct_arr + 2.0 * tick / np.maximum(prev, 1e-12)
+                beyond = (
+                    np.isfinite(raw_chg) & np.isfinite(prev) & (prev > 0)
+                    & (np.abs(raw_chg) > band)
+                    & (np.abs(f_t - 1.0) < 1e-12)      # 当日无因子修正
+                )
+            implied_no_limit = beyond & close_ok
+            if implied_no_limit.any():
+                no_limit = no_limit | implied_no_limit
+                is_limit_up = is_limit_up & ~implied_no_limit
+                is_limit_down = is_limit_down & ~implied_no_limit
+
         for i, day in enumerate(dates):
             if not is_trading_arr[i]:
                 continue

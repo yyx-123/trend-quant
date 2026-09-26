@@ -345,7 +345,7 @@ def _bootstrap_means(values, *, n_boot: int = 1000, seed: int = 7):
 
 
 def cluster_bootstrap_means(
-    values, event_days, *, n_boot: int = 1000, seed: int = 7
+    values, event_days, *, n_boot: int = 1000, seed: int = 7, block_days: int = 1
 ) -> np.ndarray | None:
     """**两阶段簇 bootstrap**：先重抽事件日、再抽该日的事件（R24A-F1）。
 
@@ -369,8 +369,22 @@ def cluster_bootstrap_means(
     idx_by_day = [np.flatnonzero(days == d) for d in uniq]
     rng = np.random.default_rng(seed)
     means = np.empty(n_boot)
+    n_clusters = max(1, len(idx_by_day))
+    # R25A-F1（P1）：簇重抽若逐**单日**抽，覆盖不了"同一/相邻日的事件共享同一段
+    # 未来收益"（主 horizon 10 日、80% 前瞻窗口重叠、日级 ACF(1)=0.42）——实测
+    # 真实结构下 H0 拒绝率 29.5%~50%（名义 5%）。改为抽**连续 N 日区块**，
+    # 块长取主 horizon（调用方传 block_days），把跨日重叠一起保留在区块内。
+    blk = max(1, int(block_days))
+    if blk <= 1 or n_clusters <= blk:
+        starts = rng.integers(0, n_clusters, size=(n_boot, n_clusters))
+    else:
+        # 循环区块起点：抽 ceil(n/blk) 个起点，展开成连续区块，再截到 n 个簇
+        n_blocks_need = max(1, int(np.ceil(n_clusters / blk)))
+        base = rng.integers(0, n_clusters, size=(n_boot, n_blocks_need))
+        offsets = np.arange(blk)[None, :]
+        expanded = (base[:, :, None] + offsets[None, :, :]) % n_clusters
+        starts = expanded.reshape(n_boot, -1)[:, :n_clusters]
     for b in range(n_boot):
-        pick = rng.integers(0, len(idx_by_day), len(idx_by_day))
-        vals = np.concatenate([values[idx_by_day[i]] for i in pick])
+        vals = np.concatenate([values[idx_by_day[i]] for i in starts[b]])
         means[b] = vals.mean()
     return means

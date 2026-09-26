@@ -284,7 +284,9 @@ def test_bucket_permutation_p_has_floor_and_gate_is_five_percent():
     assert permutation_p_value(1.0, [0.1] * 200) > 0.0
     assert abs(permutation_p_value(1.0, [0.1] * 200) - 1.0 / 201.0) < 1e-12
     src = (ROOT / "src" / "research" / "evaluations" / "bucket.py").read_text(encoding="utf-8")
-    assert "for _ in range(2000)" in src, "置换次数应提到 2000（分辨率 0.005 → 0.0005）"
+    assert "_n_perm = 2000" in src and "range(_n_perm)" in src, (
+        "置换次数应提到 2000（分辨率 0.005 → 0.0005）"
+    )
     assert "n_comparable_diffs" in src, "单调性必须只统计有限的相邻差（空桶语义）"
 
 
@@ -416,3 +418,47 @@ def test_holdout_token_requires_real_experiment(market, registry):
     assert "LINEAGE_MAX_DEPTH = 32" in (ROOT / "src" / "research" / "holdout.py").read_text(
         encoding="utf-8"
     )
+
+
+# --------------------------------------------------------------------------
+# R25B：数据层/引擎面（首轮系统审查）
+# --------------------------------------------------------------------------
+
+
+def test_no_limit_days_are_not_reported_as_limit(test_db):
+    """R25B-F3（P2）：无涨跌幅限制日不得被判涨/跌停。
+
+    `start_date` 全空 → `listing_day=None` → 旧的 `no_limit` 永不置位，新股上市前 5 日
+    与重整复牌首日被按板带判"涨停/跌停"；实测真实池 21 个 symbol-day 全部误判
+    （13 up + 8 down，命中 100%），并已导致 **6 笔生产订单被拒**（reason=limit_up）。
+    """
+
+    import numpy as np
+    import pandas as pd
+
+    from gateway.tradability import compute_tradability
+
+    days = pd.bdate_range("2024-01-02", periods=12)
+    # 前 6 根横盘，第 7 根起 +306%（超出主板 ±10% 板带且无因子 → 无限制日），
+    # 再往后 2 根 ±10% 恰好触板（**合法**的涨停/跌停止损日）
+    closes = [10.0] * 6 + [40.6, 40.6, 44.66, 49.13, 44.21, 39.79]
+    df = pd.DataFrame({
+        "time": days, "open": closes, "high": closes, "low": closes,
+        "close": closes, "volume": np.full(12, 1e6), "amount": np.array(closes) * 1e6,
+    })
+    test_db.save_market_data("000001.SZ", df, price_mode="raw")
+    test_db.save_market_data("000001.SZ", df, price_mode="qfq")
+    test_db.save_instrument_metadata([{
+        "symbol": "000001.SZ", "name": "测试", "category_l1": "股票", "category_l2": "T",
+        "category_l3": "", "enabled": 1, "asset_type": "stock",
+    }])
+    out = compute_tradability(
+        test_db, symbols=["000001.SZ"], dates=[d.date() for d in days],
+    )
+    row = out[(out["date"].astype(str).str.startswith("2024-01-10"))].iloc[0]   # +306% 那根
+    assert bool(row["no_limit"]) is True, row.to_dict()
+    assert bool(row["is_limit_up"]) is False, "无限制日的 +306% 不得报涨停"
+    assert bool(row["is_limit_down"]) is False
+    # 合法的涨停（正常板带内触板）仍要判出来：注：本夹具第 9 根 +10%（由 40.6 → 44.66）
+    later = out[out["date"].astype(str).str.startswith("2024-01-12")].iloc[0]
+    assert bool(later["is_limit_up"]) is True, later.to_dict()

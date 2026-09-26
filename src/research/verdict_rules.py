@@ -71,6 +71,9 @@ def paired_gate_ok(
     """
     if not isinstance(paired, dict):
         return False
+    # R25A-F11：配对数 <2 时 t 临界退化到最松档（1.645）——与"小样本不给判定"同纪律
+    if int(paired.get("n_pairs") or 0) < 2:
+        return False
     rules = rules or load_rules()
     t_stat = paired.get("t_stat")
     if t_stat is None:

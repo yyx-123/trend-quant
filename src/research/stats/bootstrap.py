@@ -98,6 +98,8 @@ def trade_bootstrap_bands(
         rho = max(0.0, min(acf1, 0.95))
         target = max(round(len(p) ** (1.0 / 3.0)), round((1.0 + rho) / max(1e-6, 1.0 - rho)))
         block = int(max(5, min(target, 50)))
+        # R25A-F10：块长不得 ≥ 序列长度（否则单块循环重抽 → 终值带宽恒为 0）
+        block = int(max(2, min(block, max(1, len(p) // 3))))
 
     def _path_stats(seq: np.ndarray) -> tuple[float, float]:
         equity = initial_equity + np.cumsum(seq)

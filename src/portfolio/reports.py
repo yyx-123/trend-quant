@@ -177,14 +177,6 @@ def return_distribution(nav_rows: list[dict]) -> dict:
 
 def cost_drag(fills: list[dict]) -> dict:
     """成本拖累：费用合计 ÷ 毛收益（A 股成本环境下每条规则的及格线）。"""
-    # R24B-F9：费用口径以 fee_total 为准，缺失时退回 commission+stamp_tax
-    # （此前只认 fee_total，缺键时与 summary.total_trading_cost 互相矛盾：
-    # 同一载荷里 cost.total_fees=0 而 summary.total_trading_cost=21）
-    def _fill_fee(f: dict) -> float:
-        if f.get("fee_total") is not None:
-            return float(f["fee_total"])
-        return float(f.get("commission", 0.0) or 0.0) + float(f.get("stamp_tax", 0.0) or 0.0)
-
     total_fee = sum(_fill_fee(f) for f in fills)
     gross_pnl = 0.0
     # 毛收益 = 卖出成交额 − 买入成交额 的逐笔配对（FIFO per symbol）
@@ -241,9 +233,9 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
                 "exit_price": exit_price,
                 "qty": qty,
                 "pnl_gross": gross,
-                "pnl_net": gross - float(entry.get("fee_total", 0.0)) - float(f.get("fee_total", 0.0)),
+                "pnl_net": gross - _fill_fee(entry) - _fill_fee(f),
                 # R24B-F5：回合级费用合计（买卖两端），供载荷内自洽核对
-                "fee_total": float(entry.get("fee_total", 0.0)) + float(f.get("fee_total", 0.0)),
+                "fee_total": _fill_fee(entry) + _fill_fee(f),
             })
     return rounds
 
@@ -353,6 +345,7 @@ def build_report(
     for g in gate_log:
         gate_by_name[g["gate"]] = gate_by_name.get(g["gate"], 0) + 1
 
+    _round_trips_out = _round_trips_with_net(round_trips, fills)
     report = {
         "run_id": run_id,
         "summary": summary,
@@ -382,13 +375,31 @@ def build_report(
         # 与 summary 的净额口径并存会让同一载荷自相矛盾（实测最小例：round_trips
         # 说赚 5 元、summary 说胜率 0%）。这里统一补上 `pnl_net` 与 `fee_total`，
         # 明确 `pnl_basis`；数值仍以成交配对（净额）为准。
-        "round_trips": _round_trips_with_net(round_trips, fills),
-        "pnl_basis": "net",
+        "round_trips": _round_trips_out,
+        # R25A-F3：`pnl_basis` 按**实际产出条目**推导——匹配不到净额的条目仍带毛额
+        # `pnl`，此时无条件写 "net" 是误导（实测 Σpnl_net=0 而 Σgross=500）。
+        "pnl_basis": (
+            "net" if _round_trips_out
+            and all(r.get("pnl_net") is not None for r in _round_trips_out)
+            else ("net" if not _round_trips_out else "mixed")
+        ),
         "unfilled_by_reason": unfilled_by_reason,
         "gate_rejections": gate_by_name,
         "trade_count": len(fills),
     }
     return report
+
+
+def _fill_fee(f: dict) -> float:
+    """单笔成交的费用：`fee_total` 优先，缺失时回退 `commission + stamp_tax`。
+
+    R24B-F9 / R25A-F4：两套键名形态都必须给同一口径——回合净额（`pair_round_trips`）
+    与费用汇总（`cost_drag`）/成交额（`_traded_amount`）共用本函数，否则同一载荷里
+    "回合 pnl_net 等于毛额"而"cost.total_fees 含费"会自相矛盾（实测差 21.0）。
+    """
+    if f.get("fee_total") is not None:
+        return float(f["fee_total"])
+    return float(f.get("commission", 0.0) or 0.0) + float(f.get("stamp_tax", 0.0) or 0.0)
 
 
 def _round_trips_with_net(
@@ -402,22 +413,33 @@ def _round_trips_with_net(
     """
     if round_trips is None:
         return pair_round_trips(fills)
-    net_by_key = {
-        (str(r.get("symbol", "")), str(r.get("exit_date", ""))[:10]): r
-        for r in pair_round_trips(fills or [])
-    }
+    # R25A-F2：按**逐笔顺序消费**匹配（同 symbol 同 exit_date 的两笔回合各取自己的
+    # 净额）——用 (symbol, exit_date) 当唯一键会让先出现的回合被赋后一条的值
+    # （实测 1489.0 → 489.0；R23B-F9 已在成交侧修过同一形态，R24 在回合侧重新引入）。
+    pending = pair_round_trips(fills or [])
     out: list[dict] = []
+    unmatched = 0
     for rt in round_trips:
         item = dict(rt)
-        key = (str(item.get("symbol", "")), str(item.get("exit_date", ""))[:10])
-        net = net_by_key.get(key)
+        symbol = str(item.get("symbol", ""))
+        exit_day = str(item.get("exit_date", ""))[:10]
+        net = None
+        for idx, cand in enumerate(pending):
+            if (str(cand.get("symbol", "")) == symbol
+                    and str(cand.get("exit_date", ""))[:10] == exit_day):
+                net = pending.pop(idx)
+                break
         if net is not None:
             item.setdefault("pnl_gross", item.get("pnl"))
             item["pnl_net"] = net.get("pnl_net")
             item["fee_total"] = net.get("fee_total")
             if item.get("pnl") is not None and item["pnl_net"] is not None:
                 item["pnl"] = item["pnl_net"]      # 净额口径（与 summary 一致）
+        else:
+            unmatched += 1                  # 匹配不到 → 可见（R25A-F3）
         out.append(item)
+    if unmatched:
+        out[0]["unmatched_round_trips"] = unmatched
     return out
 
 
